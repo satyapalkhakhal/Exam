@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env*
+!.env.example
+!.env.test.example
+!deploy/.env.production.example
+logs/
+coverage/
+.turbo/
+
+# Prisma client output
+apps/api/src/generated/

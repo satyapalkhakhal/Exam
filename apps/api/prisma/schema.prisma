@@ -1,0 +1,427 @@
+// prisma/schema.prisma
+//
+// Data model for the Arihant Recruitment Exam platform (design §11). Tables are
+// snake_case in the DB, camelCase in the client; every PK is a UUID generated
+// by Postgres; every FK is onDelete: Restrict except answer_versions ->
+// answers (Cascade), so exam data can never vanish through a stray delete.
+//
+// Not modeled here, intentionally: the partial unique index
+//   CREATE UNIQUE INDEX uq_exam_attempts_candidate_active
+//     ON exam_attempts (candidate_id) WHERE status <> 'RESET';
+// It enforces "one attempt per candidate unless reset" (a reset keeps the old
+// row as RESET). Prisma cannot declare a partial unique index on an enum
+// predicate, so it is appended as raw SQL to the _init migration; do not drop
+// it when generating future migrations.
+//
+// activity_logs and admin_audit_logs are append-only: the app has no update or
+// delete path for them.
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  // The compiled API runs as native Node ESM (dist/index.js), which does not
+  // add ".js" to extensionless relative imports. These two settings make the
+  // generated client emit "./enums.js"-style specifiers so `node dist/...`
+  // can load it; tsx hid the problem in dev and tests.
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  EVALUATOR
+}
+
+enum ImportKind {
+  CANDIDATES
+  QUESTIONS
+}
+
+enum CandidateStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  SUBMITTED
+  AUTO_SUBMITTED
+  EVALUATED
+  SHORTLISTED
+  REJECTED
+}
+
+enum AttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+  AUTO_SUBMITTED
+  RESET
+}
+
+enum SubmitType {
+  MANUAL
+  AUTO
+}
+
+enum LoginStage {
+  LOGIN
+  EXAM_START
+}
+
+enum LocationPermission {
+  GRANTED
+  DENIED
+  UNAVAILABLE
+  TIMEOUT
+  UNSUPPORTED
+}
+
+enum EvaluationStatus {
+  DRAFT
+  SUBMITTED
+}
+
+model AdminUser {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email            String    @unique
+  passwordHash     String    @map("password_hash")
+  name             String
+  role             AdminRole
+  active           Boolean   @default(true)
+  failedLoginCount Int       @default(0) @map("failed_login_count")
+  lockedUntil      DateTime? @map("locked_until") @db.Timestamptz(6)
+  lastLoginAt      DateTime? @map("last_login_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  importBatches        ImportBatch[]
+  questionEvaluations  QuestionEvaluation[]
+  evaluatedAttempts    AttemptEvaluation[]      @relation("AttemptEvaluator")
+  lockedAttempts       AttemptEvaluation[]      @relation("AttemptLocker")
+  statusHistory        CandidateStatusHistory[]
+  systemConfigsUpdated SystemConfig[]
+  auditLogs            AdminAuditLog[]
+
+  @@map("admin_users")
+}
+
+model JobRole {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name              String   @unique
+  refApplicantCount Int      @default(0) @map("ref_applicant_count")
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  examSetting   ExamSetting?
+  questions     Question[]
+  candidates    Candidate[]
+  importBatches ImportBatch[]
+
+  @@map("job_roles")
+}
+
+model ExamSetting {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  jobRoleId       String    @unique @map("job_role_id") @db.Uuid
+  durationMinutes Int       @default(60) @map("duration_minutes")
+  windowStart     DateTime? @map("window_start") @db.Timestamptz(6)
+  windowEnd       DateTime? @map("window_end") @db.Timestamptz(6)
+  instructions    String    @default("")
+  isOpen          Boolean   @default(false) @map("is_open")
+  questionsLocked Boolean   @default(false) @map("questions_locked")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  jobRole JobRole @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+
+  @@map("exam_settings")
+}
+
+model Question {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  jobRoleId          String   @map("job_role_id") @db.Uuid
+  text               String
+  normalizedTextHash String   @map("normalized_text_hash")
+  maxMarks           Decimal  @map("max_marks") @db.Decimal(6, 1)
+  evaluatorGuidance  String?  @map("evaluator_guidance")
+  displayOrder       Int      @default(0) @map("display_order")
+  active             Boolean  @default(true)
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  jobRole          JobRole           @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  attemptQuestions AttemptQuestion[]
+
+  @@unique([jobRoleId, normalizedTextHash])
+  @@index([jobRoleId, active, displayOrder])
+  @@map("questions")
+}
+
+model ImportBatch {
+  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kind         ImportKind
+  jobRoleId    String?    @map("job_role_id") @db.Uuid
+  fileName     String     @map("file_name")
+  fileHash     String     @map("file_hash")
+  uploadedById String     @map("uploaded_by_id") @db.Uuid
+  total        Int        @default(0)
+  imported     Int        @default(0)
+  skipped      Int        @default(0)
+  errors       Json       @default("[]")
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  jobRole    JobRole?    @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  uploadedBy AdminUser   @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+  candidates Candidate[]
+
+  @@index([kind, createdAt])
+  @@index([fileHash])
+  @@index([uploadedById])
+  @@index([jobRoleId])
+  @@map("import_batches")
+}
+
+model Candidate {
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  candidateCode  String          @unique @map("candidate_code")
+  fullName       String          @map("full_name")
+  email          String          @unique
+  mobile         String?         @unique
+  rollNumber     String?         @map("roll_number")
+  xPercentage    Decimal?        @map("x_percentage") @db.Decimal(5, 2)
+  xiiPercentage  Decimal?        @map("xii_percentage") @db.Decimal(5, 2)
+  majorCpi       Decimal?        @map("major_cpi") @db.Decimal(5, 2)
+  discipline     String?
+  programme      String?
+  extra          Json            @default("{}")
+  jobRoleId      String          @map("job_role_id") @db.Uuid
+  eligible       Boolean         @default(true)
+  locationExempt Boolean         @default(false) @map("location_exempt")
+  status         CandidateStatus @default(NOT_STARTED)
+  importBatchId  String?         @map("import_batch_id") @db.Uuid
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  jobRole      JobRole                  @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  importBatch  ImportBatch?             @relation(fields: [importBatchId], references: [id], onDelete: Restrict)
+  attempts     ExamAttempt[]
+  activityLogs ActivityLog[]
+  loginLogs    CandidateLoginLog[]
+  history      CandidateStatusHistory[]
+
+  @@index([jobRoleId, status])
+  @@index([importBatchId])
+  @@index([rollNumber])
+  @@map("candidates")
+}
+
+model ExamAttempt {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  candidateId     String        @map("candidate_id") @db.Uuid
+  status          AttemptStatus @default(IN_PROGRESS)
+  startedAt       DateTime      @map("started_at") @db.Timestamptz(6)
+  endsAt          DateTime      @map("ends_at") @db.Timestamptz(6)
+  submittedAt     DateTime?     @map("submitted_at") @db.Timestamptz(6)
+  submitType      SubmitType?   @map("submit_type")
+  activeSessionId String        @map("active_session_id")
+  startIp         String        @map("start_ip")
+  userAgent       String        @map("user_agent")
+  totalMarks      Decimal?      @map("total_marks") @db.Decimal(7, 1)
+  maxMarks        Decimal       @map("max_marks") @db.Decimal(7, 1)
+  percentage      Decimal?      @db.Decimal(5, 2)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  candidate    Candidate          @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+  questions    AttemptQuestion[]
+  evaluation   AttemptEvaluation?
+  activityLogs ActivityLog[]
+
+  @@index([candidateId])
+  @@index([status, endsAt])
+  @@map("exam_attempts")
+}
+
+model AttemptQuestion {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  attemptId        String   @map("attempt_id") @db.Uuid
+  questionId       String   @map("question_id") @db.Uuid
+  order            Int
+  textSnapshot     String   @map("text_snapshot")
+  maxMarksSnapshot Decimal  @map("max_marks_snapshot") @db.Decimal(6, 1)
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  attempt    ExamAttempt         @relation(fields: [attemptId], references: [id], onDelete: Restrict)
+  question   Question            @relation(fields: [questionId], references: [id], onDelete: Restrict)
+  answer     Answer?
+  evaluation QuestionEvaluation?
+
+  @@unique([attemptId, questionId])
+  @@index([attemptId, order])
+  @@index([questionId])
+  @@map("attempt_questions")
+}
+
+model Answer {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  attemptQuestionId String   @unique @map("attempt_question_id") @db.Uuid
+  text              String   @default("")
+  wordCount         Int      @default(0) @map("word_count")
+  clientSeq         Int      @default(0) @map("client_seq")
+  lastSavedAt       DateTime @default(now()) @map("last_saved_at") @db.Timestamptz(6)
+  markedForReview   Boolean  @default(false) @map("marked_for_review")
+  visited           Boolean  @default(false)
+  bulkInsertFlags   Int      @default(0) @map("bulk_insert_flags")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  attemptQuestion AttemptQuestion @relation(fields: [attemptQuestionId], references: [id], onDelete: Restrict)
+  versions        AnswerVersion[]
+
+  @@map("answers")
+}
+
+model AnswerVersion {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  answerId  String   @map("answer_id") @db.Uuid
+  text      String
+  wordCount Int      @map("word_count")
+  savedAt   DateTime @default(now()) @map("saved_at") @db.Timestamptz(6)
+
+  answer Answer @relation(fields: [answerId], references: [id], onDelete: Cascade)
+
+  @@index([answerId, savedAt])
+  @@map("answer_versions")
+}
+
+model ActivityLog {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  candidateId String   @map("candidate_id") @db.Uuid
+  attemptId   String?  @map("attempt_id") @db.Uuid
+  eventType   String   @map("event_type")
+  questionId  String?  @map("question_id") @db.Uuid
+  ip          String
+  sessionId   String?  @map("session_id")
+  userAgent   String?  @map("user_agent")
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  candidate Candidate    @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+  attempt   ExamAttempt? @relation(fields: [attemptId], references: [id], onDelete: Restrict)
+
+  @@index([attemptId, createdAt])
+  @@index([candidateId, createdAt])
+  @@index([eventType])
+  @@map("activity_logs")
+}
+
+model CandidateLoginLog {
+  id            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  candidateId   String             @map("candidate_id") @db.Uuid
+  stage         LoginStage
+  permission    LocationPermission
+  latitude      Decimal?           @db.Decimal(9, 6)
+  longitude     Decimal?           @db.Decimal(9, 6)
+  accuracyM     Int?               @map("accuracy_m")
+  ip            String
+  userAgent     String             @map("user_agent")
+  browser       String
+  os            String
+  deviceType    String             @map("device_type")
+  sessionFamily String?            @map("session_family")
+  createdAt     DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+
+  @@index([candidateId, createdAt])
+  @@index([ip])
+  @@map("candidate_login_logs")
+}
+
+model QuestionEvaluation {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  attemptQuestionId String   @unique @map("attempt_question_id") @db.Uuid
+  marks             Decimal? @db.Decimal(6, 1)
+  comment           String?
+  evaluatorId       String   @map("evaluator_id") @db.Uuid
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  attemptQuestion AttemptQuestion @relation(fields: [attemptQuestionId], references: [id], onDelete: Restrict)
+  evaluator       AdminUser       @relation(fields: [evaluatorId], references: [id], onDelete: Restrict)
+
+  @@index([evaluatorId])
+  @@map("question_evaluations")
+}
+
+model AttemptEvaluation {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  attemptId   String           @unique @map("attempt_id") @db.Uuid
+  status      EvaluationStatus @default(DRAFT)
+  evaluatorId String?          @map("evaluator_id") @db.Uuid
+  lockedById  String?          @map("locked_by_id") @db.Uuid
+  lockedAt    DateTime?        @map("locked_at") @db.Timestamptz(6)
+  submittedAt DateTime?        @map("submitted_at") @db.Timestamptz(6)
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  attempt   ExamAttempt @relation(fields: [attemptId], references: [id], onDelete: Restrict)
+  evaluator AdminUser?  @relation("AttemptEvaluator", fields: [evaluatorId], references: [id], onDelete: Restrict)
+  lockedBy  AdminUser?  @relation("AttemptLocker", fields: [lockedById], references: [id], onDelete: Restrict)
+
+  @@index([status])
+  @@index([evaluatorId])
+  @@index([lockedById])
+  @@map("attempt_evaluations")
+}
+
+model CandidateStatusHistory {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  candidateId String           @map("candidate_id") @db.Uuid
+  fromStatus  CandidateStatus? @map("from_status")
+  toStatus    CandidateStatus  @map("to_status")
+  byAdminId   String?          @map("by_admin_id") @db.Uuid
+  comment     String?
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  candidate Candidate  @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+  byAdmin   AdminUser? @relation(fields: [byAdminId], references: [id], onDelete: Restrict)
+
+  @@index([candidateId, createdAt])
+  @@index([byAdminId])
+  @@map("candidate_status_history")
+}
+
+model SystemConfig {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  key         String   @unique
+  value       Json
+  isSecret    Boolean  @default(false) @map("is_secret")
+  updatedById String?  @map("updated_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  updatedBy AdminUser? @relation(fields: [updatedById], references: [id], onDelete: Restrict)
+
+  @@index([updatedById])
+  @@map("system_configs")
+}
+
+model AdminAuditLog {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  adminId   String?  @map("admin_id") @db.Uuid
+  action    String
+  entity    String
+  entityId  String?  @map("entity_id")
+  metadata  Json     @default("{}")
+  ip        String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  admin AdminUser? @relation(fields: [adminId], references: [id], onDelete: Restrict)
+
+  @@index([adminId, createdAt])
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@map("admin_audit_logs")
+}

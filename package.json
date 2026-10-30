@@ -1,0 +1,11 @@
+{
+  "name": "arihant-exam",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.15.0",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "check-types": "pnpm -r check-types",
+    "test": "pnpm -r test"
+  }
+}

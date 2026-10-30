@@ -1,0 +1,61 @@
+# Build decisions (made on your behalf during development, 2026-10-31)
+
+Each line: what was decided — why — what it costs if wrong. Product-impacting ones are summarised in the hand-off message.
+
+- Task 1 installs ALL dependencies for api, web and shared up front; later tasks never run pnpm add/install — avoids lockfile races between parallel agents — cost if wrong: a later agent reports NEEDS_CONTEXT for a missing dep and I install it between dispatches.
+- Task 1 creates apps/web/package.json (deps + scripts only); Task 12 modifies it — keeps one install — cost: none.
+- backend and frontend streams run in parallel (user's explicit request overrides the skill's one-implementer rule); dirs are disjoint (api+shared vs web). Frontend task gates: 12 after 1; 13 after 5; 14 after 9; 15 after 6; 16 after 10; 17 after 11 — the frontend codes against the plan's contracts, and the shared types exist by then — cost if wrong: idle frontend time.
+- "Pause" steps become report-file entries; no mid-run user waits. Manual click-through requests are collected for the final message — user asked to speed up — cost: UI bugs surface later.
+- `candidatesWithoutMobile` is added on the backend in Task 5 (when mounting integrations) — Task 13 is frontend-only — cost: none.
+- Task 10 wires the real flagCount into the Task 9 candidate list — cost: none.
+- implementers write integration tests and run them only if exam_test is reachable and migrated (they never migrate it themselves); otherwise they record "int tests not run: no exam_test" — user rule on migrations — cost: integration bugs found later, when the user runs them.
+- no git worktree — exam/ is a new untracked folder and the user forbids commits; snapshot diffs replace commit ranges — cost: none.
+- user said "you can setup that" (2026-10-31) → controller creates exam_db/exam_test (done, timezone UTC) and, after Task 2, applies migrations + seed to exam_db and exam_test itself — explicit user authorization for these two new DBs only; CRM DBs untouched — cost if wrong: drop the two DBs.
+- Redis tests/BullMQ use local redis://localhost:6379 with distinct key prefix `exam:` and BullMQ prefix `exam` so CRM keys are never touched; integration tests use Redis DB index 15 — cost: none.
+- Task 1 review runs in parallel with Tasks 2 and 12 (speed, user request); any Task 1 fix is limited to the files Task 1 created — cost: a small merge risk with Task 2 edits to apps/api/package.json.
+- `/me` contracts are fixed as: GET /api/admin/auth/me → {admin: AdminSelf}; GET /api/candidate/me → {candidate: CandidateSelf}. Tasks 5/6 must return exactly these — matches Task 12's assumption — cost: none.
+- apiFetch path is relative to /api/{area}; every later frontend task follows it — cost: none.
+- the /location redirect belongs to Task 15 (the candidate Login page navigates there after verify; Dashboard shows the banner) — matches design §7.2a (login is allowed without location) — cost: none.
+- relax frontend gating — the frontend proceeds 13→17 back-to-back, coding against the plan's Interfaces contracts instead of waiting for each backend task — user asked for speed; contracts are exact in the plan — cost if wrong: contract mismatches surface in the final cross-check (the controller will run an API↔web contract check before the final review).
+- every paginated list endpoint returns {items, total, page, pageSize}; backend tasks 5,8,9,11 must follow — plan was silent — cost: none.
+- GET /api/admin/dashboard → {roles:[{jobRoleId, jobRoleName, refApplicantCount, imported, notStarted, inProgress, submitted, autoSubmitted, evaluated, shortlisted, rejected, pendingEvaluation}]}; Task 11 must return exactly this — pins Task 13's guess — cost: none.
+- PATCH /api/admin/users/:id reset-password field is `password`; admin OTP resend = repeat POST /auth/login (new challengeId, OTP cooldown applies) — plan silent, both reasonable — cost: none.
+- PUT integrations accepts "" for optional non-secret fields (replyTo) — Task 3 schema must allow it — cost: none.
+- security finding (baseUrl change + stored secret = credential exfil/SSRF) → https-only, re-enter secrets on baseUrl change, reject loopback/private/link-local/localhost hosts; no single-host pin (gateway hosts may change) — cost if wrong: an admin must re-type the creds when changing the URL.
+- DNS-rebinding SSRF is out of scope for v1 (only a Super Admin can set the URL; https + private-IP-literal block + re-enter-secrets cover the exfil risk) — cost if wrong: a SA could point at a hostname that resolves internally; they could only reach it with secrets they typed themselves.
+- the Task 4 Important fix is routed to the Task 5 implementer (already editing otp.service.ts per an earlier ruling) to avoid two agents in one file; Task 4 completes after a scoped re-review of that change — cost: Task 4 completion waits on Task 5.
+- where the plan leaves DTO field names open, the frontend's documented assumptions (task-13-report.md, task-14-report.md, and later frontend reports) ARE the contract; backend implementers of Tasks 5,7,8,9,11 are pointed at them and must conform or report a conflict — avoids rework on the side with more code — cost: backend names may be less idiomatic.
+- new endpoint GET /api/candidate/exam/info → {durationMinutes, windowStart|null, windowEnd|null, instructions, isOpen, serverNow} for the candidate dashboard (plan gap: CandidateSelf lacks settings); backend adds it in Task 6 — cost: none.
+- POST /api/candidate/location returns {locationCaptured, ip, browser, os, deviceType}; POST /exam/start's `location` object may include `stage` (the server ignores it and always records EXAM_START) — backend Tasks 6/10 conform — cost: none.
+- Try again on the dashboard records stage LOGIN (that is what sets locationCaptured); the EXAM_START row is still written by /exam/start — cost: none.
+- Task 17 runs in parallel with Task 16 (both frontend, disjoint files; App.tsx edits limited to replacing its own placeholder routes) — user asked for speed — cost: a possible App.tsx edit collision, caught by build.
+- PUT evaluation without holding the lock returns 423 EVALUATION_LOCKED (same code as held-by-other; details.lockedBy null when nobody holds it) — Task 11 conforms — cost: none.
+- ACCOUNT_LOCKED stays as the design requires (it reveals the lock state of an existing email; mitigated by the IP+email rate limit and the reset CLI) — cost: admin-email enumeration is possible after 5 failures.
+- >5 truly concurrent tries on one OTP fail closed (a correct code may be refused) — acceptable; never a double success — cost: a rare retry for the user.
+- DELETE /submissions/:id/lock only releases the caller's own lock (no-op 204 otherwise) — Task 11 conforms; makes the frontend minor harmless — cost: none.
+- showing "(N marks)" per question is correct (design §7.4 "Marks allocated"); whole-page copy/paste block is per design §7.4; /submitted needs no guard (shows only a thank-you) — cost: none.
+- the sessionsValidAfter check in authenticateCandidate is folded into the Task 5 fix round (same tokens.ts change) — cost: none.
+- candidate enumeration via OTP_COOLDOWN / OTP_EXPIRED vs OTP_INVALID is accepted (the brief mandates surfacing the cooldown; candidate emails are low-sensitivity and come from HR) — cost: an attacker can confirm a candidate email is registered.
+- integration suites run serially (concurrency 1) and never by two agents at once; the controller schedules it — cost: none.
+- per-IP OTP limits raised for campus NAT: request-otp 300/10 min per IP (per-identifier stays 5/10 min), verify-otp 300/10 min per IP; /location gets 30/10 min per candidate — 461 candidates may share one college IP — cost: a weaker per-IP brute-force guard (per-identifier limits and the OTP attempt cap still hold).
+- STALE must never clear the local mirror or count as saved unless the server's stored text equals what we sent; otherwise bump clientSeq above the server's and resend — defense in depth beyond tab ownership — cost: an extra save request in rare races.
+- Task 9 must call revokeAllSessions('candidate', id) on eligibility disable and attempt reset; the frontend adds a 'Sign out everywhere' action in the final contract pass — cost: none.
+- Task 10's exam start sets questionsLocked inside the attempt transaction AFTER `SELECT … FOR UPDATE` on the role's exam_settings row, and Task 8's question writes take the same row lock before checking questionsLocked — closes the check/write race — cost: brief row contention on question edits.
+- readSheet returns {headers, rows, rowNumbers} (rowNumbers[i] = the 1-based Excel/CSV source line of rows[i]); parsers use rowNumbers — additive, Task 9 adopts it — cost: none.
+- Task 10 exposes exam.getFlags(candidateId) and a batch getFlagCounts(candidateIds) but does NOT edit the candidates module (Task 9 is in flight there); wiring flagCount into the candidate list is a small follow-up after both land — cost: one extra dispatch.
+- zip guard = structural checks (the CD ends exactly at the EOCD, parsed entries == count, comment length consistent, no extra CD signature) + a bounded pre-inflate of every entry with zlib.inflateRawSync({maxOutputLength}) and a total budget before exceljs sees the buffer — upload is Super-Admin-only, so this is defense in depth — cost: a small parse overhead.
+- security finding (backup perms) → umask 077, 700 dir, 600 files, atomic temp+mv, pipefail, optional age encryption — sent to Task 18 — cost: none.
+- purge-candidates also nulls ip/userAgent in activity_logs for purged candidates — a retention-driven ops exception to append-only (app code still has no update path) — cost: forensic detail lost after the retention period, which is the point.
+- container/network/volume names carry the env suffix (exam_api_uat / exam_api_production…) so UAT and prod can share a host — cost: none.
+- CSP allows fonts.googleapis.com (style-src) and fonts.gstatic.com (font-src) rather than self-hosting — no web change needed — cost: candidates' browsers contact Google Fonts.
+- nginx candidate-auth limit_req raised to 50r/s burst 200 per IP (the app limiters remain the real guard) — campus NAT — cost: weaker outer layer.
+- BullMQ jobId `attempt-{id}` (BullMQ rejects a single colon) — cost: none.
+- the refresh-cookie fallback for beacon/events uses an exam:exfam:{family}→candidate binding set at start/resume/GET /exam (tokens.ts untouched) — cost: one Redis key per session.
+- a repeated start on IN_PROGRESS = a takeover (new sessionId, SESSION_TAKEOVER) — consistent with resume — cost: none.
+- flagCount = paste/copy/cut/drop attempts + bulk-insert flags + IP changes + location flags + (1 if tabHidden ≥ 3); a single blur/tab switch does NOT count — avoids flagging everyone — cost: low-volume tab switching is visible only in the detail view.
+- the start check order is changed so an existing SUBMITTED/AUTO_SUBMITTED attempt returns ALREADY_ATTEMPTED before the availability check — clearer for candidates — cost: none.
+- tests needing the sweep must create isolated data; the sweep's global scope is correct for production — cost: none.
+- the rare deadlock (an admin unlock during a start burst) → no retry in v1; questions shouldn't be unlocked mid-exam (the UI warns) — cost: one 500 the candidate retries.
+- security finding (ALLOW_STATIC_OTP fail-open) → default false, explicit true in examples, a loud boot warning in production; NOT a boot refusal (the user explicitly wants static OTP until creds are entered, possibly on the server) — cost: an operator could forget to flip it; mitigated by the warning, the go-live checklist, and auto-off once a channel is enabled.
+- re-choosing the same decision → 409 is fine; the results module mounted at /admin with per-route authorize is fine.
+- N1 is NOT fixed in-session (the one-fix-wave cap) — surfaced to the user with a recommended fix (apply the grace only when the IP+UA hash matches the rotating request) — cost if wrong: a stolen refresh cookie (httpOnly, SameSite=Strict) could outlive the victim's reuse for one session.
