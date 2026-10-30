@@ -13,6 +13,32 @@ export function useRequestOtp() {
   });
 }
 
+export interface MobileLinkBody {
+  email: string;
+  rollNumber: string;
+  mobile: string;
+}
+
+/** First-time mobile registration: always 200 {sent:true} like request-otp, except 429 OTP_COOLDOWN. */
+export function useRequestMobileLink() {
+  return useMutation({
+    mutationFn: (body: MobileLinkBody) =>
+      apiFetch<{ sent: true }>('candidate', '/auth/register-mobile/request', { method: 'POST', json: body, noRedirect: true }),
+  });
+}
+
+/** Links the mobile and signs the candidate in (sets the cookies, returns the profile). */
+export function useVerifyMobileLink() {
+  return useMutation({
+    mutationFn: (body: MobileLinkBody & { code: string }) =>
+      apiFetch<{ candidate: CandidateSelf }>('candidate', '/auth/register-mobile/verify', {
+        method: 'POST',
+        json: body,
+        noRedirect: true,
+      }),
+  });
+}
+
 export function useCandidateVerifyOtp() {
   return useMutation({
     mutationFn: (body: { identifier: string; code: string }) =>

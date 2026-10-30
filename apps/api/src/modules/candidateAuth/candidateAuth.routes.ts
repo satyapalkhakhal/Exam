@@ -1,10 +1,13 @@
 // modules/candidateAuth/candidateAuth.routes.ts
 // /api/candidate: the public auth endpoints (rate limited per IP and
-// identifier; refresh and logout work from the refresh cookie alone), then the
+// identifier; refresh and logout work from the refresh cookie alone), the
+// first-time mobile registration (limited per IP and email), then the
 // session-protected reads and the location capture.
 
 import { Router } from 'express';
 import {
+  CandidateMobileLinkRequestSchema,
+  CandidateMobileLinkVerifySchema,
   CandidateRequestOtpSchema,
   CandidateVerifyOtpSchema,
   LocationPayloadSchema,
@@ -13,6 +16,9 @@ import { authenticateCandidate } from '../../shared/middleware/authenticateCandi
 import {
   candidateOtpIdentifierLimiter,
   candidateLocationLimiter,
+  candidateMobileLinkIpLimiter,
+  candidateMobileLinkRequestLimiter,
+  candidateMobileLinkVerifyLimiter,
   candidateOtpIpLimiter,
   candidateVerifyIdentifierLimiter,
   candidateVerifyLimiter,
@@ -33,6 +39,20 @@ export function createCandidateAuthRouter(service: CandidateAuthService): Router
     c.requestOtp,
   );
   r.post('/auth/verify-otp', candidateVerifyLimiter, candidateVerifyIdentifierLimiter, validate({ body: CandidateVerifyOtpSchema }), c.verifyOtp);
+  r.post(
+    '/auth/register-mobile/request',
+    candidateMobileLinkIpLimiter,
+    candidateMobileLinkRequestLimiter,
+    validate({ body: CandidateMobileLinkRequestSchema }),
+    c.requestMobileLink,
+  );
+  r.post(
+    '/auth/register-mobile/verify',
+    candidateMobileLinkIpLimiter,
+    candidateMobileLinkVerifyLimiter,
+    validate({ body: CandidateMobileLinkVerifySchema }),
+    c.verifyMobileLink,
+  );
   r.post('/auth/refresh', c.refresh);
   r.post('/auth/logout', c.logout);
   r.get('/me', auth, c.me);

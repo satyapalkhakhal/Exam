@@ -4,6 +4,7 @@
 // mobile; coordinates are range-checked and required together with GRANTED.
 
 import { z } from 'zod';
+import { normalizeMobile } from './candidates.js';
 
 const email = z.string().trim().toLowerCase().email().max(254);
 const mobile = z.string().trim().regex(/^\d{10}$/, 'Enter a 10-digit mobile number');
@@ -20,6 +21,33 @@ export const CandidateVerifyOtpSchema = z.object({
   code: z.string().regex(/^\d{6}$/, 'Enter the 6-digit code'),
 });
 export type CandidateVerifyOtpInput = z.infer<typeof CandidateVerifyOtpSchema>;
+
+// First-time mobile registration: email + roll number identify the imported
+// candidate, the SMS code proves the mobile. Mobile is normalised the same way
+// as the import (+91 / 0 prefixes and separators stripped, must start 6-9).
+const linkMobile = z
+  .string()
+  .trim()
+  .transform((v, ctx) => {
+    const m = normalizeMobile(v);
+    if (m === null) {
+      ctx.addIssue({ code: 'custom', message: 'Enter a 10-digit Indian mobile number' });
+      return z.NEVER;
+    }
+    return m;
+  });
+
+export const CandidateMobileLinkRequestSchema = z.object({
+  email,
+  rollNumber: z.string().trim().min(1, 'Enter your roll number').max(200),
+  mobile: linkMobile,
+});
+export type CandidateMobileLinkRequestInput = z.infer<typeof CandidateMobileLinkRequestSchema>;
+
+export const CandidateMobileLinkVerifySchema = CandidateMobileLinkRequestSchema.extend({
+  code: z.string().regex(/^\d{6}$/, 'Enter the 6-digit code'),
+});
+export type CandidateMobileLinkVerifyInput = z.infer<typeof CandidateMobileLinkVerifySchema>;
 
 export const LocationStageSchema = z.enum(['LOGIN', 'EXAM_START']);
 export const LocationPermissionSchema = z.enum(['GRANTED', 'DENIED', 'UNAVAILABLE', 'TIMEOUT', 'UNSUPPORTED']);

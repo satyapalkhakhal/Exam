@@ -5,7 +5,7 @@
 // with their activity event so the two cannot drift apart.
 
 import { prisma } from '../../infrastructure/db/prisma.js';
-import type { Prisma } from '../../generated/prisma/client.js';
+import { Prisma } from '../../generated/prisma/client.js';
 import type { CandidateAuthRepository } from './candidateAuth.service.js';
 
 const selfSelect = {
@@ -14,6 +14,7 @@ const selfSelect = {
   fullName: true,
   email: true,
   mobile: true,
+  rollNumber: true,
   status: true,
   eligible: true,
   locationExempt: true,
@@ -28,6 +29,18 @@ export const candidateAuthRepository: CandidateAuthRepository = {
 
   findById(id) {
     return prisma.candidate.findUnique({ where: { id }, select: selfSelect });
+  },
+
+  // Link-once: the update only matches while the slot is empty, so two racing
+  // registrations cannot both win; the unique index catches a mobile taken meanwhile.
+  async linkMobile(candidateId, mobile) {
+    try {
+      const r = await prisma.candidate.updateMany({ where: { id: candidateId, mobile: null }, data: { mobile } });
+      return r.count === 1 ? 'linked' : 'already_linked';
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') return 'mobile_in_use';
+      throw err;
+    }
   },
 
   async hasGrantedLogin(candidateId, sessionFamily) {

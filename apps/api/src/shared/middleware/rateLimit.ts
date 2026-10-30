@@ -120,6 +120,36 @@ export const candidateVerifyIdentifierLimiter = lazyLimiter({
   skip: skipJunkIdentifier,
 });
 
+// Mobile registration bodies carry `email`, not `identifier`. Keyed on the email,
+// so one candidate's slot cannot be hammered; junk emails skip the bucket as above.
+const skipJunkEmail = (req: Request): boolean => !EMAIL_SHAPE.test(bodyEmail(req));
+
+/** Mobile registration, send code: 5 per 10 min per email (each one is an SMS). */
+export const candidateMobileLinkRequestLimiter = lazyLimiter({
+  name: 'candLinkReq',
+  windowMs: 10 * 60_000,
+  limit: 5,
+  key: bodyEmail,
+  skip: skipJunkEmail,
+});
+
+/** Mobile registration, verify: 10 per 10 min per email (each code also allows only 5 tries). */
+export const candidateMobileLinkVerifyLimiter = lazyLimiter({
+  name: 'candLinkVerify',
+  windowMs: 10 * 60_000,
+  limit: 10,
+  key: bodyEmail,
+  skip: skipJunkEmail,
+});
+
+/** Mobile registration, both steps: the shared-NAT ceiling, per IP. */
+export const candidateMobileLinkIpLimiter = lazyLimiter({
+  name: 'candLinkIp',
+  windowMs: 10 * 60_000,
+  limit: CANDIDATE_OTP_IP_LIMIT,
+  key: (req) => ipOf(req),
+});
+
 /** Location capture: 30 per 10 min per signed-in candidate (mount after authenticateCandidate). */
 export const candidateLocationLimiter = lazyLimiter({
   name: 'candLocation',

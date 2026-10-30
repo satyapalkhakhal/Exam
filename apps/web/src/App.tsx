@@ -9,6 +9,7 @@ import { AdminRole } from '@exam/shared';
 import { AdminRoute } from '@/components/layout/AdminRoute';
 import { CandidateRoute } from '@/components/layout/CandidateRoute';
 import CandidateLogin from '@/pages/candidate/Login';
+import CandidateRegister from '@/pages/candidate/Register';
 import CandidateLocation from '@/pages/candidate/Location';
 import CandidateDashboard from '@/pages/candidate/Dashboard';
 import CandidateExam from '@/pages/candidate/Exam';
@@ -36,6 +37,7 @@ export function App() {
     <Suspense fallback={Fallback}>
       <Routes>
         <Route path="/login" element={<CandidateLogin />} />
+        <Route path="/register" element={<CandidateRegister />} />
         <Route element={<CandidateRoute />}>
           <Route path="/location" element={<CandidateLocation />} />
           <Route path="/dashboard" element={<CandidateDashboard />} />

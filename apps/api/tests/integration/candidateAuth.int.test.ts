@@ -14,6 +14,8 @@ const EMAIL = 'cand@int.test';
 let app: Express;
 let candidateId = '';
 let roleId = '';
+const REG_EMAIL = 'reg@int.test';
+let regId = '';
 
 before(async () => {
   assert.match(env.DATABASE_URL, /\/exam_test(\?|$)/);
@@ -33,6 +35,10 @@ before(async () => {
   await prisma.candidate.create({
     data: { candidateCode: 'C-002', fullName: 'Not Eligible', email: 'no@int.test', mobile: '9000000002', jobRoleId: role.id, eligible: false },
   });
+  const r = await prisma.candidate.create({
+    data: { candidateCode: 'C-003', fullName: 'Ravi Nair', email: REG_EMAIL, rollNumber: 'R-003', jobRoleId: role.id },
+  });
+  regId = r.id;
   app = createApp();
 });
 
@@ -336,4 +342,75 @@ test('email case variants share one per-identifier bucket', async () => {
     last = (await request(app).post('/api/candidate/auth/request-otp').send({ identifier: i % 2 ? 'A@x.com' : 'a@x.com' })).status;
   }
   assert.equal(last, 429);
+});
+
+// --- first-time mobile registration -------------------------------------------
+
+const REG = { email: REG_EMAIL, rollNumber: 'R-003', mobile: '9123456780' };
+const linkKeys = () => getRedis().keys('exam:otp:candidate_mobile_link:*');
+
+test('register-mobile: matching email + roll sends a code bound to (candidate, mobile); +91 and spaces are accepted', async () => {
+  await prisma.candidate.update({ where: { id: regId }, data: { mobile: null } });
+  const res = await request(app).post('/api/candidate/auth/register-mobile/request').send({ ...REG, mobile: '+91 91234 56780' });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.deepEqual(res.body, { success: true, data: { sent: true } });
+  assert.deepEqual(await linkKeys(), [`exam:otp:candidate_mobile_link:${regId}:9123456780`]);
+});
+
+test('register-mobile: wrong roll, unknown email, a mobile already used and an invalid mobile send nothing', async () => {
+  await prisma.candidate.update({ where: { id: regId }, data: { mobile: null } });
+  for (const body of [
+    { ...REG, rollNumber: 'R-999' },
+    { ...REG, email: 'ghost@int.test' },
+    { ...REG, mobile: '9876543210' },
+  ]) {
+    const res = await request(app).post('/api/candidate/auth/register-mobile/request').send(body);
+    assert.deepEqual(res.body, { success: true, data: { sent: true } });
+  }
+  assert.deepEqual(await linkKeys(), []);
+  const bad = await request(app).post('/api/candidate/auth/register-mobile/request').send({ ...REG, mobile: '12345' });
+  assert.equal(bad.status, 400);
+});
+
+test('register-mobile: verify links the mobile, signs in, logs it; the mobile then works for login and cannot be re-linked', async () => {
+  await prisma.candidate.update({ where: { id: regId }, data: { mobile: null } });
+  const agent = request.agent(app);
+  assert.equal((await agent.post('/api/candidate/auth/register-mobile/request').send(REG)).status, 200);
+  const wrongMobile = await agent.post('/api/candidate/auth/register-mobile/verify').send({ ...REG, mobile: '9123456781', code: '123456' });
+  assert.equal(wrongMobile.status, 400, 'a code is only good for the number it was sent to');
+
+  const v = await agent.post('/api/candidate/auth/register-mobile/verify').send({ ...REG, code: '123456' });
+  assert.equal(v.status, 200, JSON.stringify(v.body));
+  assert.equal(v.body.data.candidate.id, regId);
+  assert.ok(cookies(v).some((c) => c.startsWith('exam_cand_at=')));
+  assert.equal((await agent.get('/api/candidate/me')).status, 200);
+
+  const row = await prisma.candidate.findUniqueOrThrow({ where: { id: regId } });
+  assert.equal(row.mobile, '9123456780');
+  const ev = await prisma.activityLog.findFirst({ where: { candidateId: regId, eventType: 'MOBILE_SELF_REGISTERED' } });
+  assert.ok(ev);
+  const audit = await prisma.adminAuditLog.findFirst({ where: { entityId: regId, action: 'CANDIDATE_MOBILE_SELF_REGISTERED' } });
+  assert.ok(audit);
+
+  await getRedis().flushdb();
+  await signIn('9123456780');
+
+  await getRedis().flushdb();
+  const again = await request(app).post('/api/candidate/auth/register-mobile/request').send({ ...REG, mobile: '9123456789' });
+  assert.deepEqual(again.body, { success: true, data: { sent: true } });
+  assert.deepEqual(await linkKeys(), []);
+  const refused = await prisma.activityLog.findFirst({ where: { candidateId: regId, eventType: 'MOBILE_LINK_REFUSED' } });
+  assert.ok(refused);
+});
+
+test('register-mobile/request is limited to 5 per email per window', async () => {
+  await prisma.candidate.update({ where: { id: regId }, data: { mobile: null } });
+  const statuses: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    // Clear the 60 s per-code cooldown so only the per-email limiter can refuse.
+    const otpKeys = await getRedis().keys('exam:otp:*');
+    if (otpKeys.length) await getRedis().del(...otpKeys);
+    statuses.push((await request(app).post('/api/candidate/auth/register-mobile/request').send(REG)).status);
+  }
+  assert.deepEqual(statuses, [200, 200, 200, 200, 200, 429]);
 });

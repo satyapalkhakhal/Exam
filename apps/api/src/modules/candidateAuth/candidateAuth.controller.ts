@@ -37,6 +37,12 @@ export function createCandidateAuthController(service: CandidateAuthService) {
     verifyOtp: wrap(async (req, res) =>
       respondSignedIn(res, await service.verifyOtp({ ...req.body, client: clientInfo(req) })),
     ),
+    requestMobileLink: wrap(async (req, res) =>
+      ok(res, await service.requestMobileLink({ ...req.body, client: clientInfo(req) })),
+    ),
+    verifyMobileLink: wrap(async (req, res) =>
+      respondSignedIn(res, await service.verifyMobileLink({ ...req.body, client: clientInfo(req) })),
+    ),
     refresh: wrap(async (req, res) => {
       try {
         return respondSignedIn(res, await service.refresh(refreshCookie(req)));

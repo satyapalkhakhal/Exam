@@ -6,7 +6,7 @@ import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Navigate, useNavigate } from 'react-router';
+import { Link, Navigate, useNavigate } from 'react-router';
 import { AuthPageShell, ServerErrorNotice } from '@/components/auth/AuthPageShell';
 import { OtpForm } from '@/components/auth/OtpForm';
 import { Button } from '@/components/ui/button';
@@ -97,6 +97,9 @@ export default function CandidateLogin() {
           {request.isPending ? 'Sending…' : 'Send code'}
         </Button>
       </form>
+      <p className="mt-4 text-center text-sm text-muted-foreground">
+        First time? <Link to="/register" className="text-primary hover:underline">Register your mobile number</Link>
+      </p>
     </AuthPageShell>
   );
 }

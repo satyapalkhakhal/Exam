@@ -4,6 +4,11 @@
 //   undeliverable all return the same {sent:true}; only OTP_COOLDOWN is
 //   surfaced. Delivery problems go to the audit log and the candidate's
 //   activity log, where HR can see them.
+// - Mobile registration (first login for candidates imported without a mobile):
+//   email + roll number pick the candidate, an SMS code sent only to the typed
+//   mobile proves the phone, and the mobile is linked once. The code is bound to
+//   (candidate, mobile), so it cannot verify a different number. Request replies
+//   are generic like request-otp; refusals go to the activity log for HR.
 // - verify-otp gives OTP_INVALID for an unknown identifier, an ineligible
 //   candidate and a wrong code alike.
 // - A login is a refresh-token family. The family id rides in the access token
@@ -13,7 +18,8 @@
 
 import type { CandidateSelf } from '@exam/shared';
 import { logger } from '../../infrastructure/logger/logger.js';
-import { AppError, unauthorized } from '../../shared/errors.js';
+import { AppError, conflict, unauthorized } from '../../shared/errors.js';
+import { maskMobile } from '../../shared/utils/piiMask.js';
 import type { ClientInfo } from '../../shared/utils/clientInfo.js';
 import type { AuditRecord } from '../audit/index.js';
 import { issueRefreshToken, peekRefreshFamily, revokeRefreshToken, rotateRefreshToken, signAccess } from '../adminAuth/tokens.js';
@@ -24,6 +30,7 @@ export interface CandidateAuthRecord {
   fullName: string;
   email: string;
   mobile: string | null;
+  rollNumber: string | null;
   status: string;
   eligible: boolean;
   locationExempt: boolean;
@@ -53,6 +60,7 @@ export interface ExamSettingRow {
 export interface CandidateAuthRepository {
   findByIdentifier(identifier: string): Promise<CandidateAuthRecord | null>;
   findById(id: string): Promise<CandidateAuthRecord | null>;
+  linkMobile(candidateId: string, mobile: string): Promise<'linked' | 'already_linked' | 'mobile_in_use'>;
   hasGrantedLogin(candidateId: string, sessionFamily: string): Promise<boolean>;
   recordLocation(entry: LocationEntry): Promise<void>;
   recordActivity(entry: {
@@ -70,11 +78,11 @@ export interface CandidateAuthDeps {
   audit: (entry: AuditRecord) => Promise<void>;
   otp: {
     issue: (p: {
-      purpose: 'candidate_login';
+      purpose: 'candidate_login' | 'candidate_mobile_link';
       subjectId: string;
-      recipient: { email: string; mobile: string | null };
+      recipient: { email: string | null; mobile: string | null };
     }) => Promise<unknown>;
-    verify: (p: { purpose: 'candidate_login'; subjectId: string; code: string }) => Promise<void>;
+    verify: (p: { purpose: 'candidate_login' | 'candidate_mobile_link'; subjectId: string; code: string }) => Promise<void>;
   };
   now?: () => Date;
 }
@@ -86,6 +94,11 @@ export interface CandidateSignedIn {
 }
 
 const AUTH = 'candidate_auth';
+const LINK = 'candidate_mobile_link';
+// The code is issued per (candidate, mobile), so it only ever verifies the number it was sent to.
+const linkSubject = (candidateId: string, mobile: string) => `${candidateId}:${mobile}`;
+const sameRoll = (stored: string | null, typed: string) =>
+  stored !== null && stored.trim().toLowerCase() === typed.trim().toLowerCase();
 const invalidOtp = () => new AppError(400, 'OTP_INVALID', 'Incorrect code.');
 
 const EVENT_BY_PERMISSION: Record<LocationEntry['permission'], string> = {
@@ -165,6 +178,72 @@ export function createCandidateAuthService(deps: CandidateAuthDeps) {
     return mint(candidate, await issueRefreshToken('candidate', candidate.id));
   }
 
+  type LinkInput = { email: string; rollNumber: string; mobile: string; client: ClientInfo };
+
+  // The IP is repeated in metadata because the candidate page shows metadata, not the ip column.
+  const logLink = (candidateId: string, eventType: string, client: ClientInfo, metadata: Record<string, unknown>) =>
+    deps.repo.recordActivity({ candidateId, eventType, ip: client.ip, userAgent: client.userAgent, metadata: { ...metadata, ip: client.ip } });
+
+  /** Matches only an eligible candidate whose roll number agrees; null otherwise. */
+  async function findForLink(email: string, rollNumber: string): Promise<CandidateAuthRecord | null> {
+    const c = await deps.repo.findByIdentifier(email);
+    return c && c.eligible && sameRoll(c.rollNumber, rollNumber) ? c : null;
+  }
+
+  async function requestMobileLink(input: LinkInput): Promise<{ sent: true }> {
+    const candidate = await findForLink(input.email, input.rollNumber);
+    if (!candidate) return { sent: true };
+    if (candidate.mobile !== null) {
+      // Someone tried to register a phone on an account that already has one: HR should see it.
+      await logLink(candidate.id, 'MOBILE_LINK_REFUSED', input.client, { reason: 'already_linked', mobile: maskMobile(input.mobile) });
+      return { sent: true };
+    }
+    const holder = await deps.repo.findByIdentifier(input.mobile);
+    if (holder) {
+      await logLink(candidate.id, 'MOBILE_LINK_REFUSED', input.client, { reason: 'mobile_in_use', mobile: maskMobile(input.mobile) });
+      return { sent: true };
+    }
+    try {
+      await deps.otp.issue({
+        purpose: LINK,
+        subjectId: linkSubject(candidate.id, input.mobile),
+        recipient: { email: null, mobile: input.mobile },
+      });
+    } catch (err) {
+      if (err instanceof AppError && err.code === 'OTP_COOLDOWN') throw err;
+      const reason = err instanceof AppError ? err.code : 'delivery_error';
+      logger.warn('Mobile registration OTP could not be issued', { reason });
+      await deps.audit({ adminId: null, action: 'CANDIDATE_OTP_FAILED', entity: LINK, entityId: candidate.id, ip: input.client.ip, metadata: { reason } });
+      await logLink(candidate.id, 'OTP_DELIVERY_FAILED', input.client, { reason, purpose: LINK });
+    }
+    return { sent: true };
+  }
+
+  async function verifyMobileLink(input: LinkInput & { code: string }): Promise<CandidateSignedIn> {
+    const candidate = await findForLink(input.email, input.rollNumber);
+    if (!candidate || candidate.mobile !== null) throw invalidOtp();
+    await deps.otp.verify({ purpose: LINK, subjectId: linkSubject(candidate.id, input.mobile), code: input.code });
+
+    const outcome = await deps.repo.linkMobile(candidate.id, input.mobile);
+    if (outcome === 'mobile_in_use') {
+      throw conflict('This mobile number is already registered to another candidate. Please contact HR.');
+    }
+    if (outcome === 'already_linked') throw invalidOtp();
+
+    const masked = maskMobile(input.mobile);
+    await logLink(candidate.id, 'MOBILE_SELF_REGISTERED', input.client, { mobile: masked });
+    await deps.audit({
+      adminId: null,
+      action: 'CANDIDATE_MOBILE_SELF_REGISTERED',
+      entity: LINK,
+      entityId: candidate.id,
+      ip: input.client.ip,
+      metadata: { mobile: masked },
+    });
+    const linked = { ...candidate, mobile: input.mobile };
+    return mint(linked, await issueRefreshToken('candidate', linked.id));
+  }
+
   async function refresh(refreshToken: string | undefined): Promise<CandidateSignedIn> {
     if (!refreshToken) throw unauthorized();
     const rotated = await rotateRefreshToken('candidate', refreshToken);
@@ -238,7 +317,7 @@ export function createCandidateAuthService(deps: CandidateAuthDeps) {
     };
   }
 
-  return { requestOtp, verifyOtp, refresh, logout, isActive, me, recordLocation, examInfo };
+  return { requestOtp, verifyOtp, requestMobileLink, verifyMobileLink, refresh, logout, isActive, me, recordLocation, examInfo };
 }
 
 export type CandidateAuthService = ReturnType<typeof createCandidateAuthService>;

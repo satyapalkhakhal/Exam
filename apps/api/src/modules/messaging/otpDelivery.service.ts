@@ -12,9 +12,10 @@ import { sendSms } from './sms.client.js';
 import { sendEmail } from './email.client.js';
 import { getSmsConfig, getEmailConfig, isChannelReady, type SmsConfig, type EmailConfig } from './messaging.config.js';
 
-export type OtpPurpose = 'admin_login' | 'candidate_login';
+export type OtpPurpose = 'admin_login' | 'candidate_login' | 'candidate_mobile_link';
 export interface OtpRecipient {
-  email: string;
+  /** null when only the mobile may receive the code (mobile registration proves the phone). */
+  email: string | null;
   mobile: string | null;
 }
 export type OtpChannel = 'sms' | 'email';
@@ -32,6 +33,11 @@ const EMAIL_COPY: Record<OtpPurpose, { subject: string; action: string }> = {
   candidate_login: {
     subject: 'Your sign-in code for the Arihant Capital Recruitment Assessment',
     action: 'sign in to the Arihant Capital Recruitment Assessment',
+  },
+  // Sent by SMS only; the entry exists because the map covers every purpose.
+  candidate_mobile_link: {
+    subject: 'Your mobile verification code for the Arihant Capital Recruitment Assessment',
+    action: 'verify your mobile number for the Arihant Capital Recruitment Assessment',
   },
   admin_login: {
     subject: 'Your sign-in code for the Arihant Capital Recruitment Assessment admin console',
@@ -80,12 +86,13 @@ export async function deliverOtp(
       ),
     );
   }
-  if (recipient.email && isChannelReady(emailCfg)) {
+  const email = recipient.email;
+  if (email && isChannelReady(emailCfg)) {
     jobs.push(
-      doEmail({ to: recipient.email, ...buildOtpEmail(code, purpose) }).then(
+      doEmail({ to: email, ...buildOtpEmail(code, purpose) }).then(
         () => 'email' as const,
         (err: unknown) => {
-          logger.warn('OTP email delivery failed', { purpose, to: maskEmail(recipient.email), error: err instanceof Error ? err.message : 'unknown' });
+          logger.warn('OTP email delivery failed', { purpose, to: maskEmail(email), error: err instanceof Error ? err.message : 'unknown' });
           return null;
         },
       ),
