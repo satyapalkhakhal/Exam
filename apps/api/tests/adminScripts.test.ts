@@ -54,6 +54,7 @@ function fakeAdmins() {
     id: 'a1',
     name: 'A',
     email: 'admin@x.test',
+    mobile: null,
     role: 'SUPER_ADMIN',
     active: true,
     lastLoginAt: null,

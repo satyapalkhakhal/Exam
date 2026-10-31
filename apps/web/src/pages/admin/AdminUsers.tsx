@@ -7,7 +7,7 @@ import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { AdminRole } from '@exam/shared';
+import { AdminRole, normalizeMobile } from '@exam/shared';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -19,9 +19,11 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useAdminUsers, useCreateAdminUser, useUpdateAdminUser, type AdminUserRow } from '@/api/admin/users';
 
 const roleSchema = z.enum([AdminRole.SUPER_ADMIN, AdminRole.EVALUATOR]);
+const MOBILE_MSG = 'Enter a 10-digit Indian mobile number';
 const createSchema = z.object({
   name: z.string().trim().min(1, 'Enter a name'),
   email: z.string().trim().email('Enter a valid email'),
+  mobile: z.string().trim().refine((v) => normalizeMobile(v) !== null, MOBILE_MSG),
   role: roleSchema,
   password: z.string().min(8, 'At least 8 characters'),
 });
@@ -29,6 +31,8 @@ const editSchema = z.object({
   name: z.string().trim().min(1, 'Enter a name'),
   role: roleSchema,
   active: z.boolean(),
+  // Blank removes the mobile; login codes then go by email only.
+  mobile: z.string().trim().refine((v) => v === '' || normalizeMobile(v) !== null, MOBILE_MSG),
   password: z.string().refine((v) => v === '' || v.length >= 8, 'At least 8 characters'),
 });
 type CreateValues = z.infer<typeof createSchema>;
@@ -41,7 +45,7 @@ function CreateDialog({ open, onClose }: { open: boolean; onClose: () => void })
   const create = useCreateAdminUser();
   const { register, handleSubmit, reset, formState: { errors } } = useForm<CreateValues>({
     resolver: zodResolver(createSchema),
-    defaultValues: { name: '', email: '', role: AdminRole.EVALUATOR, password: '' },
+    defaultValues: { name: '', email: '', mobile: '', role: AdminRole.EVALUATOR, password: '' },
   });
   const close = () => {
     reset();
@@ -53,7 +57,7 @@ function CreateDialog({ open, onClose }: { open: boolean; onClose: () => void })
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Add admin user</DialogTitle>
-          <DialogDescription>They sign in with this email and password, then a one-time code.</DialogDescription>
+          <DialogDescription>They sign in with this email and password, then a one-time code sent to their email and mobile.</DialogDescription>
         </DialogHeader>
         <form className="space-y-3" noValidate onSubmit={handleSubmit((v) => create.mutate(v, { onSuccess: close }))}>
           <div className="space-y-1.5">
@@ -63,6 +67,10 @@ function CreateDialog({ open, onClose }: { open: boolean; onClose: () => void })
           <div className="space-y-1.5">
             <Label htmlFor="cu-email">Email</Label>
             <Input id="cu-email" type="email" error={errors.email?.message} {...register('email')} />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="cu-mobile">Mobile</Label>
+            <Input id="cu-mobile" type="tel" inputMode="tel" error={errors.mobile?.message} {...register('mobile')} />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="cu-role">Role</Label>
@@ -90,7 +98,7 @@ function EditDialog({ user, onClose }: { user: AdminUserRow | null; onClose: () 
   const update = useUpdateAdminUser();
   const { register, handleSubmit, reset, formState: { errors } } = useForm<EditValues>({
     resolver: zodResolver(editSchema),
-    values: user ? { name: user.name, role: user.role, active: user.active, password: '' } : undefined,
+    values: user ? { name: user.name, role: user.role, active: user.active, mobile: user.mobile ?? '', password: '' } : undefined,
   });
   const close = () => {
     reset();
@@ -109,13 +117,28 @@ function EditDialog({ user, onClose }: { user: AdminUserRow | null; onClose: () 
           noValidate
           onSubmit={handleSubmit((v) => {
             if (!user) return;
-            const { password, ...rest } = v;
-            update.mutate({ id: user.id, ...rest, ...(password ? { password } : {}) }, { onSuccess: close });
+            const { password, mobile, ...rest } = v;
+            // Only send the mobile when it changed, so the audit log lists real edits.
+            const nextMobile = mobile === '' ? null : normalizeMobile(mobile);
+            update.mutate(
+              {
+                id: user.id,
+                ...rest,
+                ...(nextMobile !== user.mobile ? { mobile: nextMobile } : {}),
+                ...(password ? { password } : {}),
+              },
+              { onSuccess: close },
+            );
           })}
         >
           <div className="space-y-1.5">
             <Label htmlFor="eu-name">Name</Label>
             <Input id="eu-name" error={errors.name?.message} {...register('name')} />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="eu-mobile">Mobile</Label>
+            <Input id="eu-mobile" type="tel" inputMode="tel" error={errors.mobile?.message} {...register('mobile')} />
+            {!user?.mobile && <p className="text-xs text-muted-foreground">No mobile yet: login codes go by email only.</p>}
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="eu-role">Role</Label>
@@ -163,6 +186,7 @@ export default function AdminUsers() {
             <TableRow>
               <TableHead>Name</TableHead>
               <TableHead>Email</TableHead>
+              <TableHead>Mobile</TableHead>
               <TableHead>Role</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Last login</TableHead>
@@ -171,12 +195,13 @@ export default function AdminUsers() {
           </TableHeader>
           <TableBody>
             {isPending && (
-              <TableRow><TableCell colSpan={6} className="text-muted-foreground">Loading…</TableCell></TableRow>
+              <TableRow><TableCell colSpan={7} className="text-muted-foreground">Loading…</TableCell></TableRow>
             )}
             {data?.items.map((u) => (
               <TableRow key={u.id}>
                 <TableCell className="font-medium">{u.name}</TableCell>
                 <TableCell>{u.email}</TableCell>
+                <TableCell className={u.mobile ? undefined : 'text-muted-foreground'}>{u.mobile ?? 'Not set'}</TableCell>
                 <TableCell>{roleText(u.role)}</TableCell>
                 <TableCell><Badge variant={u.active ? 'default' : 'outline'}>{u.active ? 'Active' : 'Inactive'}</Badge></TableCell>
                 <TableCell className="text-muted-foreground">{u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString() : 'Never'}</TableCell>

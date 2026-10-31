@@ -9,6 +9,7 @@ export interface AdminUserRow {
   id: string;
   name: string;
   email: string;
+  mobile: string | null;
   role: AdminRole;
   active: boolean;
   lastLoginAt: string | null;
@@ -24,6 +25,7 @@ export interface Paged<T> {
 export interface CreateAdminUser {
   name: string;
   email: string;
+  mobile: string;
   role: AdminRole;
   password: string;
 }
@@ -31,6 +33,8 @@ export interface CreateAdminUser {
 /** Any subset; `password` resets the password. */
 export interface UpdateAdminUser {
   name?: string;
+  /** null removes it (login codes then go by email only). */
+  mobile?: string | null;
   role?: AdminRole;
   active?: boolean;
   password?: string;

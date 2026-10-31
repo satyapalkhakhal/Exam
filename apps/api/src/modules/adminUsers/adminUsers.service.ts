@@ -16,6 +16,7 @@ export interface AdminUserRow {
   id: string;
   name: string;
   email: string;
+  mobile: string | null;
   role: AdminRole;
   active: boolean;
   lastLoginAt: Date | null;
@@ -25,6 +26,7 @@ export interface AdminUserRow {
 
 export interface AdminUserChanges {
   name?: string;
+  mobile?: string | null;
   role?: AdminRole;
   active?: boolean;
   passwordHash?: string;
@@ -37,7 +39,7 @@ export interface AdminUsersRepository {
   findById(id: string): Promise<AdminUserRow | null>;
   findByEmail(email: string): Promise<AdminUserRow | null>;
   /** Throws CONFLICT when the email is taken. */
-  create(data: { name: string; email: string; role: AdminRole; passwordHash: string }, audit: (id: string) => AuditRecord): Promise<AdminUserRow>;
+  create(data: { name: string; email: string; mobile: string; role: AdminRole; passwordHash: string }, audit: (id: string) => AuditRecord): Promise<AdminUserRow>;
   /** With keepAnotherSuperAdmin, throws CONFLICT unless another active Super Admin remains. */
   update(id: string, data: AdminUserChanges, opts: { keepAnotherSuperAdmin: boolean }, audit: AuditRecord): Promise<AdminUserRow>;
 }
@@ -59,7 +61,7 @@ export function createAdminUsersService(deps: AdminUsersDeps) {
 
   async function create(input: AdminUserCreateInput, actorId: string, ip: string | null): Promise<AdminUserRow> {
     const passwordHash = await deps.hashPassword(input.password);
-    return deps.repo.create({ name: input.name, email: input.email, role: input.role, passwordHash }, (id) => ({
+    return deps.repo.create({ name: input.name, email: input.email, mobile: input.mobile, role: input.role, passwordHash }, (id) => ({
       adminId: actorId,
       action: 'ADMIN_USER_CREATED',
       entity: ENTITY,
@@ -76,6 +78,7 @@ export function createAdminUsersService(deps: AdminUsersDeps) {
 
     const data: AdminUserChanges = {};
     if (input.name !== undefined) data.name = input.name;
+    if (input.mobile !== undefined) data.mobile = input.mobile;
     if (input.role !== undefined) data.role = input.role;
     if (input.active !== undefined) data.active = input.active;
     if (input.password !== undefined) {

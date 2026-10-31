@@ -1,5 +1,6 @@
 // modules/adminAuth/adminAuth.service.ts
-// Admin sign-in (design §3, §13): email + password, then an emailed OTP.
+// Admin sign-in (design §3, §13): email + password, then an OTP sent to the
+// admin's email and, when one is on file, their mobile (either delivering is enough).
 // - A wrong email, a wrong password and an inactive account all get the same
 //   generic UNAUTHORIZED, and an unknown email still pays for a bcrypt compare,
 //   so neither the response nor its timing tells an attacker which accounts exist.
@@ -33,6 +34,7 @@ const DUMMY_HASH = '$2b$12$rYoId7xchRVtlzozU89PIusTmDaJo1W7Qn2fc9bVy3Kbt4b2ZrFYK
 export interface AdminAuthRecord {
   id: string;
   email: string;
+  mobile: string | null;
   name: string;
   role: AdminRole;
   active: boolean;
@@ -62,7 +64,7 @@ export interface AdminAuthDeps {
   repo: AdminAuthRepository;
   audit: (entry: AuditRecord) => Promise<void>;
   otp: {
-    issue: (p: { purpose: 'admin_login'; subjectId: string; recipient: { email: string; mobile: null } }) => Promise<unknown>;
+    issue: (p: { purpose: 'admin_login'; subjectId: string; recipient: { email: string; mobile: string | null } }) => Promise<unknown>;
     verify: (p: { purpose: 'admin_login'; subjectId: string; code: string }) => Promise<void>;
   };
   challenges: ChallengeStore;
@@ -122,7 +124,7 @@ export function createAdminAuthService(deps: AdminAuthDeps) {
 
     await deps.repo.clearFailures(admin.id);
     // OTP_COOLDOWN (429) propagates: a repeated login inside 60 s is the resend.
-    await deps.otp.issue({ purpose: 'admin_login', subjectId: admin.id, recipient: { email: admin.email, mobile: null } });
+    await deps.otp.issue({ purpose: 'admin_login', subjectId: admin.id, recipient: { email: admin.email, mobile: admin.mobile } });
     const challengeId = await deps.challenges.create(admin.id);
     return { otpRequired: true as const, challengeId };
   }

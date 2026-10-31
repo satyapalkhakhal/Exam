@@ -135,12 +135,17 @@ test('Super Admin manages admin users; last active Super Admin cannot be demoted
 
   const created = await agent
     .post('/api/admin/users')
-    .send({ name: 'New Eval', email: 'NEW@int.test', role: 'EVALUATOR', password: 'new-pass-123' });
+    .send({ name: 'New Eval', email: 'NEW@int.test', mobile: '+91 98765 43210', role: 'EVALUATOR', password: 'new-pass-123' });
   assert.equal(created.status, 201, JSON.stringify(created.body));
   assert.equal(created.body.data.email, 'new@int.test');
+  assert.equal(created.body.data.mobile, '9876543210');
+  const noMobile = await agent
+    .post('/api/admin/users')
+    .send({ name: 'No Mobile', email: 'nomobile@int.test', role: 'EVALUATOR', password: 'new-pass-123' });
+  assert.equal(noMobile.status, 400, 'a new admin needs a mobile for login codes');
   const dup = await agent
     .post('/api/admin/users')
-    .send({ name: 'Dup', email: 'new@int.test', role: 'EVALUATOR', password: 'new-pass-123' });
+    .send({ name: 'Dup', email: 'new@int.test', mobile: '9876543211', role: 'EVALUATOR', password: 'new-pass-123' });
   assert.equal(dup.status, 409);
 
   const demote = await agent.patch(`/api/admin/users/${superId}`).send({ role: 'EVALUATOR' });
@@ -157,6 +162,15 @@ test('Super Admin manages admin users; last active Super Admin cannot be demoted
   assert.equal(ev.lockedUntil, null);
   assert.equal(ev.name, 'Int Eval 2');
   assert.ok(await bcrypt.compare('fresh-pass-123', ev.passwordHash));
+
+  const setMobile = await agent.patch(`/api/admin/users/${evalId}`).send({ mobile: '9123456789' });
+  assert.equal(setMobile.status, 200, JSON.stringify(setMobile.body));
+  assert.equal(setMobile.body.data.mobile, '9123456789');
+  const badMobile = await agent.patch(`/api/admin/users/${evalId}`).send({ mobile: '12345' });
+  assert.equal(badMobile.status, 400);
+  const cleared = await agent.patch(`/api/admin/users/${evalId}`).send({ mobile: null });
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.body.data.mobile, null);
 });
 
 test('audit list is paginated and filterable; integrations GET reports candidatesWithoutMobile', async () => {

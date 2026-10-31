@@ -8,6 +8,7 @@ import type { AdminAuthRecord, AdminAuthRepository } from './adminAuth.service.j
 const select = {
   id: true,
   email: true,
+  mobile: true,
   name: true,
   role: true,
   active: true,

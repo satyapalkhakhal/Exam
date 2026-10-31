@@ -35,6 +35,8 @@ const EnvSchema = z
     LOG_DIR: z.string().default('./logs'),
     SEED_ADMIN_EMAIL: z.string().optional(),
     SEED_ADMIN_PASSWORD: z.string().optional(),
+    // Optional: the seeded Super Admin also gets login codes by SMS.
+    SEED_ADMIN_MOBILE: z.string().optional(),
   })
   .refine((e) => e.JWT_ADMIN_SECRET !== e.JWT_CANDIDATE_SECRET, {
     message: 'JWT_CANDIDATE_SECRET must differ from JWT_ADMIN_SECRET',

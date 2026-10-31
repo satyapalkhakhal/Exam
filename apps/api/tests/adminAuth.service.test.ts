@@ -23,6 +23,7 @@ function fakeRepo(seed: Partial<AdminAuthRecord> = {}) {
   const row: AdminAuthRecord = {
     id: 'a1',
     email: 'admin@arihant.test',
+    mobile: null,
     name: 'Admin',
     role: 'SUPER_ADMIN',
     active: true,
@@ -59,6 +60,7 @@ function setup(seed: Partial<AdminAuthRecord> = {}) {
   const { row, repo } = fakeRepo(seed);
   const audits: AuditRecord[] = [];
   const issued: string[] = [];
+  const recipients: Array<{ email: string; mobile: string | null }> = [];
   const deps: AdminAuthDeps = {
     repo,
     audit: async (e) => {
@@ -67,6 +69,7 @@ function setup(seed: Partial<AdminAuthRecord> = {}) {
     otp: {
       issue: async (p) => {
         issued.push(p.subjectId);
+        recipients.push(p.recipient);
       },
       verify: async () => {},
     },
@@ -77,7 +80,7 @@ function setup(seed: Partial<AdminAuthRecord> = {}) {
     },
     now: () => NOW,
   };
-  return { row, audits, issued, service: createAdminAuthService(deps) };
+  return { row, audits, issued, recipients, service: createAdminAuthService(deps) };
 }
 
 const login = (s: ReturnType<typeof setup>, password: string, email = 'admin@arihant.test') =>
@@ -98,6 +101,16 @@ test('correct password issues an OTP and returns a challenge', async () => {
   const r = await login(s, PASSWORD);
   assert.deepEqual(r, { otpRequired: true, challengeId: 'challenge-1' });
   assert.deepEqual(s.issued, ['a1']);
+});
+
+test('the login code goes to the email and, when one is on file, the mobile', async () => {
+  const withMobile = setup({ mobile: '9876543210' });
+  await login(withMobile, PASSWORD);
+  assert.deepEqual(withMobile.recipients, [{ email: 'admin@arihant.test', mobile: '9876543210' }]);
+
+  const emailOnly = setup();
+  await login(emailOnly, PASSWORD);
+  assert.deepEqual(emailOnly.recipients, [{ email: 'admin@arihant.test', mobile: null }]);
 });
 
 test('the 5th wrong password sets lockedUntil = now + 15 min and throws ACCOUNT_LOCKED', async () => {

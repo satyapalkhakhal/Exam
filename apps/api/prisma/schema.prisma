@@ -84,6 +84,7 @@ enum EvaluationStatus {
 model AdminUser {
   id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email            String    @unique
+  mobile           String?
   passwordHash     String    @map("password_hash")
   name             String
   role             AdminRole

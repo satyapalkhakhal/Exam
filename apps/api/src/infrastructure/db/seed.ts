@@ -5,6 +5,7 @@
 // on the Backend Engineer role. Usage: pnpm --filter @exam/api seed
 
 import bcrypt from 'bcrypt';
+import { normalizeMobile } from '@exam/shared';
 import { prisma } from './prisma.js';
 import { env } from '../config/env.js';
 import { seedData } from './seed.data.js';
@@ -48,9 +49,13 @@ async function seedSuperAdmin(): Promise<void> {
   }
   const existing = await prisma.adminUser.findUnique({ where: { email } });
   if (existing) return;
+  const rawMobile = env.SEED_ADMIN_MOBILE?.trim();
+  const mobile = rawMobile ? normalizeMobile(rawMobile) : null;
+  if (rawMobile && !mobile) console.warn('SEED_ADMIN_MOBILE is not a valid 10-digit mobile; seeding without it');
   await prisma.adminUser.create({
     data: {
       email,
+      mobile,
       name: 'Super Admin',
       role: 'SUPER_ADMIN',
       passwordHash: await bcrypt.hash(password, BCRYPT_ROUNDS),

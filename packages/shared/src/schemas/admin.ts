@@ -5,10 +5,23 @@
 
 import { z } from 'zod';
 import { AdminRole } from '../enums.js';
+import { normalizeMobile } from './candidates.js';
 
 const email = z.string().trim().toLowerCase().email().max(254);
 const newPassword = z.string().min(8, 'Password must be at least 8 characters').max(72);
 const roleEnum = z.enum([AdminRole.SUPER_ADMIN, AdminRole.EVALUATOR]);
+// Login codes go to this number as well as the email. Same formats as candidate mobiles.
+const adminMobile = z
+  .string()
+  .trim()
+  .transform((v, ctx) => {
+    const m = normalizeMobile(v);
+    if (m === null) {
+      ctx.addIssue({ code: 'custom', message: 'Enter a 10-digit Indian mobile number' });
+      return z.NEVER;
+    }
+    return m;
+  });
 
 export const AdminLoginSchema = z.object({
   email,
@@ -26,6 +39,7 @@ export const AdminUserCreateSchema = z.object({
   name: z.string().trim().min(1).max(120),
   email,
   role: roleEnum,
+  mobile: adminMobile,
   password: newPassword,
 });
 export type AdminUserCreateInput = z.infer<typeof AdminUserCreateSchema>;
@@ -36,6 +50,8 @@ export const AdminUserUpdateSchema = z
     name: z.string().trim().min(1).max(120).optional(),
     role: roleEnum.optional(),
     active: z.boolean().optional(),
+    // null removes the mobile (codes then go by email only).
+    mobile: adminMobile.nullable().optional(),
     password: newPassword.optional(),
   })
   .refine((v) => Object.values(v).some((x) => x !== undefined), { message: 'Nothing to update' });

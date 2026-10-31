@@ -13,6 +13,7 @@ const select = {
   id: true,
   name: true,
   email: true,
+  mobile: true,
   role: true,
   active: true,
   lastLoginAt: true,
