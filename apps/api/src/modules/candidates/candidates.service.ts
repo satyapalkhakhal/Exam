@@ -27,7 +27,25 @@ import { sha256 } from '../../shared/utils/hash.js';
 import { readSheet } from '../../shared/utils/spreadsheet.js';
 import type { AuditRecord } from '../audit/index.js';
 import { nextCandidateCodes } from './candidateCode.js';
-import { parseCandidateRows, TEMPLATE_COLUMNS, type CandidateDraft, type ParsedCandidates } from './candidateImport.parser.js';
+import {
+  parseCandidateRows,
+  TEMPLATE_COLUMNS,
+  type CandidateDraft,
+  type CandidateUpdateDraft,
+  type ParsedCandidates,
+} from './candidateImport.parser.js';
+
+/** Profile fields an import update may change (null in the file = keep the stored value). */
+export const UPDATE_FIELDS = [
+  'fullName',
+  'mobile',
+  'rollNumber',
+  'xPercentage',
+  'xiiPercentage',
+  'majorCpi',
+  'discipline',
+  'programme',
+] as const;
 
 type Num = { toNumber(): number } | number | null;
 
@@ -65,13 +83,17 @@ export interface CandidateDetailRows {
 
 export interface ImportCommit {
   jobRoleId: string;
+  /** Update mode: existing candidates to move/refresh (null field = keep stored value). */
+  updates: CandidateUpdateDraft[];
+  /** One CANDIDATE_UPDATED audit row per candidate actually updated. */
+  updateAudit: (u: CandidateUpdateDraft, fromJobRoleId: string) => AuditRecord;
   fileName: string;
   fileHash: string;
   uploadedById: string;
   total: number;
   rows: (CandidateDraft & { candidateCode: string })[];
   errors: unknown[];
-  audit: (imported: number) => AuditRecord;
+  audit: (n: { imported: number; updated: number }) => AuditRecord;
 }
 
 export type CandidateChanges = Partial<Omit<CandidateUpdateInput, 'mobile'>> & { mobile?: string | null };
@@ -79,9 +101,15 @@ export type CandidateChanges = Partial<Omit<CandidateUpdateInput, 'mobile'>> & {
 export interface CandidatesRepository {
   jobRoleExists(id: string): Promise<boolean>;
   rolesByLowerName(): Promise<Map<string, string>>;
-  existingEmailsAndMobiles(): Promise<{ emails: Set<string>; mobiles: Set<string> }>;
+  existingEmailsAndMobiles(): Promise<{
+    emails: Set<string>;
+    mobiles: Set<string>;
+    byEmail: Map<string, { id: string; status: string; mobile: string | null }>;
+    mobileOwners: Map<string, string>;
+  }>;
   lastImportOf(jobRoleId: string, fileHash: string): Promise<Date | null>;
-  confirmImport(input: ImportCommit): Promise<number>;
+  /** Creates the new rows and applies the updates in one transaction. */
+  confirmImport(input: ImportCommit): Promise<{ imported: number; updated: number }>;
   /** Throws CONFLICT when the email or mobile belongs to another candidate. */
   create(data: CandidateCreateInput & { candidateCode: string }, audit: (id: string) => AuditRecord): Promise<CandidateRow>;
   /** Candidates matching the filters (flagged ignored) that could carry a review flag. */
@@ -288,6 +316,7 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
     file: { buffer: Buffer; originalname: string },
     jobRoleId: string,
     actorId: string,
+    updateExisting = false,
   ): Promise<ImportPreviewDto<CandidateImportRow>> {
     if (!(await repo.jobRoleExists(jobRoleId))) throw notFound('Job role not found');
     const sheet = await readSheet(file.buffer, file.originalname);
@@ -303,6 +332,9 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
         rolesByLowerName: await repo.rolesByLowerName(),
         existingEmails: existing.emails,
         existingMobiles: existing.mobiles,
+        updateExisting,
+        existingByEmail: existing.byEmail,
+        mobileOwners: existing.mobileOwners,
       },
       sheet.rowNumbers,
     );
@@ -313,10 +345,19 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
     return {
       previewId,
       fileHash,
-      summary: { total: cached.total, valid: parsed.valid.length, errors: parsed.errors.length, duplicates: parsed.duplicates.length },
+      summary: {
+        total: cached.total,
+        valid: parsed.valid.length,
+        errors: parsed.errors.length,
+        duplicates: parsed.duplicates.length,
+        ...(updateExisting ? { updates: parsed.updates.length } : {}),
+      },
       valid: parsed.valid.map((d) => ({ row: d.row, fullName: d.fullName, email: d.email, mobile: d.mobile, rollNumber: d.rollNumber })),
       errors: parsed.errors,
       duplicates: parsed.duplicates,
+      ...(updateExisting
+        ? { updates: parsed.updates.map((u) => ({ row: u.row, fullName: u.fullName, email: u.email, mobile: u.mobile, rollNumber: u.rollNumber })) }
+        : {}),
     };
   }
 
@@ -333,8 +374,24 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
     }
 
     const codes = await nextCandidateCodes(cached.valid.length);
-    const imported = await repo.confirmImport({
+    const updates = cached.updates ?? [];
+    const { imported, updated } = await repo.confirmImport({
       jobRoleId: cached.jobRoleId,
+      updates,
+      updateAudit: (u, fromJobRoleId) => ({
+        adminId: actorId,
+        action: 'CANDIDATE_UPDATED',
+        entity: ENTITY,
+        entityId: u.candidateId,
+        metadata: {
+          via: 'import',
+          fileName: cached.fileName,
+          fromJobRoleId,
+          toJobRoleId: u.jobRoleId,
+          fields: UPDATE_FIELDS.filter((k) => u[k] !== null),
+        },
+        ip,
+      }),
       fileName: cached.fileName,
       fileHash: cached.fileHash,
       uploadedById: actorId,
@@ -346,12 +403,12 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
         action: 'CANDIDATES_IMPORTED',
         entity: 'job_role',
         entityId: cached.jobRoleId,
-        metadata: { fileName: cached.fileName, total: cached.total, imported: n, forced: input.force === true },
+        metadata: { fileName: cached.fileName, total: cached.total, imported: n.imported, updated: n.updated, forced: input.force === true },
         ip,
       }),
     });
     await deps.redis().del(previewKey(input.previewId));
-    return { imported, skipped: cached.total - imported };
+    return { imported, skipped: cached.total - imported - updated, ...(updates.length > 0 ? { updated } : {}) };
   }
 
   return { list, detail, create, update, setEligibility, setLocationExempt, resetAttempt, previewImport, confirmImport };

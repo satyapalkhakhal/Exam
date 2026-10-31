@@ -29,7 +29,7 @@ export interface ImportWizardProps {
   templateUrl: string;
   /** Optional filled-in example file, offered next to the header-only template. */
   sampleUrl?: string;
-  previewFn: (file: File, jobRoleId: string) => Promise<ImportPreview<Row>>;
+  previewFn: (file: File, jobRoleId: string, opts?: { updateExisting?: boolean }) => Promise<ImportPreview<Row>>;
   confirmFn: (a: { previewId: string; force?: boolean }) => Promise<ImportResult>;
   /** Called after a successful import so the host page can refresh. */
   onImported?: () => void;
@@ -60,6 +60,9 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
   );
   const [jobRoleId, setJobRoleId] = useState(defaultJobRoleId ?? '');
   const [file, setFile] = useState<File | null>(null);
+  // Candidates only: existing (not yet started) candidates in the file are moved to the
+  // chosen job profile and their details refreshed, instead of being skipped.
+  const [updateExisting, setUpdateExisting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -80,7 +83,7 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
   const preview = () =>
     run(async () => {
       if (!file || !jobRoleId) return;
-      dispatch({ type: 'PREVIEW_OK', preview: await previewFn(file, jobRoleId) });
+      dispatch({ type: 'PREVIEW_OK', preview: await previewFn(file, jobRoleId, kind === 'CANDIDATES' ? { updateExisting } : undefined) });
     });
 
   const confirm = (force: boolean) =>
@@ -108,6 +111,9 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
   };
 
   const p = state.preview;
+  const updates = p?.updates?.length ?? 0;
+  // Confirm is possible when there is anything to create or update.
+  const actionable = (p?.summary.valid ?? 0) + updates;
   const cols = COLUMNS[kind];
 
   return (
@@ -147,6 +153,23 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
               className="block w-full text-sm file:mr-3 file:rounded-md file:border file:border-input file:bg-background file:px-3 file:py-1.5 file:text-sm"
             />
           </div>
+          {kind === 'CANDIDATES' && (
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 accent-primary"
+                checked={updateExisting}
+                onChange={(e) => setUpdateExisting(e.target.checked)}
+              />
+              <span>
+                Update existing candidates
+                <span className="block text-xs text-muted-foreground">
+                  Candidates already in the system are moved to this job profile and their details updated from the file
+                  (empty cells keep the current value). Candidates who have started an exam are not changed.
+                </span>
+              </span>
+            </label>
+          )}
           <div className="flex flex-wrap items-center gap-3">
             <Button type="button" onClick={preview} disabled={busy || !file || !jobRoleId}>
               <FileUp className="mr-1.5 h-4 w-4" />
@@ -171,12 +194,14 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
             <Badge variant="default">{p.summary.valid} valid</Badge>
             <Badge variant="outline">{p.summary.errors} errors</Badge>
             <Badge variant="outline">{p.summary.duplicates} duplicates</Badge>
+            {p.updates && <Badge variant="default">{p.updates.length} to update</Badge>}
           </div>
           <Tabs defaultValue="valid">
             <TabsList>
               <TabsTrigger value="valid">Valid ({p.valid.length})</TabsTrigger>
               <TabsTrigger value="errors">Errors ({p.errors.length})</TabsTrigger>
               <TabsTrigger value="duplicates">Duplicates ({p.duplicates.length})</TabsTrigger>
+              {p.updates && <TabsTrigger value="updates">Updates ({p.updates.length})</TabsTrigger>}
             </TabsList>
             <TabsContent value="valid">
               <div className="max-h-72 overflow-auto rounded-lg border border-border">
@@ -233,6 +258,29 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
                 </Table>
               </div>
             </TabsContent>
+            {p.updates && (
+              <TabsContent value="updates">
+                <div className="max-h-72 overflow-auto rounded-lg border border-border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>{cols.map((c) => <TableHead key={c.key}>{c.label}</TableHead>)}</TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {p.updates.length === 0 && (
+                        <TableRow><TableCell colSpan={cols.length} className="text-muted-foreground">No existing candidates to update.</TableCell></TableRow>
+                      )}
+                      {p.updates.map((r, i) => (
+                        <TableRow key={i}>
+                          {cols.map((c) => (
+                            <TableCell key={c.key} className="max-w-xs truncate">{String(r[c.key] ?? '')}</TableCell>
+                          ))}
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </TabsContent>
+            )}
           </Tabs>
           {state.canForce && (
             <p role="alert" className="rounded-md border border-border bg-muted/50 p-3 text-sm">
@@ -242,12 +290,12 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
           <div className="flex flex-wrap gap-2">
             <Button type="button" variant="outline" onClick={() => dispatch({ type: 'BACK' })} disabled={busy}>Back</Button>
             {state.canForce ? (
-              <Button type="button" onClick={() => confirm(true)} disabled={busy || p.summary.valid === 0}>
+              <Button type="button" onClick={() => confirm(true)} disabled={busy || actionable === 0}>
                 {busy ? 'Importing…' : 'Import anyway'}
               </Button>
             ) : (
-              <Button type="button" onClick={() => confirm(false)} disabled={busy || p.summary.valid === 0}>
-                {busy ? 'Importing…' : `Import ${p.summary.valid} ${noun}`}
+              <Button type="button" onClick={() => confirm(false)} disabled={busy || actionable === 0}>
+                {busy ? 'Importing…' : updates > 0 ? `Import ${p.summary.valid}, update ${updates}` : `Import ${p.summary.valid} ${noun}`}
               </Button>
             )}
           </div>
@@ -257,7 +305,9 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
       {state.step === 'done' && state.result && (
         <div className="space-y-3" role="status">
           <p className="text-sm">
-            Imported <strong>{state.result.imported}</strong> {noun}; skipped <strong>{state.result.skipped}</strong> (errors or duplicates).
+            Imported <strong>{state.result.imported}</strong> {noun};{' '}
+            {state.result.updated !== undefined && <>updated <strong>{state.result.updated}</strong> existing;{' '}</>}
+            skipped <strong>{state.result.skipped}</strong> (errors or duplicates).
           </p>
           <Button type="button" variant="outline" onClick={restart}>Import another file</Button>
         </div>

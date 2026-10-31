@@ -41,10 +41,12 @@ export const candidatesRepository: CandidatesRepository = {
   },
 
   async existingEmailsAndMobiles() {
-    const rows = await prisma.candidate.findMany({ select: { email: true, mobile: true } });
+    const rows = await prisma.candidate.findMany({ select: { id: true, email: true, mobile: true, status: true } });
     return {
       emails: new Set(rows.map((r) => r.email.toLowerCase())),
       mobiles: new Set(rows.flatMap((r) => (r.mobile ? [r.mobile] : []))),
+      byEmail: new Map(rows.map((r) => [r.email.toLowerCase(), { id: r.id, status: r.status, mobile: r.mobile }])),
+      mobileOwners: new Map(rows.flatMap((r) => (r.mobile ? [[r.mobile, r.id] as [string, string]] : []))),
     };
   },
 
@@ -88,9 +90,35 @@ export const candidatesRepository: CandidatesRepository = {
         })),
         skipDuplicates: true,
       });
-      await tx.importBatch.update({ where: { id: batch.id }, data: { imported: count, skipped: input.total - count } });
-      await writeAudit(tx, input.audit(count));
-      return count;
+      // Updates re-check each candidate under its row lock (ids sorted, so concurrent
+      // imports lock in the same order): one that started or got a clashing mobile since
+      // the preview is skipped, not overwritten. Blank file cells (null) keep stored values.
+      let updated = 0;
+      for (const u of [...input.updates].sort((a, b) => a.candidateId.localeCompare(b.candidateId))) {
+        const locked = await tx.$queryRaw<{ status: string; job_role_id: string }[]>`
+          SELECT status::text AS status, job_role_id::text FROM candidates WHERE id = ${u.candidateId}::uuid FOR UPDATE`;
+        const current = locked[0];
+        if (!current || current.status !== 'NOT_STARTED') continue;
+        if (u.mobile !== null) {
+          const clash = await tx.candidate.findFirst({ where: { mobile: u.mobile, NOT: { id: u.candidateId } }, select: { id: true } });
+          if (clash) continue;
+        }
+        const data: Prisma.CandidateUpdateInput = { jobRole: { connect: { id: u.jobRoleId } } };
+        if (u.fullName !== null) data.fullName = u.fullName;
+        if (u.mobile !== null) data.mobile = u.mobile;
+        if (u.rollNumber !== null) data.rollNumber = u.rollNumber;
+        if (u.xPercentage !== null) data.xPercentage = u.xPercentage;
+        if (u.xiiPercentage !== null) data.xiiPercentage = u.xiiPercentage;
+        if (u.majorCpi !== null) data.majorCpi = u.majorCpi;
+        if (u.discipline !== null) data.discipline = u.discipline;
+        if (u.programme !== null) data.programme = u.programme;
+        await tx.candidate.update({ where: { id: u.candidateId }, data });
+        await writeAudit(tx, input.updateAudit(u, current.job_role_id));
+        updated += 1;
+      }
+      await tx.importBatch.update({ where: { id: batch.id }, data: { imported: count, skipped: input.total - count - updated } });
+      await writeAudit(tx, input.audit({ imported: count, updated }));
+      return { imported: count, updated };
     });
   },
 

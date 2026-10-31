@@ -4,7 +4,10 @@
 // numbers are the source line (header = 1); callers pass them from readSheet so
 // blank interior rows do not shift them, and index+2 is the fallback. Duplicates
 // (email or mobile, in the file or in the DB) are reported apart from errors and
-// skipped. Unmapped columns are kept in `extra`.
+// skipped. Unmapped columns are kept in `extra`. With `updateExisting`, a row whose
+// email belongs to a not-yet-started candidate becomes an update instead (moved to the
+// row's job profile; blank cells keep the stored value), so a file uploaded to the wrong
+// job profile can be corrected by uploading it again.
 
 import { CANDIDATE_NAME_MAX, CANDIDATE_TEXT_MAX, normalizeMobile } from '@exam/shared';
 
@@ -34,10 +37,27 @@ export interface RowDuplicate {
   reason: 'IN_FILE' | 'EXISTS';
 }
 
+/** An existing candidate to update; null fields mean "keep the stored value". */
+export interface CandidateUpdateDraft {
+  row: number;
+  candidateId: string;
+  email: string;
+  fullName: string;
+  mobile: string | null;
+  rollNumber: string | null;
+  xPercentage: number | null;
+  xiiPercentage: number | null;
+  majorCpi: number | null;
+  discipline: string | null;
+  programme: string | null;
+  jobRoleId: string;
+}
+
 export interface ParsedCandidates {
   valid: CandidateDraft[];
   errors: RowError[];
   duplicates: RowDuplicate[];
+  updates: CandidateUpdateDraft[];
 }
 
 export interface ParseContext {
@@ -45,6 +65,12 @@ export interface ParseContext {
   rolesByLowerName: Map<string, string>;
   existingEmails: Set<string>;
   existingMobiles: Set<string>;
+  /** Update mode: rows for existing emails update those candidates instead of being skipped. */
+  updateExisting?: boolean;
+  /** Update mode only: existing candidates by lower-cased email. */
+  existingByEmail?: Map<string, { id: string; status: string; mobile: string | null }>;
+  /** Update mode only: candidate id owning each stored mobile. */
+  mobileOwners?: Map<string, string>;
 }
 
 export const HEADER_MAP = {
@@ -87,7 +113,7 @@ export function parseCandidateRows(
   ctx: ParseContext,
   rowNumbers?: number[],
 ): ParsedCandidates {
-  const out: ParsedCandidates = { valid: [], errors: [], duplicates: [] };
+  const out: ParsedCandidates = { valid: [], errors: [], duplicates: [], updates: [] };
   const seenEmails = new Set<string>();
   const seenMobiles = new Set<string>();
 
@@ -139,6 +165,40 @@ export function parseCandidateRows(
 
     if (errs.length > 0) {
       out.errors.push(...errs);
+      return;
+    }
+
+    const current = ctx.updateExisting ? ctx.existingByEmail?.get(email) : undefined;
+    if (current) {
+      if (seenEmails.has(email) || (mobile !== null && seenMobiles.has(mobile))) {
+        out.duplicates.push({ row, reason: 'IN_FILE' });
+        return;
+      }
+      if (current.status !== 'NOT_STARTED') {
+        out.errors.push({ row, field: 'email', message: 'This candidate has already started an exam and cannot be updated by import' });
+        return;
+      }
+      const owner = mobile !== null ? ctx.mobileOwners?.get(mobile) : undefined;
+      if (owner !== undefined && owner !== current.id) {
+        out.errors.push({ row, field: 'mobile', message: 'This mobile belongs to another candidate' });
+        return;
+      }
+      seenEmails.add(email);
+      if (mobile !== null) seenMobiles.add(mobile);
+      out.updates.push({
+        row,
+        candidateId: current.id,
+        email,
+        fullName,
+        mobile,
+        rollNumber: text('roll_number'),
+        xPercentage,
+        xiiPercentage,
+        majorCpi,
+        discipline: text('major.discipline'),
+        programme: text('major.programme'),
+        jobRoleId,
+      });
       return;
     }
 

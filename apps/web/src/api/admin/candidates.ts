@@ -190,10 +190,15 @@ export const useResetAttempt = (id: string) =>
     apiFetch('admin', `/candidates/${id}/reset-attempt`, { method: 'POST', json: { reason } }),
   );
 
-export function previewCandidateImport(file: File, jobRoleId: string): Promise<ImportPreview<Record<string, unknown>>> {
+export function previewCandidateImport(
+  file: File,
+  jobRoleId: string,
+  opts: { updateExisting?: boolean } = {},
+): Promise<ImportPreview<Record<string, unknown>>> {
   const body = new FormData();
   body.append('file', file);
   body.append('jobRoleId', jobRoleId);
+  if (opts.updateExisting) body.append('updateExisting', 'true');
   return apiFetch('admin', '/candidates/import/preview', { method: 'POST', body });
 }
 

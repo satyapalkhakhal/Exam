@@ -262,3 +262,91 @@ test('create one candidate by hand: code minted, email lower-cased, mobile norma
 
   assert.equal((await ev.post('/api/admin/candidates').send({ fullName: 'Eval Try', email: 'e@cands.test', jobRoleId: roleId })).status, 403);
 });
+
+// --- Re-upload with "update existing candidates" ---------------------------------
+
+test('updateExisting: a file uploaded to the wrong job profile is fixed by uploading it again', async () => {
+  const people = csv([
+    '70,71,UPD001,Wrong Place One,7.1,Analytics,B.Tech,upd1@iitg.ac.in,',
+    '72,73,UPD002,Wrong Place Two,7.2,Analytics,B.Tech,upd2@iitg.ac.in,',
+  ]);
+  const first = await preview(sa, people, roleId);
+  assert.equal((await sa.post('/api/admin/candidates/import/confirm').send({ previewId: first.body.data.previewId })).status, 200);
+  const before = await prisma.candidate.findUniqueOrThrow({ where: { email: 'upd1@iitg.ac.in' } });
+  assert.equal(before.jobRoleId, roleId);
+
+  // Plain re-upload to the right profile: still skipped as duplicates, nothing moves.
+  const plain = await preview(sa, people, role2Id);
+  assert.equal(plain.body.data.summary.duplicates, 2);
+  assert.equal(plain.body.data.summary.updates, undefined);
+
+  // Corrected file: one CPI blank (keep stored), one name fixed.
+  const fixed = csv([
+    '70,71,UPD001,Right Place One,,Analytics,B.Tech,upd1@iitg.ac.in,',
+    '72,73,UPD002,Wrong Place Two,7.2,Analytics,B.Tech,UPD2@iitg.ac.in,',
+  ]);
+  const p = await sa
+    .post('/api/admin/candidates/import/preview')
+    .field('jobRoleId', role2Id)
+    .field('updateExisting', 'true')
+    .attach('file', fixed, 'c.csv');
+  assert.equal(p.status, 200, JSON.stringify(p.body));
+  assert.equal(p.body.data.summary.updates, 2);
+  assert.equal(p.body.data.summary.valid, 0);
+  assert.equal(p.body.data.summary.duplicates, 0);
+  assert.deepEqual(p.body.data.updates.map((u: { email: string }) => u.email).sort(), ['upd1@iitg.ac.in', 'upd2@iitg.ac.in']);
+
+  const auditsBefore = await prisma.adminAuditLog.count({ where: { action: 'CANDIDATE_UPDATED' } });
+  const c = await sa.post('/api/admin/candidates/import/confirm').send({ previewId: p.body.data.previewId });
+  assert.equal(c.status, 200, JSON.stringify(c.body));
+  assert.deepEqual(c.body.data, { imported: 0, skipped: 0, updated: 2 });
+
+  const one = await prisma.candidate.findUniqueOrThrow({ where: { email: 'upd1@iitg.ac.in' } });
+  assert.equal(one.jobRoleId, role2Id);
+  assert.equal(one.fullName, 'Right Place One');
+  assert.equal(Number(one.majorCpi), 7.1, 'blank cell kept the stored CPI');
+  assert.equal(one.candidateCode, before.candidateCode, 'same candidate, not a new one');
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { email: 'upd2@iitg.ac.in' } })).jobRoleId, role2Id);
+
+  const audits = await prisma.adminAuditLog.findMany({ where: { action: 'CANDIDATE_UPDATED' }, orderBy: { createdAt: 'desc' }, take: 2 });
+  assert.equal((await prisma.adminAuditLog.count({ where: { action: 'CANDIDATE_UPDATED' } })) - auditsBefore, 2);
+  const meta = audits.find((a) => a.entityId === one.id)!.metadata as Record<string, unknown>;
+  assert.equal(meta.via, 'import');
+  assert.equal(meta.fromJobRoleId, roleId);
+  assert.equal(meta.toJobRoleId, role2Id);
+});
+
+test('updateExisting: a candidate who already started is an error row and is not moved', async () => {
+  const file = csv(['60,61,UPD003,Started Person,6.1,Analytics,B.Tech,upd3@iitg.ac.in,']);
+  const first = await preview(sa, file, roleId);
+  await sa.post('/api/admin/candidates/import/confirm').send({ previewId: first.body.data.previewId });
+  await prisma.candidate.update({ where: { email: 'upd3@iitg.ac.in' }, data: { status: 'SUBMITTED' } });
+
+  const p = await sa
+    .post('/api/admin/candidates/import/preview')
+    .field('jobRoleId', role2Id)
+    .field('updateExisting', 'true')
+    .attach('file', file, 'c.csv');
+  assert.equal(p.body.data.summary.updates, 0);
+  assert.deepEqual(p.body.data.errors, [
+    { row: 2, field: 'email', message: 'This candidate has already started an exam and cannot be updated by import' },
+  ]);
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { email: 'upd3@iitg.ac.in' } })).jobRoleId, roleId);
+});
+
+test('updateExisting: a candidate who starts between preview and confirm is skipped, not moved', async () => {
+  const file = csv(['50,51,UPD004,Racing Person,5.1,Analytics,B.Tech,upd4@iitg.ac.in,']);
+  const first = await preview(sa, file, roleId);
+  await sa.post('/api/admin/candidates/import/confirm').send({ previewId: first.body.data.previewId });
+
+  const p = await sa
+    .post('/api/admin/candidates/import/preview')
+    .field('jobRoleId', role2Id)
+    .field('updateExisting', 'true')
+    .attach('file', file, 'c.csv');
+  assert.equal(p.body.data.summary.updates, 1);
+  await prisma.candidate.update({ where: { email: 'upd4@iitg.ac.in' }, data: { status: 'IN_PROGRESS' } });
+  const c = await sa.post('/api/admin/candidates/import/confirm').send({ previewId: p.body.data.previewId, force: true });
+  assert.deepEqual(c.body.data, { imported: 0, skipped: 1, updated: 0 });
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { email: 'upd4@iitg.ac.in' } })).jobRoleId, roleId);
+});

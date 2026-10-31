@@ -58,6 +58,17 @@ export const CandidateCreateSchema = z.object({
 });
 export type CandidateCreateInput = z.infer<typeof CandidateCreateSchema>;
 
+// Multipart form fields arrive as strings. updateExisting=true lets the import move
+// existing (not yet started) candidates to the chosen job profile and refresh their details.
+export const CandidateImportPreviewBodySchema = z.object({
+  jobRoleId: z.string().uuid(),
+  updateExisting: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => v === 'true'),
+});
+export type CandidateImportPreviewBody = z.infer<typeof CandidateImportPreviewBodySchema>;
+
 export const CandidateUpdateSchema = z
   .object({
     fullName: name.optional(),

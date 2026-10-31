@@ -140,3 +140,76 @@ test('roll number, discipline and programme over 200 characters are errors, matc
     assert.equal(CandidateUpdateSchema.safeParse({ [field]: 'x'.repeat(200) }).success, true, field);
   }
 });
+
+// --- "Update existing candidates" mode ------------------------------------------
+
+const existing = (over: Partial<{ id: string; status: string; mobile: string | null }> = {}) => ({
+  id: 'cand-1',
+  status: 'NOT_STARTED',
+  mobile: null as string | null,
+  ...over,
+});
+
+const updateCtx = (people: Record<string, ReturnType<typeof existing>>, mobileOwners: Record<string, string> = {}) =>
+  ctx({
+    existingEmails: new Set(Object.keys(people)),
+    existingMobiles: new Set(Object.keys(mobileOwners)),
+    updateExisting: true,
+    existingByEmail: new Map(Object.entries(people)),
+    mobileOwners: new Map(Object.entries(mobileOwners)),
+  });
+
+test('without updateExisting an existing email stays an EXISTS duplicate', () => {
+  const r = parseCandidateRows([sample], ctx({ existingEmails: new Set([sample.email]) }));
+  assert.deepEqual(r.duplicates, [{ row: 2, reason: 'EXISTS' }]);
+  assert.deepEqual(r.updates, []);
+});
+
+test('updateExisting: an existing not-started candidate becomes an update to the chosen job profile; blanks keep values', () => {
+  const r = parseCandidateRows([{ ...sample, major_cpi: '', 'major.programme': '' }], updateCtx({ [sample.email]: existing() }));
+  assert.deepEqual(r.valid, []);
+  assert.deepEqual(r.duplicates, []);
+  assert.equal(r.updates.length, 1);
+  const u = r.updates[0]!;
+  assert.equal(u.candidateId, 'cand-1');
+  assert.equal(u.jobRoleId, DEFAULT_ROLE);
+  assert.equal(u.fullName, 'AJITH K K');
+  assert.equal(u.xPercentage, 97.6);
+  assert.equal(u.majorCpi, null, 'blank cell → null → keep existing value');
+  assert.equal(u.programme, null);
+});
+
+test('updateExisting: the job_role column still overrides the chosen profile', () => {
+  const r = parseCandidateRows([{ ...sample, job_role: 'Analyst' }], updateCtx({ [sample.email]: existing() }));
+  assert.equal(r.updates[0]!.jobRoleId, 'role-analyst');
+});
+
+test('updateExisting: a candidate who has started is an error, not an update', () => {
+  const r = parseCandidateRows([sample], updateCtx({ [sample.email]: existing({ status: 'SUBMITTED' }) }));
+  assert.deepEqual(r.updates, []);
+  assert.deepEqual(r.errors, [{ row: 2, field: 'email', message: 'This candidate has already started an exam and cannot be updated by import' }]);
+});
+
+test("updateExisting: a mobile owned by someone else is an error; the candidate's own mobile is fine", () => {
+  const other = parseCandidateRows([{ ...sample, mobile: '9876543210' }], updateCtx({ [sample.email]: existing() }, { '9876543210': 'cand-2' }));
+  assert.deepEqual(other.errors, [{ row: 2, field: 'mobile', message: 'This mobile belongs to another candidate' }]);
+  const own = parseCandidateRows(
+    [{ ...sample, mobile: '9876543210' }],
+    updateCtx({ [sample.email]: existing({ mobile: '9876543210' }) }, { '9876543210': 'cand-1' }),
+  );
+  assert.equal(own.updates.length, 1);
+  assert.equal(own.updates[0]!.mobile, '9876543210');
+});
+
+test('updateExisting: the same existing email twice in one file → second is an IN_FILE duplicate', () => {
+  const r = parseCandidateRows([sample, sample], updateCtx({ [sample.email]: existing() }));
+  assert.equal(r.updates.length, 1);
+  assert.deepEqual(r.duplicates, [{ row: 3, reason: 'IN_FILE' }]);
+});
+
+test('updateExisting: new emails are still created as usual alongside updates', () => {
+  const r = parseCandidateRows([sample, { ...sample, email: 'new@iitg.ac.in', roll_number: '1' }], updateCtx({ [sample.email]: existing() }));
+  assert.equal(r.updates.length, 1);
+  assert.equal(r.valid.length, 1);
+  assert.equal(r.valid[0]!.email, 'new@iitg.ac.in');
+});

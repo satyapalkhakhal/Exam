@@ -9,7 +9,7 @@ export {
   CandidateResetSchema,
   CandidateListQuerySchema,
   CandidateDetailQuerySchema,
-  ImportPreviewBodySchema,
+  CandidateImportPreviewBodySchema,
   ImportConfirmSchema,
 } from '@exam/shared';
 

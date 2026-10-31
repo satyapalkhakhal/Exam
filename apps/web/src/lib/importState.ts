@@ -17,15 +17,18 @@ export interface ImportDuplicate {
 export interface ImportPreview<V = unknown> {
   previewId: string;
   fileHash: string;
-  summary: { total: number; valid: number; errors: number; duplicates: number };
+  summary: { total: number; valid: number; errors: number; duplicates: number; updates?: number };
   valid: V[];
   errors: ImportRowError[];
   duplicates: ImportDuplicate[];
+  /** Candidate import with "update existing candidates" ticked. */
+  updates?: V[];
 }
 
 export interface ImportResult {
   imported: number;
   skipped: number;
+  updated?: number;
 }
 
 export type ImportStep = 'choose' | 'preview' | 'done';

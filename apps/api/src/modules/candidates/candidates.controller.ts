@@ -40,8 +40,8 @@ export function createCandidatesController(service: CandidatesService) {
     ),
     preview: wrap(async (req, res) => {
       if (!req.file) throw badRequest('A file is required');
-      const { jobRoleId } = req.body as { jobRoleId: string };
-      return ok(res, await service.previewImport(req.file, jobRoleId, actorId(req)));
+      const { jobRoleId, updateExisting } = req.body as { jobRoleId: string; updateExisting: boolean };
+      return ok(res, await service.previewImport(req.file, jobRoleId, actorId(req), updateExisting));
     }),
     confirm: wrap(async (req, res) => ok(res, await service.confirmImport(req.body, actorId(req), ipOf(req)))),
     template: wrap((_req, res) => {

@@ -87,6 +87,8 @@ export interface ImportSummary {
   valid: number;
   errors: number;
   duplicates: number;
+  /** Candidate import with "update existing" only: rows that update an existing candidate. */
+  updates?: number;
 }
 
 export interface ImportPreviewDto<T> {
@@ -96,6 +98,8 @@ export interface ImportPreviewDto<T> {
   valid: T[];
   errors: ImportRowError[];
   duplicates: ImportRowDuplicate[];
+  /** Candidate import with "update existing" only. */
+  updates?: T[];
 }
 
 export interface QuestionImportRow {
@@ -109,4 +113,6 @@ export interface QuestionImportRow {
 export interface ImportResultDto {
   imported: number;
   skipped: number;
+  /** Candidate import with "update existing" only: existing candidates moved/updated. */
+  updated?: number;
 }
