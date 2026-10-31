@@ -350,3 +350,48 @@ test('updateExisting: a candidate who starts between preview and confirm is skip
   assert.deepEqual(c.body.data, { imported: 0, skipped: 1, updated: 0 });
   assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { email: 'upd4@iitg.ac.in' } })).jobRoleId, roleId);
 });
+
+// --- Bulk "change job role" -------------------------------------------------------
+
+test('bulk job role: moves not-started candidates, skips started / same-role / unknown, audits each move', async () => {
+  const file = csv([
+    '40,41,BLK001,Bulk One,4.1,Analytics,B.Tech,blk1@iitg.ac.in,',
+    '42,43,BLK002,Bulk Two,4.2,Analytics,B.Tech,blk2@iitg.ac.in,',
+    '44,45,BLK003,Bulk Started,4.3,Analytics,B.Tech,blk3@iitg.ac.in,',
+  ]);
+  const p = await preview(sa, file, roleId);
+  await sa.post('/api/admin/candidates/import/confirm').send({ previewId: p.body.data.previewId });
+  const [one, two, started] = await Promise.all(
+    ['blk1@iitg.ac.in', 'blk2@iitg.ac.in', 'blk3@iitg.ac.in'].map((email) => prisma.candidate.findUniqueOrThrow({ where: { email } })),
+  );
+  await prisma.candidate.update({ where: { id: started!.id }, data: { status: 'SUBMITTED' } });
+  await prisma.candidate.update({ where: { id: two!.id }, data: { jobRoleId: role2Id } });
+  const ghost = '00000000-0000-4000-8000-000000000000';
+
+  const auditsBefore = await prisma.adminAuditLog.count({ where: { action: 'CANDIDATE_UPDATED' } });
+  const res = await sa
+    .post('/api/admin/candidates/bulk/job-role')
+    .send({ candidateIds: [one!.id, two!.id, started!.id, ghost, one!.id], jobRoleId: role2Id });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.data.updated, 1);
+  const reasons = Object.fromEntries(res.body.data.skipped.map((s: { candidateId: string; reason: string }) => [s.candidateId, s.reason]));
+  assert.deepEqual(reasons, { [two!.id]: 'SAME_ROLE', [started!.id]: 'STARTED', [ghost]: 'NOT_FOUND' });
+  assert.equal(res.body.data.skipped.find((s: { candidateId: string }) => s.candidateId === started!.id).candidateCode, started!.candidateCode);
+
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: one!.id } })).jobRoleId, role2Id);
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: started!.id } })).jobRoleId, roleId, 'started candidate untouched');
+  assert.equal((await prisma.adminAuditLog.count({ where: { action: 'CANDIDATE_UPDATED' } })) - auditsBefore, 1);
+  const audit = await prisma.adminAuditLog.findFirstOrThrow({ where: { action: 'CANDIDATE_UPDATED', entityId: one!.id }, orderBy: { createdAt: 'desc' } });
+  assert.deepEqual(audit.metadata, { via: 'bulk', fromJobRoleId: roleId, toJobRoleId: role2Id });
+});
+
+test('bulk job role: validation, unknown role and evaluator access', async () => {
+  assert.equal((await sa.post('/api/admin/candidates/bulk/job-role').send({ candidateIds: [], jobRoleId: role2Id })).status, 400);
+  assert.equal((await sa.post('/api/admin/candidates/bulk/job-role').send({ candidateIds: ['nope'], jobRoleId: role2Id })).status, 400);
+  const someone = await prisma.candidate.findFirstOrThrow({ select: { id: true } });
+  const ghostRole = await sa
+    .post('/api/admin/candidates/bulk/job-role')
+    .send({ candidateIds: [someone.id], jobRoleId: '00000000-0000-4000-8000-000000000000' });
+  assert.equal(ghostRole.status, 404);
+  assert.equal((await ev.post('/api/admin/candidates/bulk/job-role').send({ candidateIds: [someone.id], jobRoleId: role2Id })).status, 403);
+});

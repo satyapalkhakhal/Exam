@@ -9,6 +9,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import type {
+  CandidateBulkJobRoleInput,
+  CandidateBulkJobRoleResultDto,
   CandidateDetailDto,
   CandidateDetailQuery,
   CandidateFlagsDto,
@@ -121,6 +123,15 @@ export interface CandidatesRepository {
   /** Throws CONFLICT when the email or mobile belongs to another candidate. */
   update(id: string, data: CandidateChanges, audit: AuditRecord): Promise<CandidateRow>;
   setEligible(id: string, eligible: boolean, audit: AuditRecord): Promise<CandidateRow>;
+  /**
+   * One transaction: locks the candidates (id order), moves each NOT_STARTED one whose
+   * role differs, and writes one audit row per move. Others are returned as skipped.
+   */
+  bulkSetJobRole(
+    ids: string[],
+    jobRoleId: string,
+    audit: (candidateId: string, fromJobRoleId: string) => AuditRecord,
+  ): Promise<CandidateBulkJobRoleResultDto>;
   setLocationExempt(id: string, exempt: boolean, audit: AuditRecord): Promise<CandidateRow>;
   /** One transaction; returns false when the candidate has no live attempt. */
   resetAttempt(id: string, adminId: string, reason: string, audit: AuditRecord): Promise<boolean>;
@@ -270,6 +281,18 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
     return toRowDto(row);
   }
 
+  async function bulkSetJobRole(input: CandidateBulkJobRoleInput, actorId: string, ip: string | null): Promise<CandidateBulkJobRoleResultDto> {
+    if (!(await repo.jobRoleExists(input.jobRoleId))) throw notFound('Job role not found');
+    return repo.bulkSetJobRole(input.candidateIds, input.jobRoleId, (candidateId, fromJobRoleId) => ({
+      adminId: actorId,
+      action: 'CANDIDATE_UPDATED',
+      entity: ENTITY,
+      entityId: candidateId,
+      metadata: { via: 'bulk', fromJobRoleId, toJobRoleId: input.jobRoleId },
+      ip,
+    }));
+  }
+
   async function setEligibility(id: string, eligible: boolean, actorId: string, ip: string | null): Promise<CandidateRowDto> {
     if (!(await repo.findById(id))) throw notFound('Candidate not found');
     const row = await repo.setEligible(id, eligible, {
@@ -411,7 +434,7 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
     return { imported, skipped: cached.total - imported - updated, ...(updates.length > 0 ? { updated } : {}) };
   }
 
-  return { list, detail, create, update, setEligibility, setLocationExempt, resetAttempt, previewImport, confirmImport };
+  return { list, detail, create, update, bulkSetJobRole, setEligibility, setLocationExempt, resetAttempt, previewImport, confirmImport };
 }
 
 export type CandidatesService = ReturnType<typeof createCandidatesService>;

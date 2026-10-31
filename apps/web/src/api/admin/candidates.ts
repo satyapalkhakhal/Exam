@@ -163,6 +163,21 @@ export interface CandidateCreate extends Omit<CandidateEdit, 'fullName' | 'email
   jobRoleId: string;
 }
 
+export interface BulkJobRoleResult {
+  updated: number;
+  skipped: { candidateId: string; candidateCode: string | null; fullName: string | null; reason: 'STARTED' | 'SAME_ROLE' | 'NOT_FOUND' }[];
+}
+
+/** Moves the given candidates to one job role; those who started (or already hold it) are skipped. */
+export function useBulkJobRole() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { candidateIds: string[]; jobRoleId: string }) =>
+      apiFetch<BulkJobRoleResult>('admin', '/candidates/bulk/job-role', { method: 'POST', json: body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin'] }),
+  });
+}
+
 export function useCreateCandidate() {
   const qc = useQueryClient();
   return useMutation({

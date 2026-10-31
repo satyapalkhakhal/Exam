@@ -85,6 +85,23 @@ export const CandidateUpdateSchema = z
   .refine((v) => Object.values(v).some((x) => x !== undefined), { message: 'Nothing to update' });
 export type CandidateUpdateInput = z.infer<typeof CandidateUpdateSchema>;
 
+/** Move several candidates to one job role at once (only those who have not started). */
+export const CANDIDATE_BULK_MAX = 1000;
+export const CandidateBulkJobRoleSchema = z.object({
+  candidateIds: z
+    .array(z.string().uuid())
+    .min(1, 'Select at least one candidate')
+    .max(CANDIDATE_BULK_MAX, `At most ${CANDIDATE_BULK_MAX} candidates at a time`)
+    .transform((ids) => [...new Set(ids)]),
+  jobRoleId: z.string().uuid(),
+});
+export type CandidateBulkJobRoleInput = z.infer<typeof CandidateBulkJobRoleSchema>;
+
+export interface CandidateBulkJobRoleResultDto {
+  updated: number;
+  skipped: { candidateId: string; candidateCode: string | null; fullName: string | null; reason: 'STARTED' | 'SAME_ROLE' | 'NOT_FOUND' }[];
+}
+
 export const CandidateEligibilitySchema = z.object({ eligible: z.boolean() });
 export const CandidateLocationExemptSchema = z.object({
   exempt: z.boolean(),

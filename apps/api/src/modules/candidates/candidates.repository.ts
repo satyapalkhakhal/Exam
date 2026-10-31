@@ -3,7 +3,7 @@
 // email/mobile indexes are the final arbiter of duplicates, so concurrent
 // imports or edits cannot slip one past the service.
 
-import type { CandidateListQuery } from '@exam/shared';
+import type { CandidateBulkJobRoleResultDto, CandidateListQuery } from '@exam/shared';
 import { prisma } from '../../infrastructure/db/prisma.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { conflict } from '../../shared/errors.js';
@@ -208,6 +208,35 @@ export const candidatesRepository: CandidatesRepository = {
       if (isUnique(err)) throw conflict('Another candidate already has this email or mobile.');
       throw err;
     }
+  },
+
+  bulkSetJobRole(ids, jobRoleId, audit) {
+    return prisma.$transaction(async (tx) => {
+      // Lock in id order so two overlapping bulk moves cannot deadlock; a start or
+      // reset on one of these candidates serialises on the same row lock.
+      const rows = await tx.$queryRaw<{ id: string; status: string; job_role_id: string; candidate_code: string; full_name: string }[]>`
+        SELECT id::text, status::text AS status, job_role_id::text, candidate_code, full_name
+        FROM candidates WHERE id = ANY(${ids}::uuid[]) ORDER BY id FOR UPDATE`;
+      const found = new Map(rows.map((r) => [r.id, r]));
+      const skipped: CandidateBulkJobRoleResultDto['skipped'] = [];
+      let updated = 0;
+      for (const id of ids) {
+        const r = found.get(id);
+        if (!r) {
+          skipped.push({ candidateId: id, candidateCode: null, fullName: null, reason: 'NOT_FOUND' });
+          continue;
+        }
+        const reason = r.status !== 'NOT_STARTED' ? 'STARTED' : r.job_role_id === jobRoleId ? 'SAME_ROLE' : null;
+        if (reason) {
+          skipped.push({ candidateId: id, candidateCode: r.candidate_code, fullName: r.full_name, reason });
+          continue;
+        }
+        await tx.candidate.update({ where: { id }, data: { jobRoleId } });
+        await writeAudit(tx, audit(id, r.job_role_id));
+        updated += 1;
+      }
+      return { updated, skipped };
+    });
   },
 
   setEligible(id, eligible, audit) {

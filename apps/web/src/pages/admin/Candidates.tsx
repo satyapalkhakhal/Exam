@@ -9,6 +9,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react';
 import { ImportWizard } from '@/components/import/ImportWizard';
 import { AddCandidateDialog } from '@/components/admin/AddCandidateDialog';
+import { BulkJobRoleDialog } from '@/components/admin/BulkJobRoleDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ClearFiltersButton } from '@/components/ui/clear-filters-button';
@@ -52,6 +53,9 @@ export default function Candidates() {
   const [pageSize, setPageSize] = useState(50);
   const [importing, setImporting] = useState(false);
   const [adding, setAdding] = useState(false);
+  // Ticked candidates, kept across pages and filter changes so several pages can be moved together.
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [moving, setMoving] = useState(false);
   const roles = useRoles();
   const { data, isPending, error } = useCandidates(f, page, pageSize);
   const qc = useQueryClient();
@@ -62,6 +66,24 @@ export default function Candidates() {
   };
   const onSort = (s: CandidateSort) => set(f.sort === s ? { dir: f.dir === 'asc' ? 'desc' : 'asc' } : { sort: s, dir: 'asc' });
   const activeCount = [f.search, f.jobRoleId, f.status, f.flagged].filter(Boolean).length;
+  const pageIds = data?.items.map((c) => c.id) ?? [];
+  const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
+  const toggle = (id: string) =>
+    setSelected((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const togglePage = () =>
+    setSelected((cur) => {
+      const next = new Set(cur);
+      for (const id of pageIds) {
+        if (allOnPage) next.delete(id);
+        else next.add(id);
+      }
+      return next;
+    });
 
   return (
     <div className="space-y-4">
@@ -69,6 +91,13 @@ export default function Candidates() {
         <h1 className="text-xl font-semibold text-foreground">Candidates</h1>
         <div className="flex items-center gap-2">
           <ClearFiltersButton count={activeCount} onClear={() => set({ search: '', jobRoleId: '', status: '', flagged: '' })} />
+          {selected.size > 0 && (
+            <>
+              <span className="text-sm text-muted-foreground">{selected.size} selected</span>
+              <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}>Clear</Button>
+              <Button variant="outline" onClick={() => setMoving(true)}>Change job role</Button>
+            </>
+          )}
           <Button variant="outline" onClick={() => setAdding(true)}>Add candidate</Button>
           <Button onClick={() => setImporting(true)}>Import candidates</Button>
         </div>
@@ -78,6 +107,9 @@ export default function Candidates() {
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead className="w-10">
+                <input type="checkbox" className="h-4 w-4 accent-primary" aria-label="Select all candidates on this page" checked={allOnPage} onChange={togglePage} />
+              </TableHead>
               <TableHead>Code</TableHead>
               <TableHead>
                 <span className="inline-flex items-center gap-1.5">
@@ -121,10 +153,13 @@ export default function Candidates() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {isPending && <TableRow><TableCell colSpan={8} className="text-muted-foreground">Loading…</TableCell></TableRow>}
-            {data?.items.length === 0 && <TableRow><TableCell colSpan={8} className="text-muted-foreground">No candidates match.</TableCell></TableRow>}
+            {isPending && <TableRow><TableCell colSpan={9} className="text-muted-foreground">Loading…</TableCell></TableRow>}
+            {data?.items.length === 0 && <TableRow><TableCell colSpan={9} className="text-muted-foreground">No candidates match.</TableCell></TableRow>}
             {data?.items.map((c) => (
-              <TableRow key={c.id}>
+              <TableRow key={c.id} data-state={selected.has(c.id) ? 'selected' : undefined}>
+                <TableCell>
+                  <input type="checkbox" className="h-4 w-4 accent-primary" aria-label={`Select ${c.fullName}`} checked={selected.has(c.id)} onChange={() => toggle(c.id)} />
+                </TableCell>
                 <TableCell className="font-mono text-xs">{c.candidateCode}</TableCell>
                 <TableCell>
                   <Link to={`/admin/candidates/${c.id}`} className="font-medium text-primary hover:underline">{c.fullName}</Link>
@@ -158,6 +193,13 @@ export default function Candidates() {
           }}
         />
       )}
+      <BulkJobRoleDialog
+        open={moving}
+        candidateIds={[...selected]}
+        roles={roles.data ?? []}
+        onClose={() => setMoving(false)}
+        onDone={() => setSelected(new Set())}
+      />
       <AddCandidateDialog
         open={adding}
         roles={roles.data ?? []}

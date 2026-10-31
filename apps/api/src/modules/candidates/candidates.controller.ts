@@ -28,6 +28,7 @@ export function createCandidatesController(service: CandidatesService) {
     detail: wrap(async (req, res) => ok(res, await service.detail(idOf(req), req.query as never))),
     create: wrap(async (req, res) => ok(res, await service.create(req.body, actorId(req), ipOf(req)), 201)),
     update: wrap(async (req, res) => ok(res, await service.update(idOf(req), req.body, actorId(req), ipOf(req)))),
+    bulkJobRole: wrap(async (req, res) => ok(res, await service.bulkSetJobRole(req.body, actorId(req), ipOf(req)))),
     eligibility: wrap(async (req, res) =>
       ok(res, await service.setEligibility(idOf(req), (req.body as { eligible: boolean }).eligible, actorId(req), ipOf(req))),
     ),
