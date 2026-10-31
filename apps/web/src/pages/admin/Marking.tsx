@@ -16,6 +16,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { ReasonDialog } from '@/components/admin/ReasonDialog';
+import { ExamTimeline } from '@/components/admin/ExamTimeline';
 import { ApiError } from '@/lib/api';
 import { createLockManager, LOCK_RENEW_MS } from '@/lib/lockManager';
 import { canSubmitEvaluation, shouldSeedDrafts, sumMarks, validateMarksClient } from '@/lib/marking';
@@ -246,6 +247,8 @@ export default function Marking() {
           <div><span className="text-muted-foreground">Programme</span><div>{[v.programme, v.discipline].filter(Boolean).join(', ') || '-'}</div></div>
         </section>
       )}
+
+      <ExamTimeline events={v.timeline} startedAt={v.startedAt} />
 
       {v.questions.map((q) => (
         <QuestionPanel

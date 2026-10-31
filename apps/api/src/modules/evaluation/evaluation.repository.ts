@@ -14,12 +14,16 @@ import { prisma } from '../../infrastructure/db/prisma.js';
 import type { Prisma } from '../../generated/prisma/client.js';
 import type { SubmissionListQuery } from '@exam/shared';
 import { writeAudit, type AuditRecord } from '../audit/index.js';
+import { TIMELINE_EVENT_TYPES } from './evaluation.mapper.js';
 
 type Tx = Prisma.TransactionClient;
 export type CandidateStatusValue = 'NOT_STARTED' | 'IN_PROGRESS' | 'SUBMITTED' | 'AUTO_SUBMITTED' | 'EVALUATED' | 'SHORTLISTED' | 'REJECTED';
 
 const SUBMITTED_STATUSES = ['SUBMITTED', 'AUTO_SUBMITTED'] as const;
-const PASTE_AND_BULK_EVENTS = ['PASTE_ATTEMPT', 'COPY_ATTEMPT', 'CUT_ATTEMPT', 'DROP_ATTEMPT', 'SUSPICIOUS_BULK_INSERT'];
+// Everything the marking screen's timeline may show (and the per-question paste/bulk counts).
+const TIMELINE_EVENTS = [...TIMELINE_EVENT_TYPES];
+// A hard cap so a pathological attempt cannot blow up the marking payload.
+const TIMELINE_MAX = 3000;
 
 const candidateSelect = {
   id: true,
@@ -210,8 +214,9 @@ export const evaluationRepository = {
     });
     if (!attempt) return null;
     const activity = await prisma.activityLog.findMany({
-      where: { attemptId, eventType: { in: PASTE_AND_BULK_EVENTS }, questionId: { not: null } },
-      orderBy: { createdAt: 'asc' },
+      where: { attemptId, eventType: { in: TIMELINE_EVENTS } },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: TIMELINE_MAX,
       select: { eventType: true, questionId: true, createdAt: true, metadata: true },
     });
     return { ...attempt, activity };

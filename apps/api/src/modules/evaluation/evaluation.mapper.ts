@@ -4,9 +4,19 @@
 // or a stray metadata key cannot reach the Evaluator. Identity and academics
 // are added only for a Super Admin; location (coordinates, IPs) is never
 // included for anyone. Integrity evidence is reduced to counts and the
-// bulk-insert numbers, never the raw activity metadata.
+// bulk-insert numbers, never the raw activity metadata. The exam timeline is the
+// same idea: whitelisted event types with time and question only (an IP change
+// shows that it happened, never the addresses).
 
-import type { AdminRole, CandidatePiiDto, EvaluationState, MarkingQuestionDto, MarkingViewDto, SubmissionViewDto } from '@exam/shared';
+import type {
+  AdminRole,
+  CandidatePiiDto,
+  EvaluationState,
+  MarkingQuestionDto,
+  MarkingViewDto,
+  SubmissionViewDto,
+  TimelineEventDto,
+} from '@exam/shared';
 
 type Num = { toNumber(): number } | number | null;
 export const num = (n: Num): number | null => (n === null ? null : typeof n === 'number' ? n : n.toNumber());
@@ -59,6 +69,30 @@ export interface MarkingSource extends SubmissionSource {
 }
 
 const PASTE_EVENTS = new Set(['PASTE_ATTEMPT', 'COPY_ATTEMPT', 'CUT_ATTEMPT', 'DROP_ATTEMPT']);
+
+/** Exam events shown on the marking timeline (login/OTP events stay on the candidate page). */
+export const TIMELINE_EVENT_TYPES = [
+  'EXAM_STARTED',
+  'SESSION_TAKEOVER',
+  'QUESTION_VIEWED',
+  'PASTE_ATTEMPT',
+  'COPY_ATTEMPT',
+  'CUT_ATTEMPT',
+  'DROP_ATTEMPT',
+  'CONTEXT_MENU',
+  'SUSPICIOUS_BULK_INSERT',
+  'TAB_HIDDEN',
+  'TAB_VISIBLE',
+  'WINDOW_BLUR',
+  'WINDOW_FOCUS',
+  'PAGE_UNLOAD',
+  'NETWORK_OFFLINE',
+  'NETWORK_ONLINE',
+  'IP_CHANGED',
+  'EXAM_SUBMITTED',
+  'EXAM_AUTO_SUBMITTED',
+] as const;
+const TIMELINE_SET = new Set<string>(TIMELINE_EVENT_TYPES);
 
 /** No row, or a row only ever locked (never saved), is still PENDING. */
 export function evaluationState(e: SubmissionSource['evaluation']): EvaluationState {
@@ -124,9 +158,30 @@ function toMarkingQuestion(q: MarkingQuestionSource, activity: ActivitySource[])
   };
 }
 
+export function toTimeline(activity: ActivitySource[], questions: MarkingQuestionSource[]): TimelineEventDto[] {
+  const orderOf = new Map(questions.map((q) => [q.id, q.order]));
+  return activity
+    .filter((a) => TIMELINE_SET.has(a.eventType))
+    .map((a) => {
+      let bulk: TimelineEventDto['bulk'] = null;
+      if (a.eventType === 'SUSPICIOUS_BULK_INSERT') {
+        const m = (a.metadata ?? {}) as { grown?: unknown; typed?: unknown };
+        bulk = { grown: finiteOr0(m.grown), typed: finiteOr0(m.typed) };
+      }
+      return {
+        at: a.createdAt.toISOString(),
+        type: a.eventType,
+        questionOrder: a.questionId ? (orderOf.get(a.questionId) ?? null) : null,
+        bulk,
+      };
+    });
+}
+
 export function toMarkingView(attempt: MarkingSource, viewerRole: AdminRole): MarkingViewDto {
   return {
     ...toSubmissionView(attempt, viewerRole),
+    startedAt: attempt.startedAt.toISOString(),
     questions: [...attempt.questions].sort((a, b) => a.order - b.order).map((q) => toMarkingQuestion(q, attempt.activity)),
+    timeline: toTimeline(attempt.activity, attempt.questions),
   };
 }

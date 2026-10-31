@@ -90,8 +90,23 @@ export interface MarkingQuestionDto {
   evaluation: { marks: number | null; comment: string | null };
 }
 
+/**
+ * One event from the candidate's exam, for the marking screen's timeline. Built from a
+ * whitelist of event types; never carries IPs, devices or other raw metadata (blind marking).
+ */
+export interface TimelineEventDto {
+  at: string;
+  type: string;
+  /** The question open when it happened, when the event names one. */
+  questionOrder: number | null;
+  /** Only for SUSPICIOUS_BULK_INSERT: characters the answer grew by vs characters typed. */
+  bulk: { grown: number; typed: number } | null;
+}
+
 export interface MarkingViewDto extends SubmissionViewDto {
+  startedAt: string;
   questions: MarkingQuestionDto[];
+  timeline: TimelineEventDto[];
 }
 
 export interface LockDto {

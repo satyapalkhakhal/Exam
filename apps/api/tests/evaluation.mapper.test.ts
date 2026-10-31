@@ -129,3 +129,28 @@ test('evaluation status: no row or never saved is PENDING', () => {
   assert.equal(toSubmissionView({ ...submission, evaluation: { status: 'DRAFT', evaluatorId: null } }, 'EVALUATOR').evaluationStatus, 'PENDING');
   assert.equal(toSubmissionView({ ...submission, evaluation: { status: 'SUBMITTED', evaluatorId: 'x' } }, 'EVALUATOR').evaluationStatus, 'SUBMITTED');
 });
+
+test('timeline: whitelisted exam events in order, with question number and bulk numbers only', () => {
+  const src = {
+    ...marking,
+    activity: [
+      ...(marking as unknown as { activity: unknown[] }).activity,
+      { eventType: 'IP_CHANGED', questionId: null, createdAt: t1, metadata: { from: '203.0.113.7', to: '198.51.100.9' }, ip: '198.51.100.9' },
+      { eventType: 'OTP_VERIFIED', questionId: null, createdAt: t1, metadata: {}, ip: '1.1.1.1' },
+      { eventType: 'QUESTION_VIEWED', questionId: 'aq-unknown', createdAt: t1, metadata: {}, ip: '1.1.1.1' },
+    ],
+  } as unknown as MarkingSource;
+  for (const role of ['EVALUATOR', 'SUPER_ADMIN'] as const) {
+    const out = toMarkingView(src, role);
+    assert.equal(out.startedAt, t0.toISOString());
+    assert.deepEqual(out.timeline, [
+      { at: t0.toISOString(), type: 'PASTE_ATTEMPT', questionOrder: 1, bulk: null },
+      { at: t1.toISOString(), type: 'SUSPICIOUS_BULK_INSERT', questionOrder: 1, bulk: { grown: 400, typed: 3 } },
+      { at: t1.toISOString(), type: 'TAB_HIDDEN', questionOrder: null, bulk: null },
+      { at: t1.toISOString(), type: 'IP_CHANGED', questionOrder: null, bulk: null },
+      { at: t1.toISOString(), type: 'QUESTION_VIEWED', questionOrder: null, bulk: null },
+    ]);
+    const json = JSON.stringify(out.timeline);
+    assert.ok(!json.includes('203.0.113.7') && !json.includes('198.51.100.9'), 'IP addresses never reach the timeline');
+  }
+});

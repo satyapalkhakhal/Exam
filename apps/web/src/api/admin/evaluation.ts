@@ -71,7 +71,17 @@ export interface MarkingView extends Partial<SaPii> {
   submittedAt: string | null;
   evaluationStatus: EvaluationFilter;
   totalMarks?: number | null;
+  startedAt: string;
   questions: MarkingQuestion[];
+  timeline: TimelineEvent[];
+}
+
+/** One exam event (type, time, open question); never IPs or devices. */
+export interface TimelineEvent {
+  at: string;
+  type: string;
+  questionOrder: number | null;
+  bulk: { grown: number; typed: number } | null;
 }
 
 export interface LockInfo {
