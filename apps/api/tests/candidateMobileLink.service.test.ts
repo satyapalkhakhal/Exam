@@ -63,7 +63,7 @@ function setup(
     hasGrantedLogin: async () => false,
     recordLocation: async () => {},
     recordActivity: async (e) => void activity.push({ eventType: e.eventType, metadata: e.metadata }),
-    findExamSetting: async () => null,
+    listRoundCards: async () => [],
   };
   const deps: CandidateAuthDeps = {
     repo,

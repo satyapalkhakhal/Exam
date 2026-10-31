@@ -1,6 +1,5 @@
 // modules/jobRoles/jobRoles.repository.ts
-// job_roles + exam_settings access. A role and its default settings row are
-// created together, and every write commits with its audit row.
+// job_roles access; every write commits with its audit row.
 
 import { prisma } from '../../infrastructure/db/prisma.js';
 import { Prisma } from '../../generated/prisma/client.js';
@@ -8,19 +7,7 @@ import { conflict } from '../../shared/errors.js';
 import { writeAudit } from '../audit/index.js';
 import type { JobRolesRepository } from './jobRoles.service.js';
 
-const settingSelect = {
-  durationMinutes: true,
-  windowStart: true,
-  windowEnd: true,
-  instructions: true,
-  isOpen: true,
-  questionsLocked: true,
-} as const;
-
-const include = {
-  examSetting: { select: settingSelect },
-  _count: { select: { questions: true, candidates: true } },
-} as const;
+const include = { _count: { select: { exams: true } } } as const;
 
 const NAME_TAKEN = 'A job role with this name already exists.';
 const isUnique = (err: unknown): boolean =>
@@ -38,7 +25,7 @@ export const jobRolesRepository: JobRolesRepository = {
   async create(data, audit) {
     try {
       return await prisma.$transaction(async (tx) => {
-        const row = await tx.jobRole.create({ data: { ...data, examSetting: { create: {} } }, include });
+        const row = await tx.jobRole.create({ data, include });
         await writeAudit(tx, audit(row.id));
         return row;
       });
@@ -59,22 +46,5 @@ export const jobRolesRepository: JobRolesRepository = {
       if (isUnique(err)) throw conflict(NAME_TAKEN);
       throw err;
     }
-  },
-
-  async upsertSettings(jobRoleId, data, audit) {
-    return prisma.$transaction(async (tx) => {
-      const row = await tx.examSetting.upsert({
-        where: { jobRoleId },
-        create: { jobRoleId, ...data },
-        update: data,
-        select: settingSelect,
-      });
-      await writeAudit(tx, audit);
-      return row;
-    });
-  },
-
-  getSettings(jobRoleId) {
-    return prisma.examSetting.findUnique({ where: { jobRoleId }, select: settingSelect });
   },
 };

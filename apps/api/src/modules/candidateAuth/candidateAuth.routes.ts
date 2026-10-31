@@ -2,7 +2,7 @@
 // /api/candidate: the public auth endpoints (rate limited per IP and
 // identifier; refresh and logout work from the refresh cookie alone), the
 // first-time mobile registration (limited per IP and email), then the
-// session-protected reads and the location capture.
+// session-protected reads (profile, round cards) and the location capture.
 
 import { Router } from 'express';
 import {
@@ -57,6 +57,6 @@ export function createCandidateAuthRouter(service: CandidateAuthService): Router
   r.post('/auth/logout', c.logout);
   r.get('/me', auth, c.me);
   r.post('/location', auth, candidateLocationLimiter, validate({ body: LocationPayloadSchema }), c.location);
-  r.get('/exam/info', auth, c.examInfo);
+  r.get('/exams', auth, c.exams);
   return r;
 }

@@ -2,9 +2,17 @@
 // Pure row validation for the candidate import: no I/O, so the preview is built
 // (and unit-tested) from parsed rows plus the existing emails/mobiles. Row
 // numbers are the source line (header = 1); callers pass them from readSheet so
-// blank interior rows do not shift them, and index+2 is the fallback. Duplicates
-// (email or mobile, in the file or in the DB) are reported apart from errors and
-// skipped. Unmapped columns are kept in `extra`.
+// blank interior rows do not shift them, and index+2 is the fallback. Unmapped
+// columns are kept in `extra`.
+// Each row registers one person (by email) for one exam (the optional `exam`
+// column, else the chosen one). Outcomes (spec 5.2):
+// - new: unknown email -> a new person, their registration and Round 1 entry;
+// - addToExisting: the email is a person already (in the DB, or an earlier row
+//   of this file) not yet registered for that exam -> registration only; the
+//   person's profile is never changed by the file (the first row's wins);
+// - duplicate: that person is already registered for that exam (EXISTS in the
+//   DB, IN_FILE earlier in this file) -> skipped;
+// - error: the row's mobile belongs to a different person than its email.
 
 import { CANDIDATE_NAME_MAX, CANDIDATE_TEXT_MAX, normalizeMobile } from '@exam/shared';
 
@@ -19,7 +27,8 @@ export interface CandidateDraft {
   majorCpi: number | null;
   discipline: string | null;
   programme: string | null;
-  jobRoleId: string;
+  examId: string;
+  kind: 'new' | 'addToExisting';
   extra: Record<string, string>;
 }
 
@@ -40,12 +49,29 @@ export interface ParsedCandidates {
   duplicates: RowDuplicate[];
 }
 
-export interface ParseContext {
-  defaultJobRoleId: string;
-  rolesByLowerName: Map<string, string>;
-  existingEmails: Set<string>;
-  existingMobiles: Set<string>;
+export interface ExamRef {
+  id: string;
+  active: boolean;
+  /** Registering needs the exam's first round to exist. */
+  hasRounds: boolean;
 }
+
+export interface ExistingPerson {
+  id: string;
+  mobile: string | null;
+  examIds: Set<string>;
+}
+
+export interface ParseContext {
+  defaultExamId: string;
+  /** Every exam by trimmed, lower-cased name (names are unique). */
+  examsByLowerName: Map<string, ExamRef>;
+  /** Existing people by lower-cased email. */
+  peopleByEmail: Map<string, ExistingPerson>;
+  personIdByMobile: Map<string, string>;
+}
+
+export const MOBILE_TAKEN = 'mobile belongs to another candidate';
 
 export const HEADER_MAP = {
   name: 'fullName',
@@ -57,7 +83,7 @@ export const HEADER_MAP = {
   major_cpi: 'majorCpi',
   'major.discipline': 'discipline',
   'major.programme': 'programme',
-  job_role: 'jobRoleName',
+  exam: 'examName',
 } as const;
 
 export const TEMPLATE_COLUMNS = [
@@ -70,7 +96,7 @@ export const TEMPLATE_COLUMNS = [
   'major.programme',
   'email',
   'mobile',
-  'job_role',
+  'exam',
 ] as const;
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -88,8 +114,11 @@ export function parseCandidateRows(
   rowNumbers?: number[],
 ): ParsedCandidates {
   const out: ParsedCandidates = { valid: [], errors: [], duplicates: [] };
-  const seenEmails = new Set<string>();
-  const seenMobiles = new Set<string>();
+  // People first seen in this file (new emails): their mobile and exams so far.
+  const filePeople = new Map<string, { mobile: string | null; examIds: Set<string> }>();
+  const fileMobileOwner = new Map<string, string>();
+  // Exams already taken by rows of this file for existing people.
+  const fileExamsOfExisting = new Map<string, Set<string>>();
 
   rows.forEach((r, i) => {
     const row = rowNumbers?.[i] ?? i + 2;
@@ -129,12 +158,13 @@ export function parseCandidateRows(
       if ((text(col)?.length ?? 0) > CANDIDATE_TEXT_MAX) err(col, `Must be at most ${CANDIDATE_TEXT_MAX} characters`);
     }
 
-    let jobRoleId = ctx.defaultJobRoleId;
-    const roleName = (r.job_role ?? '').trim();
-    if (roleName !== '') {
-      const id = ctx.rolesByLowerName.get(roleName.toLowerCase());
-      if (id) jobRoleId = id;
-      else err('job_role', `Unknown job role "${roleName}"`);
+    let examId = ctx.defaultExamId;
+    const examName = (r.exam ?? '').trim();
+    if (examName !== '') {
+      const exam = ctx.examsByLowerName.get(examName.toLowerCase());
+      if (!exam || !exam.active) err('exam', `Unknown or inactive exam "${examName}"`);
+      else if (!exam.hasRounds) err('exam', `The exam "${examName}" has no rounds yet`);
+      else examId = exam.id;
     }
 
     if (errs.length > 0) {
@@ -142,16 +172,52 @@ export function parseCandidateRows(
       return;
     }
 
-    if (ctx.existingEmails.has(email) || (mobile !== null && ctx.existingMobiles.has(mobile))) {
-      out.duplicates.push({ row, reason: 'EXISTS' });
+    const existing = ctx.peopleByEmail.get(email);
+    const known = existing ?? filePeople.get(email);
+    const mobileOwnerId = mobile === null ? undefined : ctx.personIdByMobile.get(mobile);
+    const mobileFileOwner = mobile === null ? undefined : fileMobileOwner.get(mobile);
+    let kind: CandidateDraft['kind'];
+
+    if (existing) {
+      if (existing.examIds.has(examId)) {
+        out.duplicates.push({ row, reason: 'EXISTS' });
+        return;
+      }
+      const taken = fileExamsOfExisting.get(email) ?? new Set<string>();
+      if (taken.has(examId)) {
+        out.duplicates.push({ row, reason: 'IN_FILE' });
+        return;
+      }
+      if ((mobileOwnerId !== undefined && mobileOwnerId !== existing.id) || mobileFileOwner !== undefined) {
+        err('mobile', MOBILE_TAKEN);
+      } else {
+        taken.add(examId);
+        fileExamsOfExisting.set(email, taken);
+        kind = 'addToExisting';
+      }
+    } else if (known) {
+      if (known.examIds.has(examId)) {
+        out.duplicates.push({ row, reason: 'IN_FILE' });
+        return;
+      }
+      if (mobileOwnerId !== undefined || (mobileFileOwner !== undefined && mobileFileOwner !== email)) {
+        err('mobile', MOBILE_TAKEN);
+      } else {
+        known.examIds.add(examId);
+        kind = 'addToExisting';
+      }
+    } else if (mobileOwnerId !== undefined || mobileFileOwner !== undefined) {
+      err('mobile', MOBILE_TAKEN);
+    } else {
+      filePeople.set(email, { mobile, examIds: new Set([examId]) });
+      if (mobile !== null) fileMobileOwner.set(mobile, email);
+      kind = 'new';
+    }
+
+    if (errs.length > 0) {
+      out.errors.push(...errs);
       return;
     }
-    if (seenEmails.has(email) || (mobile !== null && seenMobiles.has(mobile))) {
-      out.duplicates.push({ row, reason: 'IN_FILE' });
-      return;
-    }
-    seenEmails.add(email);
-    if (mobile !== null) seenMobiles.add(mobile);
 
     const extra: Record<string, string> = {};
     for (const [k, v] of Object.entries(r)) {
@@ -169,7 +235,8 @@ export function parseCandidateRows(
       majorCpi,
       discipline: text('major.discipline'),
       programme: text('major.programme'),
-      jobRoleId,
+      examId,
+      kind: kind!,
       extra,
     });
   });

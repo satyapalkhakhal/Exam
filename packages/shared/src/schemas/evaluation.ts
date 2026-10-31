@@ -17,6 +17,8 @@ const page = z.coerce.number().int().min(1).default(1);
 const pageSize = z.coerce.number().int().min(1).max(100).default(25);
 
 export const SubmissionListQuerySchema = z.object({
+  roundId: uuid.optional(),
+  examId: uuid.optional(),
   jobRoleId: uuid.optional(),
   evaluation: z.enum(EVALUATION_STATES).optional(),
   search: z.string().trim().max(100).optional(),
@@ -52,8 +54,8 @@ export const DecisionSchema = z.object({
 });
 export type DecisionInput = z.infer<typeof DecisionSchema>;
 
-export const LeaderboardQuerySchema = z.object({ jobRoleId: uuid });
-export const ExportQuerySchema = z.object({ jobRoleId: uuid.optional() });
+export const LeaderboardQuerySchema = z.object({ roundId: uuid });
+export const ExportQuerySchema = z.object({ roundId: uuid.optional() });
 
 export interface CandidatePiiDto {
   candidateId: string;
@@ -71,6 +73,8 @@ export interface SubmissionViewDto extends Partial<CandidatePiiDto> {
   attemptId: string;
   candidateCode: string;
   jobRole: string;
+  examName: string;
+  roundNumber: number;
   submittedAt: string | null;
   timeTakenSec: number | null;
   submitType: 'MANUAL' | 'AUTO' | null;
@@ -126,17 +130,20 @@ export interface LeaderboardRowDto extends CandidatePiiDto {
   flagCounts: Record<string, number>;
 }
 
-export interface DashboardRoleDto {
-  jobRoleId: string;
+export interface DashboardRoundDto {
+  examId: string;
+  examName: string;
   jobRoleName: string;
-  refApplicantCount: number;
-  imported: number;
+  roundId: string;
+  roundNumber: number;
+  /** Candidates holding an entry in this round. */
+  entered: number;
   notStarted: number;
   inProgress: number;
   submitted: number;
   autoSubmitted: number;
+  pendingEvaluation: number;
   evaluated: number;
   shortlisted: number;
   rejected: number;
-  pendingEvaluation: number;
 }

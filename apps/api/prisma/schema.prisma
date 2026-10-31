@@ -5,13 +5,25 @@
 // by Postgres; every FK is onDelete: Restrict except answer_versions ->
 // answers (Cascade), so exam data can never vanish through a stray delete.
 //
-// Not modeled here, intentionally: the partial unique index
-//   CREATE UNIQUE INDEX uq_exam_attempts_candidate_active
-//     ON exam_attempts (candidate_id) WHERE status <> 'RESET';
-// It enforces "one attempt per candidate unless reset" (a reset keeps the old
-// row as RESET). Prisma cannot declare a partial unique index on an enum
-// predicate, so it is appended as raw SQL to the _init migration; do not drop
-// it when generating future migrations.
+// Not modeled here, intentionally: two partial unique indexes on exam_attempts,
+// appended as raw SQL to the 20261101120000_exams_rounds_registrations
+// migration (Prisma cannot declare a partial unique index on an enum
+// predicate); do not drop them when generating future migrations.
+//   CREATE UNIQUE INDEX uq_exam_attempts_entry_live
+//     ON exam_attempts (round_entry_id) WHERE status <> 'RESET';
+//     One live attempt per round entry (a reset keeps the old row as RESET).
+//   CREATE UNIQUE INDEX uq_exam_attempts_candidate_in_progress
+//     ON exam_attempts (candidate_id) WHERE status = 'IN_PROGRESS';
+//     One exam at a time: a person never has two attempts in progress.
+// They replace uq_exam_attempts_candidate_active (one live attempt per
+// candidate) from the _init migration, which that migration drops.
+//
+// Job profile -> exams -> rounds: exam settings and questions belong to an
+// exam_round, a person's place in an exam is an exam_registration, and their
+// place in one round is a round_entry. exam_settings, questions.job_role_id,
+// candidates.job_role_id and candidates.status are kept from the
+// one-profile-per-candidate model but are no longer read or written; they go
+// in a later cleanup release.
 //
 // activity_logs and admin_audit_logs are append-only: the app has no update or
 // delete path for them.
@@ -118,8 +130,84 @@ model JobRole {
   questions     Question[]
   candidates    Candidate[]
   importBatches ImportBatch[]
+  exams         Exam[]
 
   @@map("job_roles")
+}
+
+model Exam {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  jobRoleId String   @map("job_role_id") @db.Uuid
+  name      String   @unique
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  jobRole       JobRole            @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  rounds        ExamRound[]
+  registrations ExamRegistration[]
+  importBatches ImportBatch[]
+
+  @@index([jobRoleId])
+  @@map("exams")
+}
+
+model ExamRound {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  examId          String    @map("exam_id") @db.Uuid
+  roundNumber     Int       @map("round_number")
+  name            String?
+  durationMinutes Int       @default(60) @map("duration_minutes")
+  windowStart     DateTime? @map("window_start") @db.Timestamptz(6)
+  windowEnd       DateTime? @map("window_end") @db.Timestamptz(6)
+  instructions    String    @default("")
+  isOpen          Boolean   @default(false) @map("is_open")
+  questionsLocked Boolean   @default(false) @map("questions_locked")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  exam      Exam         @relation(fields: [examId], references: [id], onDelete: Restrict)
+  entries   RoundEntry[]
+  questions Question[]
+
+  @@unique([examId, roundNumber])
+  @@map("exam_rounds")
+}
+
+model ExamRegistration {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  candidateId   String   @map("candidate_id") @db.Uuid
+  examId        String   @map("exam_id") @db.Uuid
+  importBatchId String?  @map("import_batch_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  candidate   Candidate    @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+  exam        Exam         @relation(fields: [examId], references: [id], onDelete: Restrict)
+  importBatch ImportBatch? @relation(fields: [importBatchId], references: [id], onDelete: Restrict)
+  entries     RoundEntry[]
+
+  @@unique([candidateId, examId])
+  @@index([examId])
+  @@index([importBatchId])
+  @@map("exam_registrations")
+}
+
+model RoundEntry {
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  registrationId String          @map("registration_id") @db.Uuid
+  roundId        String          @map("round_id") @db.Uuid
+  status         CandidateStatus @default(NOT_STARTED)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  registration ExamRegistration         @relation(fields: [registrationId], references: [id], onDelete: Restrict)
+  round        ExamRound                @relation(fields: [roundId], references: [id], onDelete: Restrict)
+  attempts     ExamAttempt[]
+  history      CandidateStatusHistory[]
+
+  @@unique([registrationId, roundId])
+  @@index([roundId, status])
+  @@map("round_entries")
 }
 
 model ExamSetting {
@@ -141,7 +229,8 @@ model ExamSetting {
 
 model Question {
   id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  jobRoleId          String   @map("job_role_id") @db.Uuid
+  jobRoleId          String?  @map("job_role_id") @db.Uuid
+  roundId            String   @map("round_id") @db.Uuid
   text               String
   normalizedTextHash String   @map("normalized_text_hash")
   maxMarks           Decimal  @map("max_marks") @db.Decimal(6, 1)
@@ -151,11 +240,13 @@ model Question {
   createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  jobRole          JobRole           @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  jobRole          JobRole?          @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  round            ExamRound         @relation(fields: [roundId], references: [id], onDelete: Restrict)
   attemptQuestions AttemptQuestion[]
 
-  @@unique([jobRoleId, normalizedTextHash])
+  @@unique([roundId, normalizedTextHash])
   @@index([jobRoleId, active, displayOrder])
+  @@index([roundId, active, displayOrder])
   @@map("questions")
 }
 
@@ -163,6 +254,7 @@ model ImportBatch {
   id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   kind         ImportKind
   jobRoleId    String?    @map("job_role_id") @db.Uuid
+  examId       String?    @map("exam_id") @db.Uuid
   fileName     String     @map("file_name")
   fileHash     String     @map("file_hash")
   uploadedById String     @map("uploaded_by_id") @db.Uuid
@@ -172,14 +264,17 @@ model ImportBatch {
   errors       Json       @default("[]")
   createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  jobRole    JobRole?    @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
-  uploadedBy AdminUser   @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
-  candidates Candidate[]
+  jobRole       JobRole?           @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  exam          Exam?              @relation(fields: [examId], references: [id], onDelete: Restrict)
+  uploadedBy    AdminUser          @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+  candidates    Candidate[]
+  registrations ExamRegistration[]
 
   @@index([kind, createdAt])
   @@index([fileHash])
   @@index([uploadedById])
   @@index([jobRoleId])
+  @@index([examId])
   @@map("import_batches")
 }
 
@@ -196,7 +291,7 @@ model Candidate {
   discipline     String?
   programme      String?
   extra          Json            @default("{}")
-  jobRoleId      String          @map("job_role_id") @db.Uuid
+  jobRoleId      String?         @map("job_role_id") @db.Uuid
   eligible       Boolean         @default(true)
   locationExempt Boolean         @default(false) @map("location_exempt")
   status         CandidateStatus @default(NOT_STARTED)
@@ -204,12 +299,13 @@ model Candidate {
   createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  jobRole      JobRole                  @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
-  importBatch  ImportBatch?             @relation(fields: [importBatchId], references: [id], onDelete: Restrict)
-  attempts     ExamAttempt[]
-  activityLogs ActivityLog[]
-  loginLogs    CandidateLoginLog[]
-  history      CandidateStatusHistory[]
+  jobRole       JobRole?                 @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  importBatch   ImportBatch?             @relation(fields: [importBatchId], references: [id], onDelete: Restrict)
+  attempts      ExamAttempt[]
+  activityLogs  ActivityLog[]
+  loginLogs     CandidateLoginLog[]
+  history       CandidateStatusHistory[]
+  registrations ExamRegistration[]
 
   @@index([jobRoleId, status])
   @@index([importBatchId])
@@ -220,6 +316,7 @@ model Candidate {
 model ExamAttempt {
   id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   candidateId     String        @map("candidate_id") @db.Uuid
+  roundEntryId    String        @map("round_entry_id") @db.Uuid
   status          AttemptStatus @default(IN_PROGRESS)
   startedAt       DateTime      @map("started_at") @db.Timestamptz(6)
   endsAt          DateTime      @map("ends_at") @db.Timestamptz(6)
@@ -235,11 +332,13 @@ model ExamAttempt {
   updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   candidate    Candidate          @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+  roundEntry   RoundEntry         @relation(fields: [roundEntryId], references: [id], onDelete: Restrict)
   questions    AttemptQuestion[]
   evaluation   AttemptEvaluation?
   activityLogs ActivityLog[]
 
   @@index([candidateId])
+  @@index([roundEntryId])
   @@index([status, endsAt])
   @@map("exam_attempts")
 }
@@ -378,18 +477,21 @@ model AttemptEvaluation {
 }
 
 model CandidateStatusHistory {
-  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  candidateId String           @map("candidate_id") @db.Uuid
-  fromStatus  CandidateStatus? @map("from_status")
-  toStatus    CandidateStatus  @map("to_status")
-  byAdminId   String?          @map("by_admin_id") @db.Uuid
-  comment     String?
-  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  id           String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  candidateId  String           @map("candidate_id") @db.Uuid
+  roundEntryId String           @map("round_entry_id") @db.Uuid
+  fromStatus   CandidateStatus? @map("from_status")
+  toStatus     CandidateStatus  @map("to_status")
+  byAdminId    String?          @map("by_admin_id") @db.Uuid
+  comment      String?
+  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  candidate Candidate  @relation(fields: [candidateId], references: [id], onDelete: Restrict)
-  byAdmin   AdminUser? @relation(fields: [byAdminId], references: [id], onDelete: Restrict)
+  candidate  Candidate  @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+  roundEntry RoundEntry @relation(fields: [roundEntryId], references: [id], onDelete: Restrict)
+  byAdmin    AdminUser? @relation(fields: [byAdminId], references: [id], onDelete: Restrict)
 
   @@index([candidateId, createdAt])
+  @@index([roundEntryId, createdAt])
   @@index([byAdminId])
   @@map("candidate_status_history")
 }

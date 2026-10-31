@@ -54,7 +54,7 @@ export const CandidateCreateSchema = z.object({
   majorCpi: cpi.optional(),
   discipline: optText.optional(),
   programme: optText.optional(),
-  jobRoleId: z.string().uuid(),
+  examId: z.string().uuid(),
 });
 export type CandidateCreateInput = z.infer<typeof CandidateCreateSchema>;
 
@@ -69,10 +69,16 @@ export const CandidateUpdateSchema = z
     majorCpi: cpi.optional(),
     discipline: optText.optional(),
     programme: optText.optional(),
-    jobRoleId: z.string().uuid().optional(),
   })
   .refine((v) => Object.values(v).some((x) => x !== undefined), { message: 'Nothing to update' });
 export type CandidateUpdateInput = z.infer<typeof CandidateUpdateSchema>;
+
+// Registers an existing candidate for another exam.
+export const RegistrationCreateSchema = z.object({ examId: z.string().uuid() });
+export type RegistrationCreateInput = z.infer<typeof RegistrationCreateSchema>;
+
+// Candidate import is per exam; its rows register into the exam's first round.
+export const CandidateImportPreviewBodySchema = z.object({ examId: z.string().uuid() });
 
 export const CandidateEligibilitySchema = z.object({ eligible: z.boolean() });
 export const CandidateLocationExemptSchema = z.object({
@@ -87,6 +93,8 @@ export const CANDIDATE_SORT_KEYS = ['fullName', 'majorCpi', 'xPercentage', 'xiiP
 export const CandidateListQuerySchema = z.object({
   search: z.string().trim().max(100).optional(),
   jobRoleId: z.string().uuid().optional(),
+  examId: z.string().uuid().optional(),
+  roundId: z.string().uuid().optional(),
   status: z.enum(CANDIDATE_STATUSES).optional(),
   flagged: bool.optional(),
   sort: z.enum(CANDIDATE_SORT_KEYS).default('createdAt'),
@@ -103,6 +111,11 @@ export type CandidateDetailQuery = z.infer<typeof CandidateDetailQuerySchema>;
 
 export interface CandidateRowDto {
   id: string;
+  entryId: string;
+  examId: string;
+  examName: string;
+  roundId: string;
+  roundNumber: number;
   candidateCode: string;
   fullName: string;
   email: string;
@@ -115,6 +128,7 @@ export interface CandidateRowDto {
   programme: string | null;
   jobRoleId: string;
   jobRoleName: string;
+  /** The round entry's status. */
   status: CandidateStatus;
   eligible: boolean;
   locationExempt: boolean;
@@ -147,7 +161,10 @@ export interface CandidateFlagsDto {
 }
 
 export interface CandidateDetailDto {
+  /** The person; the row's exam/round fields are their latest registration's furthest round. */
   candidate: CandidateRowDto & { extra: Record<string, string> };
+  /** Every exam the person is registered for, oldest first, with its rounds. */
+  registrations: CandidateRegistrationDto[];
   loginLogs: CandidateLoginLogDto[];
   attempt: { id: string; status: string; startedAt: string; submittedAt: string | null } | null;
   activity: { items: { id: string; type: string; createdAt: string; detail: unknown }[]; total: number; page: number; pageSize: number };
@@ -161,4 +178,44 @@ export interface CandidateImportRow {
   email: string;
   mobile: string | null;
   rollNumber: string | null;
+}
+
+export interface RoundEntryDto {
+  entryId: string;
+  roundId: string;
+  roundNumber: number;
+  roundName: string;
+  status: CandidateStatus;
+  attempt: { id: string; status: string; startedAt: string; submittedAt: string | null } | null;
+}
+
+export interface CandidateRegistrationDto {
+  registrationId: string;
+  examId: string;
+  examName: string;
+  jobRoleName: string;
+  entries: RoundEntryDto[];
+}
+
+export type CandidateRoundState =
+  | 'READY'
+  | 'NOT_OPEN'
+  | 'BEFORE_WINDOW'
+  | 'CLOSED'
+  | 'IN_PROGRESS'
+  | 'SUBMITTED'
+  | 'BLOCKED_OTHER_IN_PROGRESS';
+
+/** One round as the candidate sees it on their dashboard. */
+export interface CandidateRoundCardDto {
+  entryId: string;
+  jobRoleName: string;
+  examName: string;
+  roundNumber: number;
+  roundName: string;
+  durationMinutes: number;
+  windowStart: string | null;
+  windowEnd: string | null;
+  instructions: string;
+  state: CandidateRoundState;
 }

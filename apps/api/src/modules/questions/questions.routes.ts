@@ -1,7 +1,7 @@
 // modules/questions/questions.routes.ts
 // Two routers, both mounted behind authenticateAdmin in router.ts: /admin/questions
 // (reads open to any admin so Evaluators see guidance; writes Super Admin) and the
-// role-scoped /admin/roles/:id/questions/* (order, unlock; Super Admin).
+// round-scoped /admin/rounds/:id/questions/* (order, unlock; Super Admin).
 
 import { Router } from 'express';
 import { authorize } from '../../shared/middleware/authorize.js';
@@ -45,7 +45,7 @@ export function createQuestionsRouter(service: QuestionsService): Router {
   return r;
 }
 
-export function createRoleQuestionsRouter(service: QuestionsService): Router {
+export function createRoundQuestionsRouter(service: QuestionsService): Router {
   const c = createQuestionsController(service);
   const r = Router();
   r.patch('/:id/questions/order', superAdmin, validate({ params: IdParamsSchema, body: QuestionOrderSchema }), c.reorder);

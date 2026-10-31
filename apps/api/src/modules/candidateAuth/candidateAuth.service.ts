@@ -1,5 +1,6 @@
 // modules/candidateAuth/candidateAuth.service.ts
-// Candidate sign-in (design §7.1) and location capture (§7.2a).
+// Candidate sign-in (design §7.1), location capture (§7.2a) and the round
+// cards on the candidate's dashboard (spec §5.4).
 // - request-otp never says whether a candidate exists: unknown, ineligible and
 //   undeliverable all return the same {sent:true}; only OTP_COOLDOWN is
 //   surfaced. Delivery problems go to the audit log and the candidate's
@@ -16,7 +17,7 @@
 //   LOGIN row exists for *this* login; every new login asks again.
 // Dependencies are injected so the rules are unit tested without a database.
 
-import type { CandidateSelf } from '@exam/shared';
+import { examAvailability, type CandidateRoundCardDto, type CandidateRoundState, type CandidateSelf } from '@exam/shared';
 import { logger } from '../../infrastructure/logger/logger.js';
 import { AppError, conflict, unauthorized } from '../../shared/errors.js';
 import { maskMobile } from '../../shared/utils/piiMask.js';
@@ -49,12 +50,20 @@ export interface LocationEntry {
   client: ClientInfo;
 }
 
-export interface ExamSettingRow {
+/** One of the candidate's round entries with its round settings and live attempt (if any). */
+export interface RoundCardRow {
+  entryId: string;
+  jobRoleName: string;
+  examName: string;
+  roundNumber: number;
+  roundName: string | null;
   durationMinutes: number;
   windowStart: Date | null;
   windowEnd: Date | null;
   instructions: string;
   isOpen: boolean;
+  /** The entry's non-RESET attempt status; null when the round was never started (or was reset). */
+  attemptStatus: 'IN_PROGRESS' | 'SUBMITTED' | 'AUTO_SUBMITTED' | null;
 }
 
 export interface CandidateAuthRepository {
@@ -70,7 +79,12 @@ export interface CandidateAuthRepository {
     userAgent: string;
     metadata?: Record<string, unknown>;
   }): Promise<void>;
-  findExamSetting(jobRoleId: string): Promise<ExamSettingRow | null>;
+  /**
+   * The candidate's round entries in active exams (plus any entry whose attempt
+   * is running, so a deactivated exam can still be resumed), ordered by job
+   * profile, exam and round number.
+   */
+  listRoundCards(candidateId: string): Promise<RoundCardRow[]>;
 }
 
 export interface CandidateAuthDeps {
@@ -303,21 +317,41 @@ export function createCandidateAuthService(deps: CandidateAuthDeps) {
     };
   }
 
-  async function examInfo(candidateId: string) {
+  const WINDOW_STATE = { OPEN: 'READY', NOT_OPEN: 'NOT_OPEN', BEFORE_WINDOW: 'BEFORE_WINDOW', AFTER_WINDOW: 'CLOSED' } as const;
+
+  /**
+   * The dashboard's round cards. A started round shows IN_PROGRESS or (once
+   * finished, whatever its marks or decision) SUBMITTED; while one round is
+   * running every other shows BLOCKED_OTHER_IN_PROGRESS; otherwise the round's
+   * open switch and window decide. Rounds without an entry are never listed.
+   */
+  async function exams(candidateId: string): Promise<CandidateRoundCardDto[]> {
     const candidate = await deps.repo.findById(candidateId);
     if (!candidate || !candidate.eligible) throw unauthorized();
-    const s = await deps.repo.findExamSetting(candidate.jobRole.id);
-    return {
-      durationMinutes: s?.durationMinutes ?? 60,
-      windowStart: s?.windowStart?.toISOString() ?? null,
-      windowEnd: s?.windowEnd?.toISOString() ?? null,
-      instructions: s?.instructions ?? '',
-      isOpen: s?.isOpen ?? false,
-      serverNow: now().toISOString(),
+    const rows = await deps.repo.listRoundCards(candidateId);
+    const at = now();
+    const running = rows.some((r) => r.attemptStatus === 'IN_PROGRESS');
+    const stateOf = (r: RoundCardRow): CandidateRoundState => {
+      if (r.attemptStatus === 'IN_PROGRESS') return 'IN_PROGRESS';
+      if (r.attemptStatus !== null) return 'SUBMITTED';
+      if (running) return 'BLOCKED_OTHER_IN_PROGRESS';
+      return WINDOW_STATE[examAvailability(r, at)];
     };
+    return rows.map((r) => ({
+      entryId: r.entryId,
+      jobRoleName: r.jobRoleName,
+      examName: r.examName,
+      roundNumber: r.roundNumber,
+      roundName: r.roundName ?? '',
+      durationMinutes: r.durationMinutes,
+      windowStart: r.windowStart?.toISOString() ?? null,
+      windowEnd: r.windowEnd?.toISOString() ?? null,
+      instructions: r.instructions,
+      state: stateOf(r),
+    }));
   }
 
-  return { requestOtp, verifyOtp, requestMobileLink, verifyMobileLink, refresh, logout, isActive, me, recordLocation, examInfo };
+  return { requestOtp, verifyOtp, requestMobileLink, verifyMobileLink, refresh, logout, isActive, me, recordLocation, exams };
 }
 
 export type CandidateAuthService = ReturnType<typeof createCandidateAuthService>;

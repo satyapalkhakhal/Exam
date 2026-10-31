@@ -3,8 +3,13 @@
 // only reads, locks and writes. Writes that must agree with what was checked
 // run inside `transaction`, whose methods take the row locks the service
 // relies on:
-// - start locks the role's exam_settings row, then the candidate row, so two
-//   starts (or a start and a role change) serialise;
+// - start locks the candidate row, then the round's exam_rounds row (shared
+//   once its questions are locked), then the round entry, so two starts of
+//   one person (any rounds) serialise and a question write cannot slip in;
+//   the partial unique index uq_exam_attempts_candidate_in_progress is the
+//   backstop for "one exam at a time";
+// - submit and auto-submit lock the round entry before the attempt (the
+//   global lock order: candidate -> exam -> round -> entry -> attempt);
 // - a save holds the attempt FOR SHARE and its answer FOR UPDATE, so two saves
 //   of one answer apply in order and a submit cannot interleave with a save;
 // - submit and auto-submit flip the status with a guarded update, so only one
@@ -13,7 +18,7 @@
 
 import crypto from 'node:crypto';
 import { prisma } from '../../infrastructure/db/prisma.js';
-import type { Prisma } from '../../generated/prisma/client.js';
+import { Prisma } from '../../generated/prisma/client.js';
 
 type Tx = Prisma.TransactionClient;
 export type CandidateStatusValue = 'NOT_STARTED' | 'IN_PROGRESS' | 'SUBMITTED' | 'AUTO_SUBMITTED' | 'EVALUATED' | 'SHORTLISTED' | 'REJECTED';
@@ -34,12 +39,60 @@ export interface ActivityEntry {
 export interface LiveAttempt {
   id: string;
   candidateId: string;
+  roundEntryId: string;
   status: AttemptStatusValue;
   endsAt: Date;
   activeSessionId: string;
 }
 
-const liveSelect = { id: true, candidateId: true, status: true, endsAt: true, activeSessionId: true } as const;
+const liveSelect = { id: true, candidateId: true, roundEntryId: true, status: true, endsAt: true, activeSessionId: true } as const;
+
+/** A round entry with what start needs to check and to name it ("<exam> · Round n"). */
+export interface EntryInfo {
+  id: string;
+  candidateId: string;
+  roundId: string;
+  status: CandidateStatusValue;
+  examName: string;
+  roundNumber: number;
+}
+
+/** The candidate's IN_PROGRESS attempt with the name of its round, for the EXAM_IN_PROGRESS message. */
+export interface InProgressAttempt extends LiveAttempt {
+  examName: string;
+  roundNumber: number;
+}
+
+const inProgressSelect = {
+  ...liveSelect,
+  roundEntry: { select: { round: { select: { roundNumber: true, exam: { select: { name: true } } } } } },
+} as const;
+
+type InProgressRow = Prisma.ExamAttemptGetPayload<{ select: typeof inProgressSelect }>;
+const toInProgress = (r: InProgressRow | null): InProgressAttempt | null =>
+  r && {
+    id: r.id,
+    candidateId: r.candidateId,
+    roundEntryId: r.roundEntryId,
+    status: r.status,
+    endsAt: r.endsAt,
+    activeSessionId: r.activeSessionId,
+    examName: r.roundEntry.round.exam.name,
+    roundNumber: r.roundEntry.round.roundNumber,
+  };
+
+const IN_PROGRESS_INDEX = 'uq_exam_attempts_candidate_in_progress';
+
+/**
+ * True when Postgres refused an attempt insert because the candidate already
+ * has an IN_PROGRESS attempt (the partial unique index). The pg driver adapter
+ * names the index in the error's meta; only the name is matched (the message
+ * also carries a code frame, which may mention any column).
+ */
+export function isCandidateInProgressViolation(err: unknown): boolean {
+  if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') return false;
+  return JSON.stringify(err.meta ?? {}).includes(IN_PROGRESS_INDEX);
+}
 
 const activityData = (e: ActivityEntry): Prisma.ActivityLogCreateManyInput => ({
   candidateId: e.candidateId,
@@ -56,41 +109,57 @@ const activityData = (e: ActivityEntry): Prisma.ActivityLogCreateManyInput => ({
 function txMethods(tx: Tx) {
   return {
     /**
-     * Holds the role's exam_settings row so question writes (which take it FOR
+     * Holds the round's exam_rounds row so question writes (which take it FOR
      * UPDATE in the questions module) serialise with starts, and makes sure
-     * questions_locked is true. Once the role is locked, starts only take it FOR
-     * SHARE and run in parallel; only the first start(s) of a role take the
-     * exclusive lock, through the guarded UPDATE, and never upgrade a share lock
-     * they already hold. Returns false when the role has no settings row.
+     * questions_locked is true. Once the round is locked, starts only take it
+     * FOR SHARE and run in parallel; only the first start(s) of a round take
+     * the exclusive lock, through the guarded UPDATE, and never upgrade a share
+     * lock they already hold. Returns false when the round does not exist.
      */
-    async holdRoleLocked(jobRoleId: string): Promise<boolean> {
+    async holdRoundLocked(roundId: string): Promise<boolean> {
       const plain = await tx.$queryRaw<{ questions_locked: boolean }[]>`
-        SELECT questions_locked FROM exam_settings WHERE job_role_id = ${jobRoleId}::uuid`;
+        SELECT questions_locked FROM exam_rounds WHERE id = ${roundId}::uuid`;
       if (!plain[0]) return false;
       if (plain[0].questions_locked) {
         const held = await tx.$queryRaw<{ questions_locked: boolean }[]>`
-          SELECT questions_locked FROM exam_settings WHERE job_role_id = ${jobRoleId}::uuid FOR SHARE`;
+          SELECT questions_locked FROM exam_rounds WHERE id = ${roundId}::uuid FOR SHARE`;
         if (held[0]?.questions_locked) return true;
       }
       await tx.$executeRaw`
-        UPDATE exam_settings SET questions_locked = true, updated_at = now()
-        WHERE job_role_id = ${jobRoleId}::uuid AND questions_locked = false`;
+        UPDATE exam_rounds SET questions_locked = true, updated_at = now()
+        WHERE id = ${roundId}::uuid AND questions_locked = false`;
       return true;
     },
 
     async lockCandidate(id: string) {
-      const rows = await tx.$queryRaw<{ job_role_id: string; status: CandidateStatusValue; eligible: boolean }[]>`
-        SELECT job_role_id::text, status::text AS status, eligible FROM candidates WHERE id = ${id}::uuid FOR UPDATE`;
+      const rows = await tx.$queryRaw<{ eligible: boolean }[]>`
+        SELECT eligible FROM candidates WHERE id = ${id}::uuid FOR UPDATE`;
       const r = rows[0];
-      return r ? { jobRoleId: r.job_role_id, status: r.status, eligible: r.eligible } : null;
+      return r ? { eligible: r.eligible } : null;
     },
 
-    findLiveAttempt: (candidateId: string): Promise<LiveAttempt | null> =>
-      tx.examAttempt.findFirst({ where: { candidateId, status: { not: 'RESET' } }, select: liveSelect }),
+    /** The round entry FOR UPDATE, with its owner (the registration's candidate) and current status. */
+    async lockEntry(entryId: string) {
+      const rows = await tx.$queryRaw<{ candidate_id: string; round_id: string; status: CandidateStatusValue }[]>`
+        SELECT reg.candidate_id::text AS candidate_id, re.round_id::text AS round_id, re.status::text AS status
+        FROM round_entries re JOIN exam_registrations reg ON reg.id = re.registration_id
+        WHERE re.id = ${entryId}::uuid
+        FOR UPDATE OF re`;
+      const r = rows[0];
+      return r ? { candidateId: r.candidate_id, roundId: r.round_id, status: r.status } : null;
+    },
 
-    async activeQuestions(jobRoleId: string) {
+    async findInProgressAttempt(candidateId: string): Promise<InProgressAttempt | null> {
+      return toInProgress(await tx.examAttempt.findFirst({ where: { candidateId, status: 'IN_PROGRESS' }, select: inProgressSelect }));
+    },
+
+    /** The entry's live (non-RESET) attempt, if any. */
+    findEntryAttempt: (roundEntryId: string): Promise<LiveAttempt | null> =>
+      tx.examAttempt.findFirst({ where: { roundEntryId, status: { not: 'RESET' } }, select: liveSelect }),
+
+    async activeQuestions(roundId: string) {
       const rows = await tx.question.findMany({
-        where: { jobRoleId, active: true },
+        where: { roundId, active: true },
         orderBy: [{ displayOrder: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
         select: { id: true, text: true, maxMarks: true },
       });
@@ -100,6 +169,7 @@ function txMethods(tx: Tx) {
     /** Creates the attempt, its question snapshots and one empty answer per question. */
     async createAttempt(input: {
       candidateId: string;
+      roundEntryId: string;
       startedAt: Date;
       endsAt: Date;
       sessionId: string;
@@ -111,6 +181,7 @@ function txMethods(tx: Tx) {
       const attempt = await tx.examAttempt.create({
         data: {
           candidateId: input.candidateId,
+          roundEntryId: input.roundEntryId,
           status: 'IN_PROGRESS',
           startedAt: input.startedAt,
           endsAt: input.endsAt,
@@ -142,14 +213,10 @@ function txMethods(tx: Tx) {
       return r ? { status: r.status, endsAt: r.ends_at, activeSessionId: r.active_session_id } : null;
     },
 
-    async setCandidateStatus(candidateId: string, from: CandidateStatusValue | null, to: CandidateStatusValue) {
-      await tx.candidate.update({ where: { id: candidateId }, data: { status: to } });
-      await tx.candidateStatusHistory.create({ data: { candidateId, fromStatus: from, toStatus: to } });
-    },
-
-    async candidateStatus(candidateId: string): Promise<CandidateStatusValue | null> {
-      const c = await tx.candidate.findUnique({ where: { id: candidateId }, select: { status: true } });
-      return c?.status ?? null;
+    /** The round entry's status (and a history row for the candidate who owns it). */
+    async setEntryStatus(entryId: string, candidateId: string, from: CandidateStatusValue | null, to: CandidateStatusValue) {
+      await tx.roundEntry.update({ where: { id: entryId }, data: { status: to } });
+      await tx.candidateStatusHistory.create({ data: { candidateId, roundEntryId: entryId, fromStatus: from, toStatus: to } });
     },
 
     async setSession(attemptId: string, sessionId: string) {
@@ -242,12 +309,55 @@ export const examRepository = {
   findCandidate(id: string) {
     return prisma.candidate.findUnique({
       where: { id },
-      select: { id: true, eligible: true, locationExempt: true, jobRoleId: true, status: true },
+      select: { id: true, eligible: true, locationExempt: true },
     });
   },
 
-  findLiveAttempt(candidateId: string): Promise<LiveAttempt | null> {
-    return prisma.examAttempt.findFirst({ where: { candidateId, status: { not: 'RESET' } }, select: liveSelect });
+  async findEntry(entryId: string): Promise<EntryInfo | null> {
+    const e = await prisma.roundEntry.findUnique({
+      where: { id: entryId },
+      select: {
+        id: true,
+        roundId: true,
+        status: true,
+        registration: { select: { candidateId: true } },
+        round: { select: { roundNumber: true, exam: { select: { name: true } } } },
+      },
+    });
+    return e
+      ? { id: e.id, candidateId: e.registration.candidateId, roundId: e.roundId, status: e.status, examName: e.round.exam.name, roundNumber: e.round.roundNumber }
+      : null;
+  },
+
+  /** The round's start settings, and whether its exam is active. */
+  async getRound(roundId: string) {
+    const r = await prisma.examRound.findUnique({
+      where: { id: roundId },
+      select: { durationMinutes: true, isOpen: true, windowStart: true, windowEnd: true, exam: { select: { active: true } } },
+    });
+    return r ? { durationMinutes: r.durationMinutes, isOpen: r.isOpen, windowStart: r.windowStart, windowEnd: r.windowEnd, examActive: r.exam.active } : null;
+  },
+
+  async findInProgressAttempt(candidateId: string): Promise<InProgressAttempt | null> {
+    return toInProgress(await prisma.examAttempt.findFirst({ where: { candidateId, status: 'IN_PROGRESS' }, select: inProgressSelect }));
+  },
+
+  /** The entry's live (non-RESET) attempt, if any. */
+  findEntryAttempt(roundEntryId: string): Promise<LiveAttempt | null> {
+    return prisma.examAttempt.findFirst({ where: { roundEntryId, status: { not: 'RESET' } }, select: liveSelect });
+  },
+
+  /** The candidate's most recently finished (non-RESET) attempt, for the Submitted page. */
+  findLatestFinishedAttempt(candidateId: string): Promise<LiveAttempt | null> {
+    return prisma.examAttempt.findFirst({
+      where: { candidateId, status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] } },
+      orderBy: [{ submittedAt: { sort: 'desc', nulls: 'last' } }, { startedAt: 'desc' }],
+      select: liveSelect,
+    });
+  },
+
+  findAttempt(attemptId: string): Promise<LiveAttempt | null> {
+    return prisma.examAttempt.findUnique({ where: { id: attemptId }, select: liveSelect });
   },
 
   async loadState(attemptId: string) {
@@ -313,6 +423,17 @@ export const examRepository = {
       _count: { _all: true },
     });
     return rows.map((r) => ({ candidateId: r.candidateId, eventType: r.eventType, count: r._count._all }));
+  },
+
+  /** Integrity event counts per attempt (one round entry's attempt each). */
+  async integrityEventCountsByAttempt(attemptIds: string[], eventTypes: string[]) {
+    if (attemptIds.length === 0) return [];
+    const rows = await prisma.activityLog.groupBy({
+      by: ['attemptId', 'eventType'],
+      where: { attemptId: { in: attemptIds }, eventType: { in: eventTypes } },
+      _count: { _all: true },
+    });
+    return rows.map((r) => ({ attemptId: r.attemptId!, eventType: r.eventType, count: r._count._all }));
   },
 
   /** Login and start location rows for the candidates, oldest first. */

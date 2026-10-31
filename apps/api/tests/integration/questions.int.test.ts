@@ -19,7 +19,11 @@ let sa: request.Agent;
 let sa2: request.Agent;
 let ev: request.Agent;
 let roleId = '';
-let role2Id = '';
+let examId = '';
+let roundId = '';
+let round2Id = '';
+let round3Id = '';
+let round4Id = '';
 
 async function signIn(creds: { email: string; password: string }) {
   const stale = [...(await getRedis().keys('exam:otp:cd:admin_login:*')), ...(await getRedis().keys('exam:rl:*'))];
@@ -38,7 +42,7 @@ before(async () => {
   assert.match(env.DATABASE_URL, /\/exam_test(\?|$)/);
   assert.match(env.REDIS_URL, /\/15$/);
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE admin_audit_logs, import_batches, questions, exam_settings, job_roles, admin_users RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE admin_audit_logs, import_batches, questions, round_entries, exam_registrations, exam_rounds, exams, job_roles, admin_users RESTART IDENTITY CASCADE',
   );
   await getRedis().flushdb();
   for (const [c, name, role] of [
@@ -50,8 +54,12 @@ before(async () => {
       data: { email: c.email, name, role, passwordHash: await bcrypt.hash(c.password, 4) },
     });
   }
-  roleId = (await prisma.jobRole.create({ data: { name: 'Q Role', examSetting: { create: {} } } })).id;
-  role2Id = (await prisma.jobRole.create({ data: { name: 'Q Role Two', examSetting: { create: {} } } })).id;
+  roleId = (await prisma.jobRole.create({ data: { name: 'Q Profile' } })).id;
+  examId = (await prisma.exam.create({ data: { jobRoleId: roleId, name: 'Q Exam' } })).id;
+  const rounds = await Promise.all(
+    [1, 2, 3, 4].map((roundNumber) => prisma.examRound.create({ data: { exam: { connect: { id: examId } }, roundNumber } })),
+  );
+  [roundId, round2Id, round3Id, round4Id] = rounds.map((r) => r.id);
   app = createApp();
   sa = await signIn(SA);
   sa2 = await signIn(SA2);
@@ -66,8 +74,8 @@ after(async () => {
 const csv = (rows: string[]) =>
   Buffer.from(['question_text,max_marks,evaluator_guidance,display_order', ...rows].join('\n'));
 
-const preview = (agent: request.Agent, file: Buffer, jobRoleId: string, name = 'q.csv') =>
-  agent.post('/api/admin/questions/import/preview').field('jobRoleId', jobRoleId).attach('file', file, name);
+const preview = (agent: request.Agent, file: Buffer, roundId: string, name = 'q.csv') =>
+  agent.post('/api/admin/questions/import/preview').field('roundId', roundId).attach('file', file, name);
 
 test('template.csv is served with the four columns', async () => {
   const res = await sa.get('/api/admin/questions/template.csv');
@@ -91,7 +99,7 @@ test('import: preview then confirm inserts N rows; the same file again is 409 un
     'bad row text here,7.3,,',
     'explain THE cap theorem with an example,10,,',
   ]);
-  const p = await preview(sa, file, roleId);
+  const p = await preview(sa, file, roundId);
   assert.equal(p.status, 200, JSON.stringify(p.body));
   assert.deepEqual(p.body.data.summary, { total: 4, valid: 2, errors: 1, duplicates: 1 });
   assert.equal(p.body.data.errors[0].field, 'max_marks');
@@ -105,10 +113,10 @@ test('import: preview then confirm inserts N rows; the same file again is 409 un
   const c = await sa.post('/api/admin/questions/import/confirm').send({ previewId: p.body.data.previewId });
   assert.equal(c.status, 200, JSON.stringify(c.body));
   assert.deepEqual(c.body.data, { imported: 2, skipped: 2 });
-  assert.equal(await prisma.question.count({ where: { jobRoleId: roleId } }), 2);
-  assert.equal(await prisma.importBatch.count({ where: { kind: 'QUESTIONS', jobRoleId: roleId } }), 1);
+  assert.equal(await prisma.question.count({ where: { roundId } }), 2);
+  assert.equal(await prisma.importBatch.count({ where: { kind: 'QUESTIONS', examId } }), 1);
 
-  const again = await preview(sa, file, roleId);
+  const again = await preview(sa, file, roundId);
   assert.equal(again.body.data.summary.valid, 0);
   assert.equal(again.body.data.summary.duplicates, 3);
   const conflict = await sa.post('/api/admin/questions/import/confirm').send({ previewId: again.body.data.previewId });
@@ -121,21 +129,21 @@ test('import: preview then confirm inserts N rows; the same file again is 409 un
     .send({ previewId: again.body.data.previewId, force: true });
   assert.equal(forced.status, 200, JSON.stringify(forced.body));
   assert.deepEqual(forced.body.data, { imported: 0, skipped: 4 });
-  assert.equal(await prisma.question.count({ where: { jobRoleId: roleId } }), 2);
+  assert.equal(await prisma.question.count({ where: { roundId } }), 2);
 });
 
 test('import: missing required column, bad extension and unknown preview', async () => {
-  const noCol = await preview(sa, Buffer.from('question_text\nsome long enough text\n'), roleId);
+  const noCol = await preview(sa, Buffer.from('question_text\nsome long enough text\n'), roundId);
   assert.equal(noCol.status, 400);
-  const pdf = await preview(sa, Buffer.from('x'), roleId, 'q.pdf');
+  const pdf = await preview(sa, Buffer.from('x'), roundId, 'q.pdf');
   assert.equal(pdf.status, 400);
   const gone = await sa.post('/api/admin/questions/import/confirm').send({ previewId: '00000000-0000-4000-8000-000000000000' });
   assert.equal(gone.status, 404);
-  assert.equal((await ev.post('/api/admin/questions/import/preview').field('jobRoleId', roleId)).status, 403);
+  assert.equal((await ev.post('/api/admin/questions/import/preview').field('roundId', roundId)).status, 403);
 });
 
 test('list returns the paged envelope with guidance for Evaluators too', async () => {
-  const res = await ev.get(`/api/admin/questions?jobRoleId=${roleId}`);
+  const res = await ev.get(`/api/admin/questions?roundId=${roundId}`);
   assert.equal(res.status, 200);
   assert.equal(res.body.data.total, 2);
   assert.equal(res.body.data.page, 1);
@@ -146,7 +154,7 @@ test('list returns the paged envelope with guidance for Evaluators too', async (
 });
 
 test('create, duplicate 409, patch, deactivate and reorder', async () => {
-  const body = { jobRoleId: role2Id, questionText: 'What is idempotency in HTTP?', maxMarks: 4, evaluatorGuidance: null };
+  const body = { roundId: round2Id, questionText: 'What is idempotency in HTTP?', maxMarks: 4, evaluatorGuidance: null };
   assert.equal((await ev.post('/api/admin/questions').send(body)).status, 403);
   const a = await sa.post('/api/admin/questions').send(body);
   assert.equal(a.status, 201, JSON.stringify(a.body));
@@ -167,52 +175,54 @@ test('create, duplicate 409, patch, deactivate and reorder', async () => {
   assert.equal(off.body.data.active, false);
 
   const order = await sa
-    .patch(`/api/admin/roles/${role2Id}/questions/order`)
+    .patch(`/api/admin/rounds/${round2Id}/questions/order`)
     .send({ ids: [b.body.data.id, a.body.data.id] });
   assert.equal(order.status, 200, JSON.stringify(order.body));
-  const rows = await prisma.question.findMany({ where: { jobRoleId: role2Id }, orderBy: { displayOrder: 'asc' } });
+  const rows = await prisma.question.findMany({ where: { roundId: round2Id }, orderBy: { displayOrder: 'asc' } });
   assert.deepEqual(rows.map((r) => r.id), [b.body.data.id, a.body.data.id]);
-  const foreign = await sa.patch(`/api/admin/roles/${role2Id}/questions/order`).send({ ids: [b.body.data.id, (await prisma.question.findFirstOrThrow({ where: { jobRoleId: roleId } })).id] });
+  const foreign = await sa.patch(`/api/admin/rounds/${round2Id}/questions/order`).send({ ids: [b.body.data.id, (await prisma.question.findFirstOrThrow({ where: { roundId } })).id] });
   assert.equal(foreign.status, 400);
 });
 
 test('locked role: every write is 423; unlock needs Super Admin, is audited, and re-opens writes', async () => {
-  const q = await prisma.question.findFirstOrThrow({ where: { jobRoleId: roleId } });
-  await prisma.examSetting.update({ where: { jobRoleId: roleId }, data: { questionsLocked: true } });
+  const q = await prisma.question.findFirstOrThrow({ where: { roundId } });
+  await prisma.examRound.update({ where: { id: roundId }, data: { questionsLocked: true } });
 
   assert.equal((await sa.patch(`/api/admin/questions/${q.id}`).send({ maxMarks: 3 })).status, 423);
   assert.equal((await sa.patch(`/api/admin/questions/${q.id}`).send({ maxMarks: 3 })).body.error.code, 'QUESTIONS_LOCKED');
   assert.equal((await sa.patch(`/api/admin/questions/${q.id}/active`).send({ active: false })).status, 423);
   assert.equal(
-    (await sa.post('/api/admin/questions').send({ jobRoleId: roleId, questionText: 'A brand new locked question', maxMarks: 5 })).status,
+    (await sa.post('/api/admin/questions').send({ roundId, questionText: 'A brand new locked question', maxMarks: 5 })).status,
     423,
   );
-  assert.equal((await sa.patch(`/api/admin/roles/${roleId}/questions/order`).send({ ids: [q.id] })).status, 423);
-  assert.equal((await preview(sa, csv(['Another question for locked role,5,,']), roleId)).status, 423);
+  assert.equal((await sa.patch(`/api/admin/rounds/${roundId}/questions/order`).send({ ids: [q.id] })).status, 423);
+  assert.equal((await preview(sa, csv(['Another question for locked role,5,,']), roundId)).status, 423);
 
-  assert.equal((await ev.post(`/api/admin/roles/${roleId}/questions/unlock`).send({ reason: 'Fix a typo' })).status, 403);
-  assert.equal((await sa.post(`/api/admin/roles/${roleId}/questions/unlock`).send({})).status, 400);
-  const un = await sa.post(`/api/admin/roles/${roleId}/questions/unlock`).send({ reason: 'Fix a typo' });
+  assert.equal((await ev.post(`/api/admin/rounds/${roundId}/questions/unlock`).send({ reason: 'Fix a typo' })).status, 403);
+  assert.equal((await sa.post(`/api/admin/rounds/${roundId}/questions/unlock`).send({})).status, 400);
+  const un = await sa.post(`/api/admin/rounds/${roundId}/questions/unlock`).send({ reason: 'Fix a typo' });
   assert.equal(un.status, 200, JSON.stringify(un.body));
   assert.equal(un.body.data.questionsLocked, false);
-  assert.equal((await prisma.examSetting.findUniqueOrThrow({ where: { jobRoleId: roleId } })).questionsLocked, false);
+  assert.equal((await prisma.examRound.findUniqueOrThrow({ where: { id: roundId } })).questionsLocked, false);
 
   const log = await prisma.adminAuditLog.findFirst({ where: { action: 'QUESTIONS_UNLOCKED' } });
-  assert.equal(log?.entityId, roleId);
+  assert.equal(log?.entity, 'exam_round');
+  assert.equal(log?.entityId, roundId);
+  assert.equal((log?.metadata as { roundId?: string }).roundId, roundId);
   assert.equal((log?.metadata as { reason?: string }).reason, 'Fix a typo');
 
   assert.equal((await sa.patch(`/api/admin/questions/${q.id}`).send({ maxMarks: 3 })).status, 200);
 });
 
 test('a lock set in a concurrent transaction makes the waiting write 423 (row lock)', async () => {
-  const q = await prisma.question.findFirstOrThrow({ where: { jobRoleId: roleId } });
+  const q = await prisma.question.findFirstOrThrow({ where: { roundId } });
   let release!: () => void;
   const held = new Promise<void>((r) => (release = r));
   let locked!: () => void;
   const ready = new Promise<void>((r) => (locked = r));
   const starter = prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT 1 FROM exam_settings WHERE job_role_id = ${roleId}::uuid FOR UPDATE`;
-    await tx.examSetting.update({ where: { jobRoleId: roleId }, data: { questionsLocked: true } });
+    await tx.$queryRaw`SELECT 1 FROM exam_rounds WHERE id = ${roundId}::uuid FOR UPDATE`;
+    await tx.examRound.update({ where: { id: roundId }, data: { questionsLocked: true } });
     locked();
     await held;
   });
@@ -224,5 +234,43 @@ test('a lock set in a concurrent transaction makes the waiting write 423 (row lo
   const res = await write;
   assert.equal(res.status, 423, JSON.stringify(res.body));
   assert.equal(res.body.error.code, 'QUESTIONS_LOCKED');
-  await prisma.examSetting.update({ where: { jobRoleId: roleId }, data: { questionsLocked: false } });
+  await prisma.examRound.update({ where: { id: roundId }, data: { questionsLocked: false } });
+});
+
+test('round not found is 404 for list, create, reorder, unlock and import', async () => {
+  const none = '00000000-0000-4000-8000-000000000000';
+  assert.equal((await sa.get(`/api/admin/questions?roundId=${none}`)).status, 404);
+  const created = await sa.post('/api/admin/questions').send({ roundId: none, questionText: 'A question for nowhere', maxMarks: 5 });
+  assert.equal(created.status, 404);
+  assert.equal(created.body.error.message, 'Round not found');
+  assert.equal((await sa.patch(`/api/admin/rounds/${none}/questions/order`).send({ ids: [none] })).status, 404);
+  assert.equal((await sa.post(`/api/admin/rounds/${none}/questions/unlock`).send({ reason: 'x y z' })).status, 404);
+  assert.equal((await preview(sa, csv(['Question for a missing round,5,,']), none)).status, 404);
+});
+
+test('same question text allowed in two rounds of one profile; still 409 within a round', async () => {
+  const body = { questionText: 'Shared across rounds question', maxMarks: 5, evaluatorGuidance: null };
+  assert.equal((await sa.post('/api/admin/questions').send({ ...body, roundId: round3Id })).status, 201);
+  assert.equal((await sa.post('/api/admin/questions').send({ ...body, roundId: round4Id })).status, 201);
+  assert.equal((await sa.post('/api/admin/questions').send({ ...body, roundId: round3Id })).status, 409);
+  const rows = await prisma.question.findMany({ where: { roundId: { in: [round3Id, round4Id] } } });
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every((r) => r.jobRoleId === null));
+});
+
+test('lock is per round: locking round 1 leaves round 2 writable', async () => {
+  await prisma.examRound.update({ where: { id: roundId }, data: { questionsLocked: true } });
+  try {
+    const locked = await sa
+      .post('/api/admin/questions')
+      .send({ roundId, questionText: 'Blocked by round lock', maxMarks: 5 });
+    assert.equal(locked.status, 423);
+    assert.match(locked.body.error.message, /locked for this round/);
+    const open = await sa
+      .post('/api/admin/questions')
+      .send({ roundId: round2Id, questionText: 'Allowed in the other round', maxMarks: 5 });
+    assert.equal(open.status, 201, JSON.stringify(open.body));
+  } finally {
+    await prisma.examRound.update({ where: { id: roundId }, data: { questionsLocked: false } });
+  }
 });

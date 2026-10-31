@@ -8,6 +8,10 @@
 // request can never replace newer text. Integrity evidence (bulk-insert flags,
 // blocked pastes, tab/IP changes) is written with the server's own time.
 // Every query is scoped by the candidate id from the verified token.
+// A candidate may hold several round entries (one per round they qualified
+// for) but only one IN_PROGRESS attempt at a time: start takes a round entry
+// id, and everything after start (state, resume, save, events, submit) works
+// on the caller's single running attempt, so those shapes are unchanged.
 
 import crypto from 'node:crypto';
 import { countWords, examAvailability, type ExamEventsInput, type ExamStartInput, type ExamState, type SaveAnswerInput, type SaveAnswerResult } from '@exam/shared';
@@ -18,7 +22,7 @@ import { SAVE_GRACE_MS } from '../../infrastructure/queue/autoSubmit.queue.js';
 import { assessSave } from './integrity.js';
 import { flagScore, type CandidateFlags } from './flagScore.js';
 import { evaluateLocationFlags, LOCATION_FLAG_THRESHOLDS, type LocationFlag } from './locationFlags.js';
-import type { ActivityEntry, ExamRepository, LiveAttempt } from './exam.repository.js';
+import { isCandidateInProgressViolation, type ActivityEntry, type ExamRepository, type LiveAttempt } from './exam.repository.js';
 
 /** A version row at most this often per answer (design §7.5). */
 export const VERSION_INTERVAL_MS = 30_000;
@@ -30,10 +34,20 @@ const START_TX = { maxWait: 10_000, timeout: 15_000 };
 
 const attemptLocked = () => new AppError(409, 'ATTEMPT_LOCKED', 'This exam has been submitted and can no longer be changed.');
 const superseded = () => new AppError(409, 'SESSION_SUPERSEDED', 'This exam is open in another window.');
+const examNotFound = () => notFound('Exam not found.');
+const notOpen = (message = 'The exam is not open yet.') => new AppError(403, 'EXAM_NOT_OPEN', message);
+const alreadyAttempted = () => conflict('You have already taken this exam.', 'ALREADY_ATTEMPTED');
+const examInProgress = (running: { examName: string; roundNumber: number } | null) =>
+  conflict(
+    running ? `Finish your current exam first ("${running.examName} · Round ${running.roundNumber}").` : 'Finish your current exam first.',
+    'EXAM_IN_PROGRESS',
+  );
 
 export interface ExamServiceDeps {
   repo: ExamRepository;
-  getSettings: (jobRoleId: string) => Promise<{ durationMinutes: number; isOpen: boolean; windowStart: Date | null; windowEnd: Date | null } | null>;
+  getRound: (
+    roundId: string,
+  ) => Promise<{ durationMinutes: number; isOpen: boolean; windowStart: Date | null; windowEnd: Date | null; examActive: boolean } | null>;
   recordStartLocation: (auth: { id: string; sessionFamily: string }, location: ExamStartInput['location'], client: ClientInfo) => Promise<void>;
   queue: { enqueue: (attemptId: string, endsAt: Date) => Promise<void>; remove: (attemptId: string) => Promise<void> };
   bindFamily: (family: string, candidateId: string) => Promise<void>;
@@ -100,7 +114,7 @@ export function createExamService(deps: ExamServiceDeps) {
   async function settleExpired(attempt: LiveAttempt): Promise<LiveAttempt> {
     if (attempt.status !== 'IN_PROGRESS' || !pastGrace(attempt.endsAt, now())) return attempt;
     await autoSubmitAttempt(attempt.id);
-    return (await repo.findLiveAttempt(attempt.candidateId)) ?? attempt;
+    return (await repo.findAttempt(attempt.id)) ?? attempt;
   }
 
   async function bind(auth: Auth) {
@@ -132,23 +146,34 @@ export function createExamService(deps: ExamServiceDeps) {
   async function start(auth: Auth, input: ExamStartInput, client: ClientInfo): Promise<ExamState> {
     const candidate = await repo.findCandidate(auth.id);
     if (!candidate || !candidate.eligible) throw forbidden('You are not eligible to take this exam.');
+    // Someone else's entry and a missing one read the same, so ids cannot be probed.
+    const entry = await repo.findEntry(input.roundEntryId);
+    if (!entry || entry.candidateId !== auth.id) throw examNotFound();
 
-    // A finished attempt answers ALREADY_ATTEMPTED whatever the window says now.
-    // A running one is a repeated start (a Back gesture, a second tab): it takes
-    // the session over before the window and location gates, because a started
-    // candidate keeps their full duration past windowEnd (design §4) and their
-    // location was checked when they first started.
-    const prior = await repo.findLiveAttempt(auth.id);
+    // One exam at a time: a running attempt in another round blocks this start
+    // (unless its time is already up, in which case it is locked here).
+    const running = await repo.findInProgressAttempt(auth.id);
+    if (running && running.roundEntryId !== entry.id && (await settleExpired(running)).status === 'IN_PROGRESS') {
+      throw examInProgress(running);
+    }
+
+    // A finished attempt on this entry answers ALREADY_ATTEMPTED whatever the
+    // window says now. A running one is a repeated start (a Back gesture, a
+    // second tab): it takes the session over before the window and location
+    // gates, because a started candidate keeps their full duration past
+    // windowEnd (design §4) and their location was checked when they started.
+    const prior = await repo.findEntryAttempt(entry.id);
     if (prior) {
       const settled = await settleExpired(prior);
-      if (settled.status !== 'IN_PROGRESS') throw conflict('You have already taken this exam.', 'ALREADY_ATTEMPTED');
+      if (settled.status !== 'IN_PROGRESS') throw alreadyAttempted();
       return takeOver(auth, settled, client);
     }
 
-    const settings = await deps.getSettings(candidate.jobRoleId);
-    const availability = examAvailability(settings ?? { isOpen: false, windowStart: null, windowEnd: null }, now());
+    const round = await deps.getRound(entry.roundId);
+    if (!round || !round.examActive) throw notOpen();
+    const availability = examAvailability(round, now());
     if (availability === 'AFTER_WINDOW') throw new AppError(403, 'EXAM_WINDOW_CLOSED', 'The exam window has closed.');
-    if (availability !== 'OPEN') throw new AppError(403, 'EXAM_NOT_OPEN', 'The exam is not open yet.');
+    if (availability !== 'OPEN') throw notOpen();
 
     await deps.recordStartLocation(auth, input.location, client);
     if (!candidate.locationExempt && input.location.permission !== 'GRANTED') {
@@ -156,47 +181,62 @@ export function createExamService(deps: ExamServiceDeps) {
     }
 
     const sessionId = crypto.randomUUID();
-    const outcome = await repo.transaction(async (tx) => {
-      // Role settings row first (the order question writes use; shared once the
-      // role is locked), then the candidate row, then re-read the role under the
-      // lock: a concurrent role change or a second start cannot slip between the
-      // checks and the insert.
-      if (!(await tx.holdRoleLocked(candidate.jobRoleId))) throw new AppError(403, 'EXAM_NOT_OPEN', 'The exam is not open yet.');
-      const locked = await tx.lockCandidate(auth.id);
-      if (!locked || !locked.eligible) throw forbidden('You are not eligible to take this exam.');
-      if (locked.jobRoleId !== candidate.jobRoleId) throw conflict('Your exam role has just changed. Please try again.');
-      const raced = await tx.findLiveAttempt(auth.id);
-      if (raced) return { kind: 'existing', attempt: raced } as const;
+    let outcome;
+    try {
+      outcome = await repo.transaction(async (tx) => {
+        // Lock order: candidate row (serialises this person's starts across
+        // rounds), the round row (shared once its questions are locked, so
+        // question writes serialise with starts), then the entry; the checks
+        // are re-run under the locks so a second start cannot slip in.
+        const locked = await tx.lockCandidate(auth.id);
+        if (!locked || !locked.eligible) throw forbidden('You are not eligible to take this exam.');
+        if (!(await tx.holdRoundLocked(entry.roundId))) throw notOpen();
+        const lockedEntry = await tx.lockEntry(entry.id);
+        if (!lockedEntry || lockedEntry.candidateId !== auth.id) throw examNotFound();
+        const inProgress = await tx.findInProgressAttempt(auth.id);
+        if (inProgress) {
+          if (inProgress.roundEntryId !== entry.id) throw examInProgress(inProgress);
+          return { kind: 'existing', attempt: inProgress } as const;
+        }
+        const raced = await tx.findEntryAttempt(entry.id);
+        if (raced) return { kind: 'existing', attempt: raced } as const;
 
-      const questions = await tx.activeQuestions(locked.jobRoleId);
-      if (questions.length === 0) throw new AppError(403, 'EXAM_NOT_OPEN', 'This exam has no questions yet.');
-      const startedAt = now();
-      const durationMinutes = settings?.durationMinutes ?? 60;
-      const endsAt = new Date(startedAt.getTime() + durationMinutes * 60_000);
-      const attemptId = await tx.createAttempt({
-        candidateId: auth.id,
-        startedAt,
-        endsAt,
-        sessionId,
-        ip: client.ip,
-        userAgent: client.userAgent,
-        questions,
-      });
-      await tx.setCandidateStatus(auth.id, locked.status, 'IN_PROGRESS');
-      await tx.addActivity({
-        candidateId: auth.id,
-        attemptId,
-        eventType: 'EXAM_STARTED',
-        ip: client.ip,
-        sessionId,
-        userAgent: client.userAgent,
-        metadata: { questionCount: questions.length, durationMinutes },
-      });
-      return { kind: 'created', attemptId, endsAt } as const;
-    }, START_TX);
+        const questions = await tx.activeQuestions(entry.roundId);
+        if (questions.length === 0) throw notOpen('This exam has no questions yet.');
+        const startedAt = now();
+        const durationMinutes = round.durationMinutes;
+        const endsAt = new Date(startedAt.getTime() + durationMinutes * 60_000);
+        const attemptId = await tx.createAttempt({
+          // The entry's own person, so exam_attempts.candidate_id always matches the registration.
+          candidateId: lockedEntry.candidateId,
+          roundEntryId: entry.id,
+          startedAt,
+          endsAt,
+          sessionId,
+          ip: client.ip,
+          userAgent: client.userAgent,
+          questions,
+        });
+        await tx.setEntryStatus(entry.id, lockedEntry.candidateId, lockedEntry.status, 'IN_PROGRESS');
+        await tx.addActivity({
+          candidateId: auth.id,
+          attemptId,
+          eventType: 'EXAM_STARTED',
+          ip: client.ip,
+          sessionId,
+          userAgent: client.userAgent,
+          metadata: { questionCount: questions.length, durationMinutes },
+        });
+        return { kind: 'created', attemptId, endsAt } as const;
+      }, START_TX);
+    } catch (err) {
+      // The partial unique index is the backstop for "one exam at a time".
+      if (isCandidateInProgressViolation(err)) throw examInProgress(await repo.findInProgressAttempt(auth.id));
+      throw err;
+    }
 
     if (outcome.kind === 'existing') {
-      if (outcome.attempt.status !== 'IN_PROGRESS') throw conflict('You have already taken this exam.', 'ALREADY_ATTEMPTED');
+      if (outcome.attempt.status !== 'IN_PROGRESS') throw alreadyAttempted();
       return takeOver(auth, outcome.attempt, client);
     }
     try {
@@ -209,8 +249,13 @@ export function createExamService(deps: ExamServiceDeps) {
     return buildState(outcome.attemptId, sessionId);
   }
 
+  /**
+   * The caller's attempt for state/resume/save/events/submit: the running one,
+   * else the most recently finished one (so the Submitted page still loads and
+   * writes answer ATTEMPT_LOCKED rather than 404).
+   */
   async function liveAttempt(candidateId: string): Promise<LiveAttempt> {
-    const attempt = await repo.findLiveAttempt(candidateId);
+    const attempt = (await repo.findInProgressAttempt(candidateId)) ?? (await repo.findLatestFinishedAttempt(candidateId));
     if (!attempt) throw notFound('No exam attempt found.');
     return attempt;
   }
@@ -323,14 +368,15 @@ export function createExamService(deps: ExamServiceDeps) {
     const at = now();
     const done = await repo.transaction(async (tx) => {
       // Status, deadline and session are checked under the attempt row lock, so a
-      // tab superseded by a concurrent resume cannot submit.
+      // tab superseded by a concurrent resume cannot submit. The round entry is
+      // locked first (entry -> attempt, the global lock order).
+      const entry = await tx.lockEntry(attempt.roundEntryId);
       const current = await tx.lockAttempt(attempt.id);
-      if (!current || current.status !== 'IN_PROGRESS' || pastGrace(current.endsAt, at)) throw attemptLocked();
+      if (!entry || !current || current.status !== 'IN_PROGRESS' || pastGrace(current.endsAt, at)) throw attemptLocked();
       if (sessionId !== current.activeSessionId) throw superseded();
       const finished = await tx.finish(attempt.id, 'SUBMITTED', at, false);
       if (!finished) return false;
-      const from = await tx.candidateStatus(auth.id);
-      await tx.setCandidateStatus(auth.id, from, 'SUBMITTED');
+      await tx.setEntryStatus(attempt.roundEntryId, entry.candidateId, entry.status, 'SUBMITTED');
       await tx.writeFinalVersions(attempt.id, at);
       await tx.addActivity({
         candidateId: auth.id,
@@ -359,11 +405,15 @@ export function createExamService(deps: ExamServiceDeps) {
    * never touch the candidate's newer attempt.
    */
   async function autoSubmitAttempt(attemptId: string, at: Date = now()): Promise<boolean> {
+    const attempt = await repo.findAttempt(attemptId);
+    if (!attempt || attempt.status !== 'IN_PROGRESS') return false;
     return repo.transaction(async (tx) => {
+      // Entry before attempt (the global lock order); finish re-checks the status.
+      const entry = await tx.lockEntry(attempt.roundEntryId);
+      if (!entry) return false;
       const finished = await tx.finish(attemptId, 'AUTO_SUBMITTED', at, true);
       if (!finished) return false;
-      const from = await tx.candidateStatus(finished.candidateId);
-      await tx.setCandidateStatus(finished.candidateId, from, 'AUTO_SUBMITTED');
+      await tx.setEntryStatus(attempt.roundEntryId, entry.candidateId, entry.status, 'AUTO_SUBMITTED');
       await tx.writeFinalVersions(attemptId, at);
       await tx.addActivity({
         candidateId: finished.candidateId,
@@ -453,6 +503,29 @@ export function createExamService(deps: ExamServiceDeps) {
     return new Map(ids.map((id) => [id, { integrity: integrity.get(id) ?? zeroCounts(), location: location.get(id) ?? [] }]));
   }
 
+  /**
+   * Flags for round entries (spec 5.6): integrity counts from that entry's
+   * attempt only (zero without one), location flags per person. Same order as
+   * the input.
+   */
+  async function getFlagsForAttempts(items: { candidateId: string; attemptId: string | null }[]): Promise<CandidateFlags[]> {
+    const attemptIds = [...new Set(items.flatMap((i) => (i.attemptId ? [i.attemptId] : [])))];
+    const [rows, location] = await Promise.all([
+      repo.integrityEventCountsByAttempt(attemptIds, Object.keys(INTEGRITY_EVENTS)),
+      locationFlagsFor([...new Set(items.map((i) => i.candidateId))]),
+    ]);
+    const integrity = new Map(attemptIds.map((id) => [id, zeroCounts()]));
+    for (const r of rows) {
+      const field = INTEGRITY_EVENTS[r.eventType];
+      const counts = integrity.get(r.attemptId);
+      if (field && counts) counts[field] += r.count;
+    }
+    return items.map((i) => ({
+      integrity: { ...((i.attemptId && integrity.get(i.attemptId)) || zeroCounts()) },
+      location: location.get(i.candidateId) ?? [],
+    }));
+  }
+
   /** flagCount per candidate: flagScore of its flags. */
   async function getFlagCounts(candidateIds: string[]): Promise<Map<string, number>> {
     const flags = await getFlagsBatch(candidateIds);
@@ -471,6 +544,7 @@ export function createExamService(deps: ExamServiceDeps) {
     computeLocationFlags,
     getFlags,
     getFlagsBatch,
+    getFlagsForAttempts,
     getFlagCounts,
   };
 }

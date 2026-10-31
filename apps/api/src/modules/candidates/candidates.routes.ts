@@ -17,9 +17,12 @@ import {
   CandidateResetSchema,
   CandidateCreateSchema,
   CandidateUpdateSchema,
+  CandidateImportPreviewBodySchema,
+  EntryParamsSchema,
   IdParamsSchema,
   ImportConfirmSchema,
-  ImportPreviewBodySchema,
+  RegistrationCreateSchema,
+  RegistrationParamsSchema,
 } from './candidates.schemas.js';
 
 export function createCandidatesRouter(service: CandidatesService): Router {
@@ -29,12 +32,14 @@ export function createCandidatesRouter(service: CandidatesService): Router {
   r.get('/', validate({ query: CandidateListQuerySchema }), c.list);
   r.post('/', validate({ body: CandidateCreateSchema }), c.create);
   r.get('/template.csv', c.template);
-  r.post('/import/preview', adminUploadLimiter, uploadSpreadsheet('file'), validate({ body: ImportPreviewBodySchema }), c.preview);
+  r.post('/import/preview', adminUploadLimiter, uploadSpreadsheet('file'), validate({ body: CandidateImportPreviewBodySchema }), c.preview);
   r.post('/import/confirm', validate({ body: ImportConfirmSchema }), c.confirm);
   r.get('/:id', validate({ params: IdParamsSchema, query: CandidateDetailQuerySchema }), c.detail);
   r.patch('/:id', validate({ params: IdParamsSchema, body: CandidateUpdateSchema }), c.update);
   r.patch('/:id/eligibility', validate({ params: IdParamsSchema, body: CandidateEligibilitySchema }), c.eligibility);
   r.patch('/:id/location-exempt', validate({ params: IdParamsSchema, body: CandidateLocationExemptSchema }), c.locationExempt);
-  r.post('/:id/reset-attempt', validate({ params: IdParamsSchema, body: CandidateResetSchema }), c.reset);
+  r.post('/:id/registrations', validate({ params: IdParamsSchema, body: RegistrationCreateSchema }), c.addRegistration);
+  r.delete('/:id/registrations/:registrationId', validate({ params: RegistrationParamsSchema }), c.removeRegistration);
+  r.post('/:id/entries/:entryId/reset-attempt', validate({ params: EntryParamsSchema, body: CandidateResetSchema }), c.reset);
   return r;
 }

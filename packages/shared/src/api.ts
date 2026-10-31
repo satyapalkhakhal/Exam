@@ -30,6 +30,7 @@ export type ErrorCode =
   | 'EVALUATION_LOCKED'
   | 'MARKS_OUT_OF_RANGE'
   | 'ROLE_CHANGE_FORBIDDEN'
+  | 'EXAM_IN_PROGRESS'
   | 'BAD_GATEWAY';
 
 export interface ApiSuccess<T> {

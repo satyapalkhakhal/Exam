@@ -9,8 +9,11 @@ export {
   CandidateResetSchema,
   CandidateListQuerySchema,
   CandidateDetailQuerySchema,
-  ImportPreviewBodySchema,
+  CandidateImportPreviewBodySchema,
+  RegistrationCreateSchema,
   ImportConfirmSchema,
 } from '@exam/shared';
 
 export const IdParamsSchema = z.object({ id: z.string().uuid() });
+export const RegistrationParamsSchema = z.object({ id: z.string().uuid(), registrationId: z.string().uuid() });
+export const EntryParamsSchema = z.object({ id: z.string().uuid(), entryId: z.string().uuid() });

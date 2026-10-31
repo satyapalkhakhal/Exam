@@ -1,4 +1,4 @@
-// Candidate sign-in, location capture and the exam info read, end to end against
+// Candidate sign-in, location capture and the round cards read, end to end against
 // exam_test and Redis db 15 (static OTP: no messaging channel is configured).
 
 import { test, before, after, beforeEach } from 'node:test';
@@ -16,6 +16,7 @@ let candidateId = '';
 let roleId = '';
 const REG_EMAIL = 'reg@int.test';
 let regId = '';
+let entryId = '';
 
 before(async () => {
   assert.match(env.DATABASE_URL, /\/exam_test(\?|$)/);
@@ -25,13 +26,16 @@ before(async () => {
   );
   const role = await prisma.jobRole.create({ data: { name: 'Analyst' } });
   roleId = role.id;
-  await prisma.examSetting.create({
-    data: { jobRoleId: role.id, durationMinutes: 45, instructions: 'Be honest.', isOpen: true, windowEnd: new Date('2030-01-01T00:00:00Z') },
-  });
   const c = await prisma.candidate.create({
     data: { candidateCode: 'C-001', fullName: 'Asha Rao', email: EMAIL, mobile: '9876543210', jobRoleId: role.id },
   });
   candidateId = c.id;
+  const examRow = await prisma.exam.create({ data: { jobRoleId: role.id, name: 'Analyst Hiring' } });
+  const round = await prisma.examRound.create({
+    data: { examId: examRow.id, roundNumber: 1, name: 'Aptitude', durationMinutes: 45, instructions: 'Be honest.', isOpen: true, windowEnd: new Date('2030-01-01T00:00:00Z') },
+  });
+  const reg = await prisma.examRegistration.create({ data: { candidateId: c.id, examId: examRow.id } });
+  entryId = (await prisma.roundEntry.create({ data: { registrationId: reg.id, roundId: round.id } })).id;
   await prisma.candidate.create({
     data: { candidateCode: 'C-002', fullName: 'Not Eligible', email: 'no@int.test', mobile: '9000000002', jobRoleId: role.id, eligible: false },
   });
@@ -233,18 +237,26 @@ test('logout revokes the session: refresh afterwards is 401', async () => {
   assert.equal((await agent.post('/api/candidate/auth/refresh')).status, 401);
 });
 
-test('exam/info returns the role setting and server time; needs a session', async () => {
-  assert.equal((await request(app).get('/api/candidate/exam/info')).status, 401);
+test('exams lists the round cards with their settings; needs a session; exam/info is gone', async () => {
+  assert.equal((await request(app).get('/api/candidate/exams')).status, 401);
   const { agent } = await signIn();
-  const res = await agent.get('/api/candidate/exam/info');
+  const res = await agent.get('/api/candidate/exams');
   assert.equal(res.status, 200, JSON.stringify(res.body));
-  const d = res.body.data;
-  assert.equal(d.durationMinutes, 45);
-  assert.equal(d.windowStart, null);
-  assert.equal(d.windowEnd, '2030-01-01T00:00:00.000Z');
-  assert.equal(d.instructions, 'Be honest.');
-  assert.equal(d.isOpen, true);
-  assert.ok(!Number.isNaN(Date.parse(d.serverNow)));
+  assert.deepEqual(res.body.data, [
+    {
+      entryId,
+      jobRoleName: 'Analyst',
+      examName: 'Analyst Hiring',
+      roundNumber: 1,
+      roundName: 'Aptitude',
+      durationMinutes: 45,
+      windowStart: null,
+      windowEnd: '2030-01-01T00:00:00.000Z',
+      instructions: 'Be honest.',
+      state: 'READY',
+    },
+  ]);
+  assert.equal((await agent.get('/api/candidate/exam/info')).status, 404);
 });
 
 test('a deactivated (ineligible) candidate loses access on the next request', async () => {

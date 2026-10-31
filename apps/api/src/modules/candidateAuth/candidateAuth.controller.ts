@@ -61,6 +61,6 @@ export function createCandidateAuthController(service: CandidateAuthService) {
       return ok(res, await service.me(c.id, c.sessionFamily));
     }),
     location: wrap(async (req, res) => ok(res, await service.recordLocation(authed(req), req.body, clientInfo(req)))),
-    examInfo: wrap(async (req, res) => ok(res, await service.examInfo(authed(req).id))),
+    exams: wrap(async (req, res) => ok(res, await service.exams(authed(req).id))),
   };
 }

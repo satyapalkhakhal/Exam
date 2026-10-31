@@ -93,10 +93,46 @@ export const candidateAuthRepository: CandidateAuthRepository = {
     });
   },
 
-  findExamSetting(jobRoleId) {
-    return prisma.examSetting.findUnique({
-      where: { jobRoleId },
-      select: { durationMinutes: true, windowStart: true, windowEnd: true, instructions: true, isOpen: true },
+  async listRoundCards(candidateId) {
+    const rows = await prisma.roundEntry.findMany({
+      where: {
+        registration: { candidateId },
+        OR: [{ round: { exam: { active: true } } }, { attempts: { some: { status: 'IN_PROGRESS' } } }],
+      },
+      orderBy: [{ round: { exam: { jobRole: { name: 'asc' } } } }, { round: { exam: { name: 'asc' } } }, { round: { roundNumber: 'asc' } }],
+      select: {
+        id: true,
+        round: {
+          select: {
+            roundNumber: true,
+            name: true,
+            durationMinutes: true,
+            windowStart: true,
+            windowEnd: true,
+            instructions: true,
+            isOpen: true,
+            exam: { select: { name: true, jobRole: { select: { name: true } } } },
+          },
+        },
+        // At most one non-RESET attempt per entry (uq_exam_attempts_entry_live).
+        attempts: { where: { status: { not: 'RESET' } }, select: { status: true }, take: 1 },
+      },
+    });
+    return rows.map((e) => {
+      const status = e.attempts[0]?.status;
+      return {
+        entryId: e.id,
+        jobRoleName: e.round.exam.jobRole.name,
+        examName: e.round.exam.name,
+        roundNumber: e.round.roundNumber,
+        roundName: e.round.name,
+        durationMinutes: e.round.durationMinutes,
+        windowStart: e.round.windowStart,
+        windowEnd: e.round.windowEnd,
+        instructions: e.round.instructions,
+        isOpen: e.round.isOpen,
+        attemptStatus: status === undefined || status === 'RESET' ? null : status,
+      };
     });
   },
 };

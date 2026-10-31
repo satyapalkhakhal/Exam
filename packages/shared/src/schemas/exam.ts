@@ -35,6 +35,8 @@ const INT32_MAX = 2_147_483_647;
 // The start location is the same capture as at login; `stage` may be sent and
 // is ignored (the server always records EXAM_START).
 export const ExamStartSchema = z.object({
+  /** The round entry being started; one candidate may hold several, one round at a time. */
+  roundEntryId: z.string().uuid(),
   location: z
     .object({
       stage: LocationStageSchema.optional(),

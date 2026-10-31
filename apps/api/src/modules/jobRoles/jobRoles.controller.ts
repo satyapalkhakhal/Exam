@@ -22,8 +22,5 @@ export function createJobRolesController(service: JobRolesService) {
     list: wrap(async (_req, res) => ok(res, await service.list())),
     create: wrap(async (req, res) => ok(res, await service.create(req.body, actorId(req), req.ip ?? null), 201)),
     update: wrap(async (req, res) => ok(res, await service.update(idOf(req), req.body, actorId(req), req.ip ?? null))),
-    updateSettings: wrap(async (req, res) =>
-      ok(res, await service.updateSettings(idOf(req), req.body, actorId(req), req.ip ?? null)),
-    ),
   };
 }

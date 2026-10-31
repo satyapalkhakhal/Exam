@@ -1,8 +1,8 @@
 // modules/questions/questions.service.ts
-// Questions per job role (design §5). Every write first checks the role's
+// Questions per round (design §5). Every write first checks the round's
 // questionsLocked flag (423 QUESTIONS_LOCKED); the exam start sets it, and only
 // a Super Admin can lift it (audited). Duplicates are by normalised text within
-// the role. Import is two steps: preview parses and caches the result in Redis
+// the round. Import is two steps: preview parses and caches the result in Redis
 // (30 min, bound to the admin who uploaded it), confirm inserts the cached
 // valid rows in one transaction and records an ImportBatch. Question text is
 // never copied into audit metadata.
@@ -29,7 +29,7 @@ import { parseQuestionRows, TEMPLATE_COLUMNS, type ParsedQuestions } from './que
 
 export interface QuestionRow {
   id: string;
-  jobRoleId: string;
+  roundId: string;
   text: string;
   maxMarks: { toNumber(): number } | number;
   evaluatorGuidance: string | null;
@@ -38,7 +38,7 @@ export interface QuestionRow {
 }
 
 export interface NewQuestion {
-  jobRoleId: string;
+  roundId: string;
   text: string;
   normalizedTextHash: string;
   maxMarks: number;
@@ -47,27 +47,28 @@ export interface NewQuestion {
 }
 
 export interface QuestionsRepository {
-  /** null when the role does not exist; otherwise whether its questions are locked. */
-  roleLockState(jobRoleId: string): Promise<{ locked: boolean } | null>;
+  /** null when the round does not exist; otherwise its exam and whether its questions are locked. */
+  roundState(roundId: string): Promise<{ examId: string; locked: boolean } | null>;
   findById(id: string): Promise<QuestionRow | null>;
-  list(jobRoleId: string, skip: number, take: number): Promise<{ rows: QuestionRow[]; total: number }>;
-  existingHashes(jobRoleId: string): Promise<Set<string>>;
-  maxDisplayOrder(jobRoleId: string): Promise<number>;
-  /** Throws CONFLICT when the normalised text already exists in the role. */
+  list(roundId: string, skip: number, take: number): Promise<{ rows: QuestionRow[]; total: number }>;
+  existingHashes(roundId: string): Promise<Set<string>>;
+  maxDisplayOrder(roundId: string): Promise<number>;
+  /** Throws CONFLICT when the normalised text already exists in the round. */
   create(data: NewQuestion, audit: (id: string) => AuditRecord): Promise<QuestionRow>;
-  /** Throws CONFLICT when the new text collides with another question of the role. */
-  update(id: string, jobRoleId: string, data: Partial<Omit<NewQuestion, 'jobRoleId'>>, audit: AuditRecord): Promise<QuestionRow>;
-  setActive(id: string, jobRoleId: string, active: boolean, audit: AuditRecord): Promise<QuestionRow>;
-  /** Returns false when any id is not a question of the role; nothing is written then. */
-  reorder(jobRoleId: string, ids: string[], audit: AuditRecord): Promise<boolean>;
-  unlock(jobRoleId: string, audit: AuditRecord): Promise<void>;
-  lastImportOf(jobRoleId: string, fileHash: string): Promise<Date | null>;
+  /** Throws CONFLICT when the new text collides with another question of the round. */
+  update(id: string, roundId: string, data: Partial<Omit<NewQuestion, 'roundId'>>, audit: AuditRecord): Promise<QuestionRow>;
+  setActive(id: string, roundId: string, active: boolean, audit: AuditRecord): Promise<QuestionRow>;
+  /** Returns false when any id is not a question of the round; nothing is written then. */
+  reorder(roundId: string, ids: string[], audit: AuditRecord): Promise<boolean>;
+  unlock(roundId: string, audit: AuditRecord): Promise<void>;
+  lastImportOf(examId: string, fileHash: string): Promise<Date | null>;
   /** One transaction: rows (duplicates skipped), the ImportBatch and the audit row. */
   confirmImport(input: ImportCommit): Promise<number>;
 }
 
 export interface ImportCommit {
-  jobRoleId: string;
+  roundId: string;
+  examId: string;
   fileName: string;
   fileHash: string;
   uploadedById: string;
@@ -79,7 +80,8 @@ export interface ImportCommit {
 
 interface CachedPreview extends ParsedQuestions {
   adminId: string;
-  jobRoleId: string;
+  roundId: string;
+  examId: string;
   fileName: string;
   fileHash: string;
   total: number;
@@ -91,11 +93,11 @@ export const PREVIEW_TTL_SECONDS = 30 * 60;
 export const previewKey = (id: string): string => `exam:import:${id}`;
 const ENTITY = 'question';
 
-const locked = () => new AppError(423, 'QUESTIONS_LOCKED', 'Questions are locked for this role. A Super Admin can unlock them.');
+const locked = () => new AppError(423, 'QUESTIONS_LOCKED', 'Questions are locked for this round. A Super Admin can unlock them.');
 
 const toDto = (r: QuestionRow): QuestionDto => ({
   id: r.id,
-  jobRoleId: r.jobRoleId,
+  roundId: r.roundId,
   questionText: r.text,
   maxMarks: typeof r.maxMarks === 'number' ? r.maxMarks : r.maxMarks.toNumber(),
   evaluatorGuidance: r.evaluatorGuidance,
@@ -108,24 +110,25 @@ export interface QuestionsDeps {
 }
 
 export function createQuestionsService(repo: QuestionsRepository, deps: QuestionsDeps) {
-  async function assertWritable(jobRoleId: string): Promise<void> {
-    const state = await repo.roleLockState(jobRoleId);
-    if (!state) throw notFound('Job role not found');
+  async function assertWritable(roundId: string): Promise<{ examId: string }> {
+    const state = await repo.roundState(roundId);
+    if (!state) throw notFound('Round not found');
     if (state.locked) throw locked();
+    return { examId: state.examId };
   }
 
   async function list(query: QuestionListQuery): Promise<Paginated<QuestionDto>> {
-    if (!(await repo.roleLockState(query.jobRoleId))) throw notFound('Job role not found');
-    const { rows, total } = await repo.list(query.jobRoleId, (query.page - 1) * query.pageSize, query.pageSize);
+    if (!(await repo.roundState(query.roundId))) throw notFound('Round not found');
+    const { rows, total } = await repo.list(query.roundId, (query.page - 1) * query.pageSize, query.pageSize);
     return { items: rows.map(toDto), total, page: query.page, pageSize: query.pageSize };
   }
 
   async function create(input: QuestionCreateInput, actorId: string, ip: string | null): Promise<QuestionDto> {
-    await assertWritable(input.jobRoleId);
-    const displayOrder = (await repo.maxDisplayOrder(input.jobRoleId)) + 1;
+    await assertWritable(input.roundId);
+    const displayOrder = (await repo.maxDisplayOrder(input.roundId)) + 1;
     const row = await repo.create(
       {
-        jobRoleId: input.jobRoleId,
+        roundId: input.roundId,
         text: input.questionText,
         normalizedTextHash: questionHash(input.questionText),
         maxMarks: input.maxMarks,
@@ -137,7 +140,7 @@ export function createQuestionsService(repo: QuestionsRepository, deps: Question
         action: 'QUESTION_CREATED',
         entity: ENTITY,
         entityId: id,
-        metadata: { jobRoleId: input.jobRoleId, maxMarks: input.maxMarks },
+        metadata: { roundId: input.roundId, maxMarks: input.maxMarks },
         ip,
       }),
     );
@@ -147,8 +150,8 @@ export function createQuestionsService(repo: QuestionsRepository, deps: Question
   async function update(id: string, input: QuestionUpdateInput, actorId: string, ip: string | null): Promise<QuestionDto> {
     const existing = await repo.findById(id);
     if (!existing) throw notFound('Question not found');
-    await assertWritable(existing.jobRoleId);
-    const data: Partial<Omit<NewQuestion, 'jobRoleId'>> = {};
+    await assertWritable(existing.roundId);
+    const data: Partial<Omit<NewQuestion, 'roundId'>> = {};
     if (input.questionText !== undefined) {
       data.text = input.questionText;
       data.normalizedTextHash = questionHash(input.questionText);
@@ -156,12 +159,12 @@ export function createQuestionsService(repo: QuestionsRepository, deps: Question
     if (input.maxMarks !== undefined) data.maxMarks = input.maxMarks;
     if (input.evaluatorGuidance !== undefined) data.evaluatorGuidance = input.evaluatorGuidance === '' ? null : input.evaluatorGuidance;
     if (input.displayOrder !== undefined) data.displayOrder = input.displayOrder;
-    const row = await repo.update(id, existing.jobRoleId, data, {
+    const row = await repo.update(id, existing.roundId, data, {
       adminId: actorId,
       action: 'QUESTION_UPDATED',
       entity: ENTITY,
       entityId: id,
-      metadata: { jobRoleId: existing.jobRoleId, fields: Object.keys(input).filter((k) => input[k as keyof QuestionUpdateInput] !== undefined) },
+      metadata: { roundId: existing.roundId, fields: Object.keys(input).filter((k) => input[k as keyof QuestionUpdateInput] !== undefined) },
       ip,
     });
     return toDto(row);
@@ -170,41 +173,41 @@ export function createQuestionsService(repo: QuestionsRepository, deps: Question
   async function setActive(id: string, active: boolean, actorId: string, ip: string | null): Promise<QuestionDto> {
     const existing = await repo.findById(id);
     if (!existing) throw notFound('Question not found');
-    await assertWritable(existing.jobRoleId);
-    const row = await repo.setActive(id, existing.jobRoleId, active, {
+    await assertWritable(existing.roundId);
+    const row = await repo.setActive(id, existing.roundId, active, {
       adminId: actorId,
       action: active ? 'QUESTION_ACTIVATED' : 'QUESTION_DEACTIVATED',
       entity: ENTITY,
       entityId: id,
-      metadata: { jobRoleId: existing.jobRoleId },
+      metadata: { roundId: existing.roundId },
       ip,
     });
     return toDto(row);
   }
 
-  async function reorder(jobRoleId: string, ids: string[], actorId: string, ip: string | null): Promise<{ updated: number }> {
-    await assertWritable(jobRoleId);
+  async function reorder(roundId: string, ids: string[], actorId: string, ip: string | null): Promise<{ updated: number }> {
+    await assertWritable(roundId);
     if (new Set(ids).size !== ids.length) throw badRequest('Duplicate question ids');
-    const done = await repo.reorder(jobRoleId, ids, {
+    const done = await repo.reorder(roundId, ids, {
       adminId: actorId,
       action: 'QUESTIONS_REORDERED',
-      entity: 'job_role',
-      entityId: jobRoleId,
-      metadata: { count: ids.length },
+      entity: 'exam_round',
+      entityId: roundId,
+      metadata: { roundId, count: ids.length },
       ip,
     });
-    if (!done) throw badRequest('Every id must be a question of this role');
+    if (!done) throw badRequest('Every id must be a question of this round');
     return { updated: ids.length };
   }
 
-  async function unlock(jobRoleId: string, reason: string, actorId: string, ip: string | null): Promise<{ questionsLocked: false }> {
-    if (!(await repo.roleLockState(jobRoleId))) throw notFound('Job role not found');
-    await repo.unlock(jobRoleId, {
+  async function unlock(roundId: string, reason: string, actorId: string, ip: string | null): Promise<{ questionsLocked: false }> {
+    if (!(await repo.roundState(roundId))) throw notFound('Round not found');
+    await repo.unlock(roundId, {
       adminId: actorId,
       action: 'QUESTIONS_UNLOCKED',
-      entity: 'job_role',
-      entityId: jobRoleId,
-      metadata: { reason },
+      entity: 'exam_round',
+      entityId: roundId,
+      metadata: { roundId, reason },
       ip,
     });
     return { questionsLocked: false };
@@ -212,17 +215,17 @@ export function createQuestionsService(repo: QuestionsRepository, deps: Question
 
   async function previewImport(
     file: { buffer: Buffer; originalname: string },
-    jobRoleId: string,
+    roundId: string,
     actorId: string,
   ): Promise<ImportPreviewDto<QuestionImportRow>> {
-    await assertWritable(jobRoleId);
+    const { examId } = await assertWritable(roundId);
     const sheet = await readSheet(file.buffer, file.originalname);
     const missing = (['question_text', 'max_marks'] as const).filter((c) => !sheet.headers.includes(c));
     if (missing.length > 0) {
       throw badRequest(`Missing required column: ${missing.join(', ')}. Expected: ${TEMPLATE_COLUMNS.join(', ')}`);
     }
-    const parsed = parseQuestionRows(sheet.rows, await repo.existingHashes(jobRoleId), sheet.rowNumbers);
-    let next = (await repo.maxDisplayOrder(jobRoleId)) + 1;
+    const parsed = parseQuestionRows(sheet.rows, await repo.existingHashes(roundId), sheet.rowNumbers);
+    let next = (await repo.maxDisplayOrder(roundId)) + 1;
     const rows: QuestionImportRow[] = parsed.valid.map((d) => ({
       row: d.row,
       questionText: d.questionText,
@@ -235,7 +238,8 @@ export function createQuestionsService(repo: QuestionsRepository, deps: Question
     const cached: CachedPreview = {
       ...parsed,
       adminId: actorId,
-      jobRoleId,
+      roundId,
+      examId,
       fileName: file.originalname,
       fileHash,
       total: sheet.rows.length,
@@ -257,21 +261,22 @@ export function createQuestionsService(repo: QuestionsRepository, deps: Question
     if (!raw) throw notFound('This preview has expired. Upload the file again.');
     const cached = JSON.parse(raw) as CachedPreview;
     if (cached.adminId !== actorId) throw forbidden('This preview belongs to another admin');
-    await assertWritable(cached.jobRoleId);
+    await assertWritable(cached.roundId);
 
     if (!input.force) {
-      const previous = await repo.lastImportOf(cached.jobRoleId, cached.fileHash);
+      const previous = await repo.lastImportOf(cached.examId, cached.fileHash);
       if (previous) throw conflict(`This file was already imported on ${previous.toISOString().slice(0, 10)}`);
     }
 
     const imported = await repo.confirmImport({
-      jobRoleId: cached.jobRoleId,
+      roundId: cached.roundId,
+      examId: cached.examId,
       fileName: cached.fileName,
       fileHash: cached.fileHash,
       uploadedById: actorId,
       total: cached.total,
       rows: cached.rows.map((r) => ({
-        jobRoleId: cached.jobRoleId,
+        roundId: cached.roundId,
         text: r.questionText,
         normalizedTextHash: questionHash(r.questionText),
         maxMarks: r.maxMarks,
@@ -282,9 +287,9 @@ export function createQuestionsService(repo: QuestionsRepository, deps: Question
       audit: (n) => ({
         adminId: actorId,
         action: 'QUESTIONS_IMPORTED',
-        entity: 'job_role',
-        entityId: cached.jobRoleId,
-        metadata: { fileName: cached.fileName, total: cached.total, imported: n, forced: input.force === true },
+        entity: 'exam_round',
+        entityId: cached.roundId,
+        metadata: { roundId: cached.roundId, fileName: cached.fileName, total: cached.total, imported: n, forced: input.force === true },
         ip,
       }),
     });

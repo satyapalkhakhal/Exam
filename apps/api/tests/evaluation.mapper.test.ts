@@ -35,7 +35,8 @@ const candidate = {
   latitude: 26.19,
   longitude: 91.69,
   ip: '203.0.113.7',
-  jobRole: { name: 'Backend Engineer' },
+  // Other registrations of the same person must never reach an evaluator.
+  registrations: [{ examName: 'Other Hiring Exam', entries: [{ roundNumber: 1, status: 'REJECTED', totalMarks: 3 }] }],
 };
 
 const t0 = new Date('2026-10-01T10:00:00Z');
@@ -50,6 +51,11 @@ const submission = {
   startIp: '203.0.113.7',
   evaluation: { status: 'DRAFT', evaluatorId: 'adm-1' },
   candidate,
+  round: {
+    roundNumber: 2,
+    exam: { name: 'Backend Hiring Nov 2026', jobRole: { name: 'Backend Engineer' }, registrations: [{ candidateId: 'c-9' }] },
+    entries: [{ id: 'e-other', status: 'SHORTLISTED' }],
+  },
   flags: { pasteAttempts: 1, bulkInsert: 0, ipChanges: 0, locationFlags: 2, excessiveTabSwitching: 0 },
   loginLogs: [{ latitude: 26.19, longitude: 91.69, ip: '203.0.113.7' }],
 } as unknown as SubmissionSource;
@@ -84,6 +90,19 @@ test('evaluator payload has no PII keys', () => {
   }
 });
 
+test('evaluator view has examName/roundNumber and no other registrations', () => {
+  for (const out of [toSubmissionView(submission, 'EVALUATOR'), toMarkingView(marking, 'EVALUATOR')]) {
+    assert.equal(out.examName, 'Backend Hiring Nov 2026');
+    assert.equal(out.roundNumber, 2);
+    assert.equal(out.jobRole, 'Backend Engineer');
+    const keys = keysDeep(out);
+    for (const k of ['registrations', 'entries', 'round', 'exam', 'status']) assert.ok(!keys.has(k), k);
+    const json = JSON.stringify(out);
+    assert.ok(!json.includes('Other Hiring Exam'), 'another registration leaked');
+    assert.ok(!json.includes('e-other') && !json.includes('c-9'), 'another entry leaked');
+  }
+});
+
 test('super admin gets PII but never location', () => {
   for (const out of [toSubmissionView(submission, 'SUPER_ADMIN'), toMarkingView(marking, 'SUPER_ADMIN')]) {
     const keys = keysDeep(out);
@@ -98,6 +117,8 @@ test('submission view shape', () => {
     attemptId: 'a-1',
     candidateCode: 'ARH-EX-000001',
     jobRole: 'Backend Engineer',
+    examName: 'Backend Hiring Nov 2026',
+    roundNumber: 2,
     submittedAt: t1.toISOString(),
     timeTakenSec: 2730,
     submitType: 'AUTO',

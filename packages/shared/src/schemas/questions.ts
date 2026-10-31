@@ -19,7 +19,7 @@ const guidance = z
   .transform((v) => (v === undefined || v === null || v === '' ? null : v));
 
 export const QuestionCreateSchema = z.object({
-  jobRoleId: z.string().uuid(),
+  roundId: z.string().uuid(),
   questionText: text,
   maxMarks: marks,
   evaluatorGuidance: guidance,
@@ -47,13 +47,13 @@ export const QuestionUnlockSchema = z.object({ reason: z.string().trim().min(3).
 export type QuestionUnlockInput = z.infer<typeof QuestionUnlockSchema>;
 
 export const QuestionListQuerySchema = z.object({
-  jobRoleId: z.string().uuid(),
+  roundId: z.string().uuid(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(500).default(200),
 });
 export type QuestionListQuery = z.infer<typeof QuestionListQuerySchema>;
 
-export const ImportPreviewBodySchema = z.object({ jobRoleId: z.string().uuid() });
+export const ImportPreviewBodySchema = z.object({ roundId: z.string().uuid() });
 
 export const ImportConfirmSchema = z.object({
   previewId: z.string().uuid(),
@@ -63,7 +63,7 @@ export type ImportConfirmInput = z.infer<typeof ImportConfirmSchema>;
 
 export interface QuestionDto {
   id: string;
-  jobRoleId: string;
+  roundId: string;
   questionText: string;
   maxMarks: number;
   evaluatorGuidance: string | null;
@@ -87,6 +87,8 @@ export interface ImportSummary {
   valid: number;
   errors: number;
   duplicates: number;
+  /** Candidate import only: valid rows that register an existing person for the exam. */
+  addedToExisting?: number;
 }
 
 export interface ImportPreviewDto<T> {
