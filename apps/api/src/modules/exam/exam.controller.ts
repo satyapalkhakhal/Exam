@@ -48,6 +48,7 @@ export function createExamController(service: ExamService) {
   return {
     start: wrap(async (req, res) => ok(res, await service.start(authed(req), req.body, clientInfo(req)))),
     state: wrap(async (req, res) => ok(res, await service.getState(authed(req)))),
+    summary: wrap(async (req, res) => ok(res, await service.getSummary(authed(req).id))),
     resume: wrap(async (req, res) => ok(res, await service.resume(authed(req), clientInfo(req)))),
     save: wrap(async (req, res) => ok(res, await service.saveAnswer(authed(req), param(req), req.body, clientInfo(req)))),
     beacon: wrap(async (req, res) => ok(res, await service.saveAnswer(authed(req), param(req), parseBeacon(req.body), clientInfo(req)))),

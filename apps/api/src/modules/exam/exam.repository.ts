@@ -272,6 +272,15 @@ export const examRepository = {
     });
   },
 
+  async loadSummary(attemptId: string) {
+    const [attempt, questionCount, answeredCount] = await Promise.all([
+      prisma.examAttempt.findUnique({ where: { id: attemptId }, select: { status: true, submitType: true, startedAt: true, submittedAt: true } }),
+      prisma.attemptQuestion.count({ where: { attemptId } }),
+      prisma.answer.count({ where: { attemptQuestion: { attemptId }, wordCount: { gt: 0 } } }),
+    ]);
+    return attempt ? { ...attempt, questionCount, answeredCount } : null;
+  },
+
   async attemptQuestionIds(attemptId: string): Promise<Set<string>> {
     const rows = await prisma.attemptQuestion.findMany({ where: { attemptId }, select: { id: true } });
     return new Set(rows.map((r) => r.id));

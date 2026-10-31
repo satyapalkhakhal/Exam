@@ -13,6 +13,7 @@ import type { SavePayload, SaveResult } from '@/lib/autosave';
 import type { QueuedEvent } from '@/lib/eventQueue';
 import { tabPresenceFor } from '@/lib/tabPresence';
 import { markCandidateStatus } from '@/stores/candidateAuth';
+import type { ExamSummaryDto } from '@exam/shared';
 import type { ExamState } from '@/types/exam';
 import type { LocationPayload } from './location';
 
@@ -65,6 +66,14 @@ export function useExamInfo() {
 }
 
 export const getExamState = () => apiFetch<ExamState>('candidate', '/exam');
+
+/** The candidate's own submission receipt (times and counts only). */
+export function useExamSummary() {
+  return useQuery({
+    queryKey: ['candidate', 'exam', 'summary'],
+    queryFn: () => apiFetch<ExamSummaryDto>('candidate', '/exam/summary'),
+  });
+}
 
 export const resumeExam = () =>
   apiFetch<ExamState>('candidate', '/exam/resume', { method: 'POST' }).then(rememberSession);

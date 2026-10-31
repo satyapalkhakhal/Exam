@@ -10,7 +10,7 @@
 // Every query is scoped by the candidate id from the verified token.
 
 import crypto from 'node:crypto';
-import { countWords, examAvailability, type ExamEventsInput, type ExamStartInput, type ExamState, type SaveAnswerInput, type SaveAnswerResult } from '@exam/shared';
+import { countWords, examAvailability, type ExamEventsInput, type ExamStartInput, type ExamState, type ExamSummaryDto, type SaveAnswerInput, type SaveAnswerResult } from '@exam/shared';
 import { logger } from '../../infrastructure/logger/logger.js';
 import { AppError, conflict, forbidden, notFound } from '../../shared/errors.js';
 import type { ClientInfo } from '../../shared/utils/clientInfo.js';
@@ -213,6 +213,21 @@ export function createExamService(deps: ExamServiceDeps) {
     const attempt = await repo.findLiveAttempt(candidateId);
     if (!attempt) throw notFound('No exam attempt found.');
     return attempt;
+  }
+
+  /** The candidate's receipt: status, times and counts (no answer text, no marks). */
+  async function getSummary(candidateId: string): Promise<ExamSummaryDto> {
+    const attempt = await settleExpired(await liveAttempt(candidateId));
+    const s = await repo.loadSummary(attempt.id);
+    if (!s || s.status === 'RESET') throw notFound('No exam attempt found.');
+    return {
+      status: s.status,
+      submitType: s.submitType,
+      startedAt: s.startedAt.toISOString(),
+      submittedAt: s.submittedAt?.toISOString() ?? null,
+      questionCount: s.questionCount,
+      answeredCount: s.answeredCount,
+    };
   }
 
   async function getState(auth: Auth): Promise<ExamState> {
@@ -460,6 +475,7 @@ export function createExamService(deps: ExamServiceDeps) {
   }
 
   return {
+    getSummary,
     start,
     getState,
     resume,

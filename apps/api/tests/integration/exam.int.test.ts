@@ -450,6 +450,28 @@ test('manual submit, then save is ATTEMPT_LOCKED and a new start is ALREADY_ATTE
   assert.equal(state.body.data.status, 'SUBMITTED');
 });
 
+
+test('GET /exam/summary after submit: receipt fields and counts only, never answer text', async () => {
+  const attempt = await prisma.examAttempt.findFirstOrThrow({ where: { candidateId: ids.b, status: { not: 'RESET' } } });
+  const answered = await prisma.answer.count({ where: { attemptQuestion: { attemptId: attempt.id }, wordCount: { gt: 0 } } });
+  const total = await prisma.attemptQuestion.count({ where: { attemptId: attempt.id } });
+  const res = await agents.b!.get('/api/candidate/exam/summary');
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.deepEqual(res.body.data, {
+    status: 'SUBMITTED',
+    submitType: 'MANUAL',
+    startedAt: attempt.startedAt.toISOString(),
+    submittedAt: attempt.submittedAt!.toISOString(),
+    questionCount: total,
+    answeredCount: answered,
+  });
+  assert.ok(!JSON.stringify(res.body).includes('after submit'), 'no answer text in the summary');
+});
+
+test('GET /exam/summary needs a session and an attempt', async () => {
+  assert.equal((await request(app).get('/api/candidate/exam/summary')).status, 401);
+});
+
 test('a location-exempt candidate starts without a location; a closed role is EXAM_NOT_OPEN', async () => {
   const exempt = await (await signIn('exempt')).post('/api/candidate/exam/start').send({ location: { stage: 'EXAM_START', permission: 'DENIED' } });
   assert.equal(exempt.status, 200, JSON.stringify(exempt.body));

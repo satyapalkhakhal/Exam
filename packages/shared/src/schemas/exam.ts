@@ -118,4 +118,14 @@ export interface ExamState {
   questions: ExamQuestionState[];
 }
 
+/** The candidate's own receipt after the exam: times and counts only, never answers or marks. */
+export interface ExamSummaryDto {
+  status: 'IN_PROGRESS' | 'SUBMITTED' | 'AUTO_SUBMITTED';
+  submitType: 'MANUAL' | 'AUTO' | null;
+  startedAt: string;
+  submittedAt: string | null;
+  questionCount: number;
+  answeredCount: number;
+}
+
 export type SaveAnswerResult = { accepted: true; serverNow: string; lastSavedAt: string } | { accepted: false; reason: 'STALE' };

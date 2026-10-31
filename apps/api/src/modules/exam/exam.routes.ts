@@ -27,6 +27,7 @@ export function createExamRouter(service: ExamService, auth: BeaconAuthDeps): Ro
   const r = Router();
   r.post('/start', strict, validate({ body: ExamStartSchema }), c.start);
   r.get('/', strict, c.state);
+  r.get('/summary', strict, c.summary);
   r.post('/resume', strict, c.resume);
   r.put('/answers/:attemptQuestionId', strict, candidateExamWriteLimiter, params, validate({ body: SaveAnswerSchema }), c.save);
   r.post(
