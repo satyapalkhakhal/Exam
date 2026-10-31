@@ -5,8 +5,8 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useDashboard, type RoleCounts } from '@/api/admin/dashboard';
 
+// Live counts only. The role's reference applicant figure is a typed-in number, not data, so it stays off the cards.
 const STATS: Array<[keyof RoleCounts, string]> = [
-  ['refApplicantCount', 'Reference applicants'],
   ['imported', 'Imported'],
   ['notStarted', 'Not started'],
   ['inProgress', 'In progress'],
