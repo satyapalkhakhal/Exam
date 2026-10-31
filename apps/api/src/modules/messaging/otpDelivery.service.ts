@@ -49,7 +49,7 @@ export function buildOtpEmail(otp: string, purpose: OtpPurpose): { subject: stri
   const { subject, action } = EMAIL_COPY[purpose];
   const minutes = Math.ceil(OTP_TTL_SECONDS / 60);
   const validity = `valid for ${minutes} minute${minutes === 1 ? '' : 's'}`;
-  const warning = 'If you did not request this code, please contact it.support@arihantcapital.com immediately.';
+  const warning = 'If you did not request this code, please contact hrd@arihantcapital.com immediately.';
   return {
     subject,
     text: `Your one-time code to ${action} is ${otp}.\nThis code is ${validity}.\n${warning}`,
