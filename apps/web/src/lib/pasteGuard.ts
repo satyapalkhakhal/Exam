@@ -10,6 +10,7 @@ export interface KeyLike {
   ctrlKey: boolean;
   metaKey: boolean;
   shiftKey: boolean;
+  altKey?: boolean;
 }
 
 const MOD_KEYS: Record<string, 'PASTE' | 'COPY' | 'CUT'> = { v: 'PASTE', c: 'COPY', x: 'CUT' };
@@ -18,6 +19,23 @@ export function isBlockedKey(e: KeyLike): 'PASTE' | 'COPY' | 'CUT' | null {
   if (e.shiftKey && e.key === 'Insert') return 'PASTE';
   if (e.ctrlKey || e.metaKey) return MOD_KEYS[e.key.toLowerCase()] ?? null;
   return null;
+}
+
+/**
+ * Browser shortcuts that are not answer-copying but have no place in the exam: print,
+ * save page, view source and the developer tools. Blocked silently (not reported), since
+ * pressing one is not evidence of cheating. A deterrent only: the browser menus still work.
+ */
+const RESTRICTED_MOD = new Set(['p', 's', 'u']);
+const DEVTOOLS_KEYS = new Set(['i', 'j', 'c']);
+export function isRestrictedShortcut(e: KeyLike): boolean {
+  if (e.key === 'F12') return true;
+  const k = e.key.toLowerCase();
+  const mod = e.ctrlKey || e.metaKey;
+  if (!mod) return false;
+  // Ctrl+Shift+I/J/C (Windows/Linux) and Cmd+Option+I/J/C (macOS) open the developer tools.
+  if ((e.shiftKey || e.altKey) && DEVTOOLS_KEYS.has(k)) return true;
+  return !e.shiftKey && !e.altKey && RESTRICTED_MOD.has(k);
 }
 
 const BLOCKED_INPUT = new Set([
@@ -85,7 +103,8 @@ type Listenable = Pick<EventTarget, 'addEventListener' | 'removeEventListener'>;
 
 /**
  * Blocks paste/copy/cut/drag-drop/context menu and their shortcuts on `target` (the answer
- * box or the whole document) and reports each attempt. Returns a detach function.
+ * box or the whole document) and reports each attempt; also swallows the restricted browser
+ * shortcuts (print, save, view source, developer tools) without reporting. Returns a detach function.
  */
 export function attachPasteGuard(target: Listenable, onBlocked: (kind: BlockedKind, detail?: string) => void): () => void {
   const block = (kind: BlockedKind) => (e: Event) => {
@@ -103,6 +122,10 @@ export function attachPasteGuard(target: Listenable, onBlocked: (kind: BlockedKi
     dragstart: (e) => e.preventDefault(),
     dragover: (e) => e.preventDefault(),
     keydown: (e) => {
+      if (isRestrictedShortcut(e as unknown as KeyLike)) {
+        e.preventDefault();
+        return;
+      }
       const kind = isBlockedKey(e as unknown as KeyLike);
       if (!kind) return;
       e.preventDefault();

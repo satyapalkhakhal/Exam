@@ -5,6 +5,7 @@ import {
   attachPasteGuard,
   isBlockedInputType,
   isBlockedKey,
+  isRestrictedShortcut,
   isTypedInputType,
   typedCharsFor,
   compositionTypedChars,
@@ -28,6 +29,37 @@ test('Ctrl+C -> COPY', () => assert.equal(isBlockedKey(key('c', { ctrlKey: true 
 test('Ctrl+X -> CUT', () => assert.equal(isBlockedKey(key('x', { ctrlKey: true })), 'CUT'));
 test('Ctrl+A is allowed (select-all)', () => assert.equal(isBlockedKey(key('a', { ctrlKey: true })), null));
 test('plain v is allowed', () => assert.equal(isBlockedKey(key('v')), null));
+
+test('print, save, view source and developer-tools shortcuts are restricted; normal keys are not', () => {
+  for (const k of [
+    key('F12'),
+    key('p', { ctrlKey: true }),
+    key('S', { metaKey: true }),
+    key('u', { ctrlKey: true }),
+    key('I', { ctrlKey: true, shiftKey: true }),
+    key('J', { ctrlKey: true, shiftKey: true }),
+    key('C', { ctrlKey: true, shiftKey: true }),
+    { ...key('i', { metaKey: true }), altKey: true },
+  ]) {
+    assert.equal(isRestrictedShortcut(k), true, JSON.stringify(k));
+  }
+  for (const k of [key('p'), key('a', { ctrlKey: true }), key('z', { ctrlKey: true }), key('Enter'), key('c', { ctrlKey: true })]) {
+    assert.equal(isRestrictedShortcut(k), false, JSON.stringify(k));
+  }
+});
+
+test('attachPasteGuard swallows restricted shortcuts without reporting them', () => {
+  const target = new EventTarget();
+  const seen: BlockedKind[] = [];
+  const detach = attachPasteGuard(target, (k) => seen.push(k));
+  for (const k of [key('F12'), key('p', { ctrlKey: true }), key('I', { ctrlKey: true, shiftKey: true })]) {
+    const e = ev('keydown', k);
+    target.dispatchEvent(e);
+    assert.equal(e.defaultPrevented, true, k.key);
+  }
+  assert.deepEqual(seen, [], 'not counted as integrity events');
+  detach();
+});
 
 test('isBlockedInputType', () => {
   for (const t of ['insertFromPaste', 'insertFromPasteAsQuotation', 'insertFromDrop', 'insertReplacementText', 'insertFromYank']) {
