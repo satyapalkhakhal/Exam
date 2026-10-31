@@ -24,6 +24,7 @@ function listWhere(q: CandidateListQuery): Prisma.CandidateWhereInput {
             { email: { contains: q.search, mode: 'insensitive' } },
             { rollNumber: { contains: q.search, mode: 'insensitive' } },
             { candidateCode: { contains: q.search, mode: 'insensitive' } },
+            { mobile: { contains: q.search } },
           ],
         }
       : {}),

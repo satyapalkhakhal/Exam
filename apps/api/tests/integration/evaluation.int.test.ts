@@ -493,3 +493,15 @@ test('T11#2: submitting marks for an attempt that was reset meanwhile is refused
   assert.notEqual(sub.status, 200);
   assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: s.candidateId } })).status, 'NOT_STARTED');
 });
+
+test('submissions search: a Super Admin also finds by roll number and email; an Evaluator cannot', async () => {
+  const roll = `R-${RUN}-m`;
+  const sa = await agents.sa.get(`/api/admin/submissions?search=${encodeURIComponent(roll)}`);
+  assert.equal(sa.status, 200);
+  assert.ok(sa.body.data.items.some((r: { candidateCode: string }) => r.candidateCode === `EV-${RUN}-m`), 'SA finds by roll number');
+  const email = (await prisma.candidate.findUniqueOrThrow({ where: { candidateCode: `EV-${RUN}-m` } })).email;
+  const saMail = await agents.sa.get(`/api/admin/submissions?search=${encodeURIComponent(email)}`);
+  assert.ok(saMail.body.data.items.some((r: { candidateCode: string }) => r.candidateCode === `EV-${RUN}-m`), 'SA finds by email');
+  const ev = await agents.a.get(`/api/admin/submissions?search=${encodeURIComponent(roll)}`);
+  assert.equal(ev.body.data.items.length, 0, 'evaluator search stays code-only (blind marking)');
+});

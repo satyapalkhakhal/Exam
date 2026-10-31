@@ -395,3 +395,12 @@ test('bulk job role: validation, unknown role and evaluator access', async () =>
   assert.equal(ghostRole.status, 404);
   assert.equal((await ev.post('/api/admin/candidates/bulk/job-role').send({ candidateIds: [someone.id], jobRoleId: role2Id })).status, 403);
 });
+
+test('list search also matches mobile', async () => {
+  const p = await preview(sa, csv(['30,31,SRCH001,Search By Mobile,3.1,Analytics,B.Tech,srch1@iitg.ac.in,']), roleId);
+  await sa.post('/api/admin/candidates/import/confirm').send({ previewId: p.body.data.previewId });
+  await prisma.candidate.update({ where: { email: 'srch1@iitg.ac.in' }, data: { mobile: '9812345670' } });
+  const res = await sa.get('/api/admin/candidates?search=98123456');
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.data.items.map((c: { email: string }) => c.email), ['srch1@iitg.ac.in']);
+});

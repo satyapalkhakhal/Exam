@@ -10,6 +10,8 @@ import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ReasonDialog } from '@/components/admin/ReasonDialog';
+import { TableHeaderFilter, TableHeaderFilterText } from '@/components/ui/table-header-filter';
+import { matchesCandidateSearch } from '@/lib/candidateSearch';
 import { useRoles } from '@/api/admin/roles';
 import { activityExportUrl, resultsExportUrl, useDecision, useLeaderboard, type Decision, type LeaderboardRow } from '@/api/admin/results';
 import { statusText } from '@/pages/admin/Candidates';
@@ -22,6 +24,9 @@ export default function Leaderboard() {
   const board = useLeaderboard(jobRoleId);
   const decide = useDecision();
   const [target, setTarget] = useState<{ row: LeaderboardRow; decision: Decision } | null>(null);
+  const [search, setSearch] = useState('');
+  // Filters the loaded board; ranks stay the real ranks.
+  const rows = (board.data ?? []).filter((r) => matchesCandidateSearch(r, search));
   const questionCols = board.data?.[0]?.questionMarks ?? [];
 
   return (
@@ -46,7 +51,14 @@ export default function Leaderboard() {
           <TableHeader>
             <TableRow>
               <TableHead>Rank</TableHead>
-              <TableHead>Candidate</TableHead>
+              <TableHead>
+                <span className="inline-flex items-center gap-1.5">
+                  Candidate
+                  <TableHeaderFilter active={Boolean(search)} ariaLabel="Search by name, email, roll number or code" className="w-56">
+                    <TableHeaderFilterText label="Search" value={search} onChange={setSearch} hint="Name, email, roll number or code" />
+                  </TableHeaderFilter>
+                </span>
+              </TableHead>
               {questionCols.map((c) => <TableHead key={c.order}>Q{c.order}</TableHead>)}
               <TableHead>Total</TableHead>
               <TableHead>%</TableHead>
@@ -58,7 +70,10 @@ export default function Leaderboard() {
           <TableBody>
             {board.isPending && jobRoleId && <TableRow><TableCell colSpan={7 + questionCols.length} className="text-muted-foreground">Loading…</TableCell></TableRow>}
             {board.data?.length === 0 && <TableRow><TableCell colSpan={7 + questionCols.length} className="text-muted-foreground">No evaluated candidates yet.</TableCell></TableRow>}
-            {board.data?.map((r) => (
+            {board.data && board.data.length > 0 && rows.length === 0 && (
+              <TableRow><TableCell colSpan={7 + questionCols.length} className="text-muted-foreground">No candidate matches the search.</TableCell></TableRow>
+            )}
+            {rows.map((r) => (
               <TableRow key={r.candidateId}>
                 <TableCell className="font-semibold">{r.rank}</TableCell>
                 <TableCell>

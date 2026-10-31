@@ -174,7 +174,14 @@ export const evaluationRepository = {
     if (q.jobRoleId) and.push({ candidate: { jobRoleId: q.jobRoleId } });
     if (q.search) {
       const or: Prisma.CandidateWhereInput[] = [{ candidateCode: { contains: q.search, mode: 'insensitive' } }];
-      if (searchNames) or.push({ fullName: { contains: q.search, mode: 'insensitive' } });
+      // Identity fields only for a Super Admin; an Evaluator searches by code alone (blind marking).
+      if (searchNames) {
+        or.push(
+          { fullName: { contains: q.search, mode: 'insensitive' } },
+          { rollNumber: { contains: q.search, mode: 'insensitive' } },
+          { email: { contains: q.search, mode: 'insensitive' } },
+        );
+      }
       and.push({ candidate: { OR: or } });
     }
     const where: Prisma.ExamAttemptWhereInput = { AND: and };

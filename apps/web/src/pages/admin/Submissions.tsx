@@ -52,8 +52,8 @@ export default function Submissions() {
               <TableHead>
                 <span className="inline-flex items-center gap-1.5">
                   Code
-                  <TableHeaderFilter active={Boolean(f.search)} ariaLabel={isSa ? 'Search by code or name' : 'Search by code'} className="w-56">
-                    <TableHeaderFilterText label="Search" value={f.search} onChange={(v) => set({ search: v })} hint={isSa ? 'Candidate code or name' : 'Candidate code'} />
+                  <TableHeaderFilter active={Boolean(f.search)} ariaLabel={isSa ? 'Search by code, name, roll number or email' : 'Search by code'} className="w-56">
+                    <TableHeaderFilterText label="Search" value={f.search} onChange={(v) => set({ search: v })} hint={isSa ? 'Code, name, roll number or email' : 'Candidate code'} />
                   </TableHeaderFilter>
                 </span>
               </TableHead>

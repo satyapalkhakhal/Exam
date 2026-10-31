@@ -114,8 +114,8 @@ export default function Candidates() {
               <TableHead>
                 <span className="inline-flex items-center gap-1.5">
                   <button type="button" onClick={() => onSort('fullName')} className="hover:text-foreground" aria-label="Sort by name">Name</button>
-                  <TableHeaderFilter active={Boolean(f.search)} ariaLabel="Search by name, email, roll number or code" className="w-56">
-                    <TableHeaderFilterText label="Search" value={f.search} onChange={(v) => set({ search: v })} hint="Name, email, roll number or code" />
+                  <TableHeaderFilter active={Boolean(f.search)} ariaLabel="Search by name, email, roll number, mobile or code" className="w-56">
+                    <TableHeaderFilterText label="Search" value={f.search} onChange={(v) => set({ search: v })} hint="Name, email, roll number, mobile or code" />
                   </TableHeaderFilter>
                 </span>
               </TableHead>
