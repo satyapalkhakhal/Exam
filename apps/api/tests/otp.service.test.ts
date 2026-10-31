@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import RedisMock from 'ioredis-mock';
 import type { Redis } from 'ioredis';
 import { setRedisClient, getRedis } from '../src/infrastructure/redis/redis.js';
-import { issueOtp, verifyOtp, type OtpDeps } from '../src/modules/otp/otp.service.js';
+import { issueOtp, MAX_ATTEMPTS, verifyOtp, type OtpDeps } from '../src/modules/otp/otp.service.js';
 import { sha256, safeEqual } from '../src/shared/utils/hash.js';
 
 const recipient = { email: 'a@b.com', mobile: null };
@@ -42,9 +42,10 @@ test('second issue within cooldown -> OTP_COOLDOWN', async () => {
   await assert.rejects(issueOtp({ ...P, recipient }, staticDeps), (e: { code?: string }) => e.code === 'OTP_COOLDOWN');
 });
 
-test('5 wrong then right -> OTP_LOCKED', async () => {
+test('MAX_ATTEMPTS (25) wrong then right -> OTP_LOCKED', async () => {
+  assert.equal(MAX_ATTEMPTS, 25);
   await issueOtp({ ...P, recipient }, staticDeps);
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < MAX_ATTEMPTS; i++) {
     await assert.rejects(verifyOtp({ ...P, code: '000000' }), (e: { code?: string }) => e.code === 'OTP_INVALID');
   }
   await assert.rejects(verifyOtp({ ...P, code: '123456' }), (e: { code?: string }) => e.code === 'OTP_LOCKED');
@@ -84,12 +85,12 @@ test('send mode stores a random hashed code and passes it to deliver', async () 
 
 const codeOf = (e: unknown): string | undefined => (e as { code?: string }).code;
 
-test('10 parallel wrong verifies count at most 5 tries and leave the code unusable', async () => {
+test('2×MAX_ATTEMPTS parallel wrong verifies count at most MAX_ATTEMPTS tries and leave the code unusable', async () => {
   await issueOtp({ ...P, recipient }, staticDeps);
-  const results = await Promise.allSettled(Array.from({ length: 10 }, () => verifyOtp({ ...P, code: '000000' })));
+  const results = await Promise.allSettled(Array.from({ length: 2 * MAX_ATTEMPTS }, () => verifyOtp({ ...P, code: '000000' })));
   const codes = results.map((r) => (r.status === 'rejected' ? codeOf(r.reason) : 'OK'));
   assert.ok(!codes.includes('OK'));
-  assert.ok(codes.filter((c) => c === 'OTP_INVALID').length <= 5, `counted tries: ${codes.join(',')}`);
+  assert.ok(codes.filter((c) => c === 'OTP_INVALID').length <= MAX_ATTEMPTS, `counted tries: ${codes.join(',')}`);
   await assert.rejects(verifyOtp({ ...P, code: '123456' }), (e) => ['OTP_LOCKED', 'OTP_EXPIRED'].includes(codeOf(e) ?? ''));
 });
 

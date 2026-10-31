@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { env } from '../../src/infrastructure/config/env.js';
 import { getRedis } from '../../src/infrastructure/redis/redis.js';
 import { issueOtp, verifyOtp, type OtpDeps } from '../../src/modules/otp/index.js';
+import { MAX_ATTEMPTS } from '../../src/modules/otp/otp.service.js';
 
 const deps: OtpDeps = {
   allowStatic: true,
@@ -25,12 +26,12 @@ after(async () => {
   await getRedis().quit();
 });
 
-test('50 parallel wrong verifies: at most 5 counted as tries, then the code is dead', async () => {
+test('50 parallel wrong verifies: exactly MAX_ATTEMPTS (25) counted as tries, then the code is dead', async () => {
   const P = { purpose: 'candidate_login' as const, subjectId: 'int-par-wrong' };
   await issueOtp({ ...P, recipient: { email: 'a@b.c', mobile: null } }, deps);
   const results = await Promise.allSettled(Array.from({ length: 50 }, () => verifyOtp({ ...P, code: '000000' })));
   const codes = results.map((r) => (r.status === 'rejected' ? codeOf(r.reason) : 'OK'));
-  assert.equal(codes.filter((c) => c === 'OTP_INVALID').length, 5);
+  assert.equal(codes.filter((c) => c === 'OTP_INVALID').length, MAX_ATTEMPTS);
   assert.ok(codes.every((c) => c === 'OTP_INVALID' || c === 'OTP_LOCKED' || c === 'OTP_EXPIRED'));
   await assert.rejects(verifyOtp({ ...P, code: '123456' }), (e) => codeOf(e) === 'OTP_EXPIRED');
   assert.equal(await getRedis().exists('exam:otp:candidate_login:int-par-wrong'), 0);

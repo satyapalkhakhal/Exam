@@ -9,6 +9,11 @@ import { env } from '../../src/infrastructure/config/env.js';
 import { prisma } from '../../src/infrastructure/db/prisma.js';
 import { getRedis } from '../../src/infrastructure/redis/redis.js';
 import { createApp } from '../../src/app.js';
+import {
+  CANDIDATE_OTP_IP_LIMIT,
+  CANDIDATE_VERIFY_ID_LIMIT,
+  LOCATION_LIMIT,
+} from '../../src/shared/middleware/rateLimit.js';
 
 const EMAIL = 'cand@int.test';
 let app: Express;
@@ -276,46 +281,55 @@ test('request-otp tolerates a shared NAT: many identifiers from one IP are not t
   }
 });
 
-test('I5: one shared-NAT IP gets 1000 request-otp and 1000 verify-otp per 10 min before 429', async () => {
+test('I5: one shared-NAT IP gets CANDIDATE_OTP_IP_LIMIT (10,000) request-otp and verify-otp per 10 min before 429', async () => {
+  assert.equal(CANDIDATE_OTP_IP_LIMIT, 10_000);
   const keys = await getRedis().keys('exam:rl:*');
   if (keys.length) await getRedis().del(...keys);
-  const burst = async (path: string, body: (i: number) => object, n: number) => {
-    const statuses: number[] = [];
-    for (let i = 0; i < n; i += 50) {
-      const batch = Array.from({ length: Math.min(50, n - i) }, (_, j) => request(app).post(path).send(body(i + j)));
-      statuses.push(...(await Promise.all(batch)).map((r) => r.status));
-    }
-    return statuses;
+  // 50 real requests from many identifiers, then pre-load the per-IP counter to the
+  // limit (10,000 real requests would take minutes): the next request is refused.
+  const burst = async (path: string, body: (i: number) => object, n: number) =>
+    (await Promise.all(Array.from({ length: n }, (_, i) => request(app).post(path).send(body(i))))).map((r) => r.status);
+  const fillTo = async (bucket: string) => {
+    const [k] = await getRedis().keys(`exam:rl:${bucket}:*`);
+    assert.ok(k, `counter for ${bucket} exists`);
+    assert.equal(Number(await getRedis().get(k)), 50);
+    await getRedis().set(k, String(CANDIDATE_OTP_IP_LIMIT), 'PX', 600_000);
   };
-  const req = await burst('/api/candidate/auth/request-otp', (i) => ({ identifier: `nat-burst${i}@int.test` }), 1000);
-  assert.deepEqual([...new Set(req)], [200]);
+  assert.deepEqual([...new Set(await burst('/api/candidate/auth/request-otp', (i) => ({ identifier: `nat-burst${i}@int.test` }), 50))], [200]);
+  await fillTo('candOtpIp');
   assert.equal((await request(app).post('/api/candidate/auth/request-otp').send({ identifier: 'nat-over@int.test' })).status, 429);
-  const ver = await burst('/api/candidate/auth/verify-otp', (i) => ({ identifier: `nat-burst${i}@int.test`, code: '000000' }), 1000);
-  assert.deepEqual([...new Set(ver)], [400]);
+  assert.deepEqual([...new Set(await burst('/api/candidate/auth/verify-otp', (i) => ({ identifier: `nat-burst${i}@int.test`, code: '000000' }), 50))], [400]);
+  await fillTo('candVerify');
   assert.equal((await request(app).post('/api/candidate/auth/verify-otp').send({ identifier: 'nat-over@int.test', code: '000000' })).status, 429);
   const after = await getRedis().keys('exam:rl:*');
   if (after.length) await getRedis().del(...after);
 });
 
-test('verify-otp is limited to 10 per identifier per window', async () => {
+test('verify-otp is limited to CANDIDATE_VERIFY_ID_LIMIT (50) per identifier per window', async () => {
+  assert.equal(CANDIDATE_VERIFY_ID_LIMIT, 50);
   const keys = await getRedis().keys('exam:rl:*');
   if (keys.length) await getRedis().del(...keys);
   let last = 0;
-  for (let i = 0; i < 11; i++) {
+  for (let i = 0; i < CANDIDATE_VERIFY_ID_LIMIT + 1; i++) {
     last = (await request(app).post('/api/candidate/auth/verify-otp').send({ identifier: 'vlimit@int.test', code: '000000' })).status;
   }
   assert.equal(last, 429);
 });
 
-test('location is limited to 30 per 10 min per candidate, keyed under exam:rl:candLocation:', async () => {
+test('location is limited to LOCATION_LIMIT (1,000) per 10 min per candidate, keyed under exam:rl:candLocation:', async () => {
+  assert.equal(LOCATION_LIMIT, 1_000);
   const { agent } = await signIn();
   const keys = await getRedis().keys('exam:rl:*');
   if (keys.length) await getRedis().del(...keys);
   let last = 0;
-  for (let i = 0; i < 31; i++) {
+  for (let i = 0; i < 5; i++) {
     last = (await agent.post('/api/candidate/location').send({ stage: 'LOGIN', permission: 'TIMEOUT' })).status;
-    if (i < 30) assert.equal(last, 200);
+    assert.equal(last, 200);
   }
+  // Pre-load the counter to the limit rather than sending 1,000 real requests.
+  const [lk] = await getRedis().keys('exam:rl:candLocation:*');
+  await getRedis().set(lk!, String(LOCATION_LIMIT), 'PX', 600_000);
+  last = (await agent.post('/api/candidate/location').send({ stage: 'LOGIN', permission: 'TIMEOUT' })).status;
   assert.equal(last, 429);
   const rl = await getRedis().keys('exam:rl:candLocation:*');
   assert.equal(rl.length, 1);

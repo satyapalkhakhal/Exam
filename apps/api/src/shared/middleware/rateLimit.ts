@@ -45,7 +45,21 @@ const bodyEmail = (req: Request): string => {
   return typeof e === 'string' ? e.trim().toLowerCase().slice(0, 254) : '';
 };
 
-/** Admin OTP step: 10 per 10 min per IP (the code itself also allows only 5 tries). */
+/**
+ * Configured limits (counts per window). Raised 2026-11-01 at the user's request for
+ * large cohorts; the windows are unchanged. Guessing protection that was NOT raised:
+ * 5 code requests per identifier, the 60 s resend cooldown, 5 wrong admin passwords
+ * → 15 min lock, 10 admin OTP checks per IP.
+ */
+export const CANDIDATE_OTP_IP_LIMIT = 10_000;
+export const CANDIDATE_VERIFY_ID_LIMIT = 50;
+export const MOBILE_LINK_VERIFY_LIMIT = 50;
+export const ADMIN_LOGIN_LIMIT = 50;
+export const LOCATION_LIMIT = 1_000;
+export const ADMIN_UPLOAD_LIMIT = 1_000;
+export const EXAM_WRITE_LIMIT = 5_000;
+
+/** Admin OTP step: 10 per 10 min per IP (each code also has a wrong-try cap). */
 export const adminOtpVerifyLimiter = lazyLimiter({
   name: 'adminOtpVerify',
   windowMs: 10 * 60_000,
@@ -53,11 +67,11 @@ export const adminOtpVerifyLimiter = lazyLimiter({
   key: ipOf,
 });
 
-/** Admin password step: 10 per 15 min per IP + email. */
+/** Admin password step: ADMIN_LOGIN_LIMIT per 15 min per IP + email. */
 export const adminLoginLimiter = lazyLimiter({
   name: 'adminLogin',
   windowMs: 15 * 60_000,
-  limit: 10,
+  limit: ADMIN_LOGIN_LIMIT,
   key: (req) => `${ipOf(req)}|${bodyEmail(req)}`,
 });
 
@@ -87,13 +101,10 @@ export const candidateOtpIdentifierLimiter = lazyLimiter({
   skip: skipJunkIdentifier,
 });
 
-/**
- * Per-IP ceiling for candidate request-otp and verify-otp, per 10 min. A whole
- * cohort (461, plus resends) can sit behind one campus or hostel NAT at the
- * exam start, so this stays well above it; brute force is bounded by the
- * per-identifier limits and the 5-try cap on each code.
- */
-export const CANDIDATE_OTP_IP_LIMIT = 1000;
+// Per-IP ceiling for candidate request-otp and verify-otp, per 10 min
+// (CANDIDATE_OTP_IP_LIMIT above): a whole cohort can sit behind one campus or
+// hostel NAT at the exam start; brute force is bounded by the per-identifier
+// limits and the wrong-try cap on each code.
 
 /** Candidate OTP request: CANDIDATE_OTP_IP_LIMIT per 10 min per IP. */
 export const candidateOtpIpLimiter = lazyLimiter({
@@ -111,11 +122,11 @@ export const candidateVerifyLimiter = lazyLimiter({
   key: (req) => ipOf(req),
 });
 
-/** Candidate OTP verify: 10 per 10 min per identifier. */
+/** Candidate OTP verify: CANDIDATE_VERIFY_ID_LIMIT per 10 min per identifier. */
 export const candidateVerifyIdentifierLimiter = lazyLimiter({
   name: 'candVerifyId',
   windowMs: 10 * 60_000,
-  limit: 10,
+  limit: CANDIDATE_VERIFY_ID_LIMIT,
   key: (req) => bodyIdentifier(req),
   skip: skipJunkIdentifier,
 });
@@ -133,11 +144,11 @@ export const candidateMobileLinkRequestLimiter = lazyLimiter({
   skip: skipJunkEmail,
 });
 
-/** Mobile registration, verify: 10 per 10 min per email (each code also allows only 5 tries). */
+/** Mobile registration, verify: MOBILE_LINK_VERIFY_LIMIT per 10 min per email (each code also has a wrong-try cap). */
 export const candidateMobileLinkVerifyLimiter = lazyLimiter({
   name: 'candLinkVerify',
   windowMs: 10 * 60_000,
-  limit: 10,
+  limit: MOBILE_LINK_VERIFY_LIMIT,
   key: bodyEmail,
   skip: skipJunkEmail,
 });
@@ -150,26 +161,26 @@ export const candidateMobileLinkIpLimiter = lazyLimiter({
   key: (req) => ipOf(req),
 });
 
-/** Location capture: 30 per 10 min per signed-in candidate (mount after authenticateCandidate). */
+/** Location capture: LOCATION_LIMIT per 10 min per signed-in candidate (mount after authenticateCandidate). */
 export const candidateLocationLimiter = lazyLimiter({
   name: 'candLocation',
   windowMs: 10 * 60_000,
-  limit: 30,
+  limit: LOCATION_LIMIT,
   key: (req) => req.candidate?.id ?? ipOf(req),
 });
 
-/** Admin spreadsheet uploads: 20 per 10 min per signed-in admin (mount after authenticateAdmin). */
+/** Admin spreadsheet uploads: ADMIN_UPLOAD_LIMIT per 10 min per signed-in admin (mount after authenticateAdmin). */
 export const adminUploadLimiter = lazyLimiter({
   name: 'adminUpload',
   windowMs: 10 * 60_000,
-  limit: 20,
+  limit: ADMIN_UPLOAD_LIMIT,
   key: (req) => req.admin?.id ?? ipOf(req),
 });
 
-/** Exam saves, beacons and event batches: 1200 per 10 min per candidate (autosave runs every few seconds). */
+/** Exam saves, beacons and event batches: EXAM_WRITE_LIMIT per 10 min per candidate (autosave runs every few seconds). */
 export const candidateExamWriteLimiter = lazyLimiter({
   name: 'candExamWrite',
   windowMs: 10 * 60_000,
-  limit: 1200,
+  limit: EXAM_WRITE_LIMIT,
   key: (req) => req.candidate?.id ?? ipOf(req),
 });

@@ -3,7 +3,7 @@
 // sha256 hash in a Redis hash ({hash, attempts}, TTL 300 s) under an `exam:`
 // prefix, and verified timing-safely. The attempt counter is bumped atomically
 // (Lua) before the comparison and success is gated on winning the DEL, so
-// parallel guesses can neither exceed the 5-try cap nor redeem a code twice. When no channel is enabled system-wide and
+// parallel guesses can neither exceed the MAX_ATTEMPTS cap nor redeem a code twice. When no channel is enabled system-wide and
 // ALLOW_STATIC_OTP is on, the hash of '123456' is stored exactly like a real
 // code and nothing is sent, so verification is a single code path. Never logs
 // the code.
@@ -20,7 +20,8 @@ import { deliverOtp, OTP_TTL_SECONDS, type OtpChannel, type OtpPurpose, type Otp
 export type { OtpPurpose, OtpRecipient };
 
 const COOLDOWN_SECONDS = 60;
-const MAX_ATTEMPTS = 5;
+/** Wrong tries allowed per code (admin and candidate); raised from 5 at the user's request 2026-11-01. */
+export const MAX_ATTEMPTS = 25;
 export const STATIC_OTP = '123456';
 
 const otpKey = (purpose: OtpPurpose, subjectId: string) => `exam:otp:${purpose}:${subjectId}`;

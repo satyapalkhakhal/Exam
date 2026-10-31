@@ -11,6 +11,7 @@ import { env } from '../../src/infrastructure/config/env.js';
 import { prisma } from '../../src/infrastructure/db/prisma.js';
 import { getRedis } from '../../src/infrastructure/redis/redis.js';
 import { createApp } from '../../src/app.js';
+import { ADMIN_LOGIN_LIMIT } from '../../src/shared/middleware/rateLimit.js';
 import { sha256 } from '../../src/shared/utils/hash.js';
 
 const SA = { email: 'super@int.test', password: 'super-pass-123' };
@@ -190,9 +191,10 @@ test('audit list is paginated and filterable; integrations GET reports candidate
   assert.ok('sms' in integ.body.data && 'email' in integ.body.data);
 });
 
-test('admin login is rate limited to 10 per 15 min per IP + email, counted in Redis under exam:rl:', async () => {
+test('admin login is rate limited to ADMIN_LOGIN_LIMIT (50) per 15 min per IP + email, counted in Redis under exam:rl:', async () => {
+  assert.equal(ADMIN_LOGIN_LIMIT, 50);
   const creds = { email: 'flood@int.test', password: 'whatever-1' };
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < ADMIN_LOGIN_LIMIT; i++) {
     assert.equal((await request(app).post('/api/admin/auth/login').send(creds)).status, 401);
   }
   const blocked = await request(app).post('/api/admin/auth/login').send(creds);
