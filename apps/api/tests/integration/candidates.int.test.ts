@@ -219,3 +219,46 @@ test('preview reports source line numbers when a blank row sits inside the file'
   assert.equal(p.status, 200, JSON.stringify(p.body));
   assert.deepEqual(p.body.data.errors.map((e: { row: number; field: string }) => [e.row, e.field]), [[3, 'major_cpi']]);
 });
+
+test('create one candidate by hand: code minted, email lower-cased, mobile normalised, audited; evaluator is 403', async () => {
+  const res = await sa.post('/api/admin/candidates').send({
+    fullName: 'Dipak Rout',
+    email: 'Dipak.Rout@Cands.test',
+    mobile: '+91 90045 41335',
+    rollNumber: '11111',
+    xPercentage: 80,
+    xiiPercentage: 80,
+    jobRoleId: roleId,
+  });
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  const c = res.body.data;
+  assert.match(c.candidateCode, /^ARH-EX-\d{6}$/);
+  assert.equal(c.email, 'dipak.rout@cands.test');
+  assert.equal(c.mobile, '9004541335');
+  assert.equal(c.status, 'NOT_STARTED');
+  assert.equal(c.majorCpi, null);
+  const audit = await prisma.adminAuditLog.findFirst({ where: { entityId: c.id, action: 'CANDIDATE_CREATED' } });
+  assert.ok(audit);
+
+  const dupEmail = await sa.post('/api/admin/candidates').send({ fullName: 'Other', email: 'dipak.rout@cands.test', jobRoleId: roleId });
+  assert.equal(dupEmail.status, 409);
+  const dupMobile = await sa.post('/api/admin/candidates').send({ fullName: 'Other', email: 'other@cands.test', mobile: '9004541335', jobRoleId: roleId });
+  assert.equal(dupMobile.status, 409);
+
+  const minimal = await sa.post('/api/admin/candidates').send({ fullName: 'Only Required', email: 'min@cands.test', jobRoleId: roleId });
+  assert.equal(minimal.status, 201, 'name, email and role are the only required fields');
+
+  for (const bad of [
+    { fullName: 'X', email: 'x@cands.test', jobRoleId: roleId },
+    { fullName: 'Bad Mail', email: 'dipak', jobRoleId: roleId },
+    { fullName: 'Bad Pct', email: 'p@cands.test', xPercentage: 101, jobRoleId: roleId },
+    { fullName: 'Bad Cpi', email: 'q@cands.test', majorCpi: 11, jobRoleId: roleId },
+    { fullName: 'No Role', email: 'r@cands.test' },
+  ]) {
+    assert.equal((await sa.post('/api/admin/candidates').send(bad)).status, 400, JSON.stringify(bad));
+  }
+  const ghostRole = await sa.post('/api/admin/candidates').send({ fullName: 'Ghost Role', email: 'g@cands.test', jobRoleId: '00000000-0000-4000-8000-000000000000' });
+  assert.equal(ghostRole.status, 404);
+
+  assert.equal((await ev.post('/api/admin/candidates').send({ fullName: 'Eval Try', email: 'e@cands.test', jobRoleId: roleId })).status, 403);
+});

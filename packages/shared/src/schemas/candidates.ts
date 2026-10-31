@@ -43,6 +43,21 @@ const optText = z.string().trim().max(CANDIDATE_TEXT_MAX).nullable();
 const pct = z.number().min(0).max(100).nullable();
 const cpi = z.number().min(0).max(10).nullable();
 
+// One candidate added by hand from the admin panel; same fields and rules as an import row.
+export const CandidateCreateSchema = z.object({
+  fullName: name,
+  email,
+  mobile: mobile.nullable().optional(),
+  rollNumber: optText.optional(),
+  xPercentage: pct.optional(),
+  xiiPercentage: pct.optional(),
+  majorCpi: cpi.optional(),
+  discipline: optText.optional(),
+  programme: optText.optional(),
+  jobRoleId: z.string().uuid(),
+});
+export type CandidateCreateInput = z.infer<typeof CandidateCreateSchema>;
+
 export const CandidateUpdateSchema = z
   .object({
     fullName: name.optional(),

@@ -8,6 +8,7 @@ import { Link } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react';
 import { ImportWizard } from '@/components/import/ImportWizard';
+import { AddCandidateDialog } from '@/components/admin/AddCandidateDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ClearFiltersButton } from '@/components/ui/clear-filters-button';
@@ -50,6 +51,7 @@ export default function Candidates() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [importing, setImporting] = useState(false);
+  const [adding, setAdding] = useState(false);
   const roles = useRoles();
   const { data, isPending, error } = useCandidates(f, page, pageSize);
   const qc = useQueryClient();
@@ -67,6 +69,7 @@ export default function Candidates() {
         <h1 className="text-xl font-semibold text-foreground">Candidates</h1>
         <div className="flex items-center gap-2">
           <ClearFiltersButton count={activeCount} onClear={() => set({ search: '', jobRoleId: '', status: '', flagged: '' })} />
+          <Button variant="outline" onClick={() => setAdding(true)}>Add candidate</Button>
           <Button onClick={() => setImporting(true)}>Import candidates</Button>
         </div>
       </div>
@@ -155,6 +158,12 @@ export default function Candidates() {
           }}
         />
       )}
+      <AddCandidateDialog
+        open={adding}
+        roles={roles.data ?? []}
+        defaultJobRoleId={f.jobRoleId || undefined}
+        onClose={() => setAdding(false)}
+      />
       <Dialog open={importing} onOpenChange={setImporting}>
         <DialogContent className="max-w-3xl">
           <DialogHeader>

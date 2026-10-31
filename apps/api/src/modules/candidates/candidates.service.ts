@@ -15,6 +15,7 @@ import type {
   CandidateImportRow,
   CandidateListQuery,
   CandidateRowDto,
+  CandidateCreateInput,
   CandidateUpdateInput,
   ImportConfirmInput,
   ImportPreviewDto,
@@ -81,6 +82,8 @@ export interface CandidatesRepository {
   existingEmailsAndMobiles(): Promise<{ emails: Set<string>; mobiles: Set<string> }>;
   lastImportOf(jobRoleId: string, fileHash: string): Promise<Date | null>;
   confirmImport(input: ImportCommit): Promise<number>;
+  /** Throws CONFLICT when the email or mobile belongs to another candidate. */
+  create(data: CandidateCreateInput & { candidateCode: string }, audit: (id: string) => AuditRecord): Promise<CandidateRow>;
   /** Candidates matching the filters (flagged ignored) that could carry a review flag. */
   possiblyFlaggedIds(query: CandidateListQuery): Promise<string[]>;
   /** `ids` further restricts the rows (the flagged filter, resolved by the service). */
@@ -203,6 +206,20 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
         createdAt: h.createdAt.toISOString(),
       })),
     };
+  }
+
+  async function create(input: CandidateCreateInput, actorId: string, ip: string | null): Promise<CandidateRowDto> {
+    if (!(await repo.jobRoleExists(input.jobRoleId))) throw notFound('Job role not found');
+    const [candidateCode] = await nextCandidateCodes(1);
+    const row = await repo.create({ ...input, candidateCode: candidateCode! }, (id) => ({
+      adminId: actorId,
+      action: 'CANDIDATE_CREATED',
+      entity: ENTITY,
+      entityId: id,
+      metadata: { jobRoleId: input.jobRoleId },
+      ip,
+    }));
+    return toRowDto(row);
   }
 
   async function update(id: string, input: CandidateUpdateInput, actorId: string, ip: string | null): Promise<CandidateRowDto> {
@@ -337,7 +354,7 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
     return { imported, skipped: cached.total - imported };
   }
 
-  return { list, detail, update, setEligibility, setLocationExempt, resetAttempt, previewImport, confirmImport };
+  return { list, detail, create, update, setEligibility, setLocationExempt, resetAttempt, previewImport, confirmImport };
 }
 
 export type CandidatesService = ReturnType<typeof createCandidatesService>;

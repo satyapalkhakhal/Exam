@@ -141,6 +141,34 @@ export const candidatesRepository: CandidatesRepository = {
     return prisma.candidate.findUnique({ where: { id }, include });
   },
 
+  async create(data, audit) {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const row = await tx.candidate.create({
+          data: {
+            candidateCode: data.candidateCode,
+            fullName: data.fullName,
+            email: data.email,
+            mobile: data.mobile ?? null,
+            rollNumber: data.rollNumber ?? null,
+            xPercentage: data.xPercentage ?? null,
+            xiiPercentage: data.xiiPercentage ?? null,
+            majorCpi: data.majorCpi ?? null,
+            discipline: data.discipline ?? null,
+            programme: data.programme ?? null,
+            jobRoleId: data.jobRoleId,
+          },
+          include,
+        });
+        await writeAudit(tx, audit(row.id));
+        return row;
+      });
+    } catch (err) {
+      if (isUnique(err)) throw conflict('Another candidate already has this email or mobile.');
+      throw err;
+    }
+  },
+
   async update(id, data, audit) {
     try {
       return await prisma.$transaction(async (tx) => {

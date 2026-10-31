@@ -156,6 +156,22 @@ function useCandidateMutation<V>(fn: (v: V) => Promise<unknown>) {
   });
 }
 
+/** One candidate added by hand: name, email and role are required, the rest optional. */
+export interface CandidateCreate extends Omit<CandidateEdit, 'fullName' | 'email' | 'jobRoleId'> {
+  fullName: string;
+  email: string;
+  jobRoleId: string;
+}
+
+export function useCreateCandidate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CandidateCreate) => apiFetch<CandidateRow>('admin', '/candidates', { method: 'POST', json: body }),
+    // Dashboard counts change too, so refresh everything under 'admin'.
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin'] }),
+  });
+}
+
 export const useEditCandidate = (id: string) =>
   useCandidateMutation((body: CandidateEdit) => apiFetch('admin', `/candidates/${id}`, { method: 'PATCH', json: body }));
 

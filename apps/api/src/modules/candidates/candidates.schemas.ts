@@ -2,6 +2,7 @@
 // Request schemas live in @exam/shared so the admin forms validate identically.
 import { z } from 'zod';
 export {
+  CandidateCreateSchema,
   CandidateUpdateSchema,
   CandidateEligibilitySchema,
   CandidateLocationExemptSchema,

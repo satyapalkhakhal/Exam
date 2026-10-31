@@ -15,6 +15,7 @@ import {
   CandidateListQuerySchema,
   CandidateLocationExemptSchema,
   CandidateResetSchema,
+  CandidateCreateSchema,
   CandidateUpdateSchema,
   IdParamsSchema,
   ImportConfirmSchema,
@@ -26,6 +27,7 @@ export function createCandidatesRouter(service: CandidatesService): Router {
   const r = Router();
   r.use(authorize('SUPER_ADMIN'));
   r.get('/', validate({ query: CandidateListQuerySchema }), c.list);
+  r.post('/', validate({ body: CandidateCreateSchema }), c.create);
   r.get('/template.csv', c.template);
   r.post('/import/preview', adminUploadLimiter, uploadSpreadsheet('file'), validate({ body: ImportPreviewBodySchema }), c.preview);
   r.post('/import/confirm', validate({ body: ImportConfirmSchema }), c.confirm);
