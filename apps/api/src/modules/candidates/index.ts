@@ -16,7 +16,7 @@ export { candidatesRepository };
 
 export const candidates = createCandidatesService(candidatesRepository, {
   redis: getRedis,
-  revokeSessions: (id) => revokeAllSessions('candidate', id),
+  revokeSessions: (accountId) => revokeAllSessions('candidate', accountId),
   flagCounts: getFlagCounts,
   getFlags: exam.getFlags,
   flagScore,

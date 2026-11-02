@@ -1,13 +1,16 @@
 // modules/candidates/candidateImport.parser.ts
 // Pure row validation for the candidate import: no I/O, so the preview is built
-// (and unit-tested) from parsed rows plus the existing emails/mobiles. Row
-// numbers are the source line (header = 1); callers pass them from readSheet so
-// blank interior rows do not shift them, and index+2 is the fallback. Duplicates
-// (email or mobile, in the file or in the DB) are reported apart from errors and
-// skipped. Unmapped columns are kept in `extra`. With `updateExisting`, a row whose
-// email belongs to a not-yet-started candidate becomes an update instead (moved to the
-// row's job profile; blank cells keep the stored value), so a file uploaded to the wrong
-// job profile can be corrected by uploading it again.
+// (and unit-tested) from parsed rows plus the existing accounts. Row numbers are
+// the source line (header = 1); callers pass them from readSheet so blank
+// interior rows do not shift them, and index+2 is the fallback. A person may
+// hold several applications (one per job role, docs/multi-exam.md): a duplicate
+// is the same email in the same role, in the file or in the DB, and is reported
+// apart from errors and skipped. The same email under another role is valid and
+// listed in `linkedRows` (it attaches to the existing account); a mobile that
+// belongs to a different account is an error there. Unmapped columns are kept
+// in `extra`. With `updateExisting`, a row whose email already holds this role as
+// a not-yet-started application becomes an update instead (blank cells keep the
+// stored value), so a corrected file can be uploaded again.
 
 import { CANDIDATE_NAME_MAX, CANDIDATE_TEXT_MAX, normalizeMobile } from '@exam/shared';
 
@@ -37,7 +40,7 @@ export interface RowDuplicate {
   reason: 'IN_FILE' | 'EXISTS';
 }
 
-/** An existing candidate to update; null fields mean "keep the stored value". */
+/** An existing candidate to update (matched by email + role); null fields mean "keep the stored value". */
 export interface CandidateUpdateDraft {
   row: number;
   candidateId: string;
@@ -58,19 +61,27 @@ export interface ParsedCandidates {
   errors: RowError[];
   duplicates: RowDuplicate[];
   updates: CandidateUpdateDraft[];
+  /** Rows of `valid` that attach to an existing account under a new role. */
+  linkedRows: number[];
+}
+
+/** An existing sign-in account, with the roles it already holds. */
+export interface ExistingAccount {
+  accountId: string;
+  mobile: string | null;
+  /** jobRoleId -> the application for that role. */
+  roles: Map<string, { id: string; status: string }>;
 }
 
 export interface ParseContext {
   defaultJobRoleId: string;
   rolesByLowerName: Map<string, string>;
-  existingEmails: Set<string>;
-  existingMobiles: Set<string>;
-  /** Update mode: rows for existing emails update those candidates instead of being skipped. */
+  /** Existing accounts by lower-cased email. */
+  accountsByEmail: Map<string, ExistingAccount>;
+  /** Account id owning each stored mobile. */
+  mobileOwners: Map<string, string>;
+  /** Update mode: rows for an existing email + role update that application instead of being skipped. */
   updateExisting?: boolean;
-  /** Update mode only: existing candidates by lower-cased email. */
-  existingByEmail?: Map<string, { id: string; status: string; mobile: string | null }>;
-  /** Update mode only: candidate id owning each stored mobile. */
-  mobileOwners?: Map<string, string>;
 }
 
 export const HEADER_MAP = {
@@ -113,9 +124,9 @@ export function parseCandidateRows(
   ctx: ParseContext,
   rowNumbers?: number[],
 ): ParsedCandidates {
-  const out: ParsedCandidates = { valid: [], errors: [], duplicates: [], updates: [] };
-  const seenEmails = new Set<string>();
-  const seenMobiles = new Set<string>();
+  const out: ParsedCandidates = { valid: [], errors: [], duplicates: [], updates: [], linkedRows: [] };
+  const seenKeys = new Set<string>();
+  const mobileEmail = new Map<string, string>();
 
   rows.forEach((r, i) => {
     const row = rowNumbers?.[i] ?? i + 2;
@@ -168,26 +179,33 @@ export function parseCandidateRows(
       return;
     }
 
-    const current = ctx.updateExisting ? ctx.existingByEmail?.get(email) : undefined;
-    if (current) {
-      if (seenEmails.has(email) || (mobile !== null && seenMobiles.has(mobile))) {
+    const key = `${email}|${jobRoleId}`;
+    const account = ctx.accountsByEmail.get(email);
+    const held = account?.roles.get(jobRoleId);
+    const owner = mobile !== null ? ctx.mobileOwners.get(mobile) : undefined;
+
+    if (account && held) {
+      if (!ctx.updateExisting) {
+        out.duplicates.push({ row, reason: 'EXISTS' });
+        return;
+      }
+      if (seenKeys.has(key)) {
         out.duplicates.push({ row, reason: 'IN_FILE' });
         return;
       }
-      if (current.status !== 'NOT_STARTED') {
+      if (held.status !== 'NOT_STARTED') {
         out.errors.push({ row, field: 'email', message: 'This candidate has already started an exam and cannot be updated by import' });
         return;
       }
-      const owner = mobile !== null ? ctx.mobileOwners?.get(mobile) : undefined;
-      if (owner !== undefined && owner !== current.id) {
+      if (owner !== undefined && owner !== account.accountId) {
         out.errors.push({ row, field: 'mobile', message: 'This mobile belongs to another candidate' });
         return;
       }
-      seenEmails.add(email);
-      if (mobile !== null) seenMobiles.add(mobile);
+      seenKeys.add(key);
+      if (mobile !== null) mobileEmail.set(mobile, email);
       out.updates.push({
         row,
-        candidateId: current.id,
+        candidateId: held.id,
         email,
         fullName,
         mobile,
@@ -202,16 +220,22 @@ export function parseCandidateRows(
       return;
     }
 
-    if (ctx.existingEmails.has(email) || (mobile !== null && ctx.existingMobiles.has(mobile))) {
-      out.duplicates.push({ row, reason: 'EXISTS' });
-      return;
-    }
-    if (seenEmails.has(email) || (mobile !== null && seenMobiles.has(mobile))) {
+    if (seenKeys.has(key) || (mobile !== null && mobileEmail.has(mobile) && mobileEmail.get(mobile) !== email)) {
       out.duplicates.push({ row, reason: 'IN_FILE' });
       return;
     }
-    seenEmails.add(email);
-    if (mobile !== null) seenMobiles.add(mobile);
+    if (account) {
+      if (owner !== undefined && owner !== account.accountId) {
+        out.errors.push({ row, field: 'mobile', message: 'This mobile belongs to another candidate' });
+        return;
+      }
+    } else if (owner !== undefined) {
+      out.duplicates.push({ row, reason: 'EXISTS' });
+      return;
+    }
+    seenKeys.add(key);
+    if (mobile !== null) mobileEmail.set(mobile, email);
+    if (account) out.linkedRows.push(row);
 
     const extra: Record<string, string> = {};
     for (const [k, v] of Object.entries(r)) {

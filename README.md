@@ -38,7 +38,7 @@ Same pattern as the CRM: the API is a Docker container, Postgres and Redis are c
 
 UAT and production can share a host: containers, network and volumes carry an env suffix (`exam_api_uat`, `exam_postgres_production`, `exam_net_uat`, `exam_pgdata_uat`, compose project `exam_<env>`), and the API listens on loopback `API_HOST_PORT` from the env file (default 4100 production, 4101 uat; point the UAT nginx block at 4101).
 
-Files: `apps/api/Dockerfile`, `deploy/docker-compose.prod.yml`, `deploy/deploy-api.sh`, `deploy/deploy-web.sh`, `deploy/backup-db.sh`, `deploy/nginx/exam.conf`, `deploy/.env.production.example`.
+Files: `apps/api/Dockerfile`, `deploy/docker-compose.prod.yml`, `deploy/deploy-api.sh`, `deploy/deploy-web.sh`, `deploy/backup-db.sh`, `deploy/restore-db.sh`, `deploy/nginx/exam.conf`, `deploy/.env.production.example`.
 
 First-time setup, in order:
 
@@ -87,6 +87,17 @@ REVOKE UPDATE, DELETE ON activity_logs, admin_audit_logs FROM exam_user;
 - The dump is written to a temp file and moved into place only after `pg_dump` succeeds, so a failed run never leaves a truncated backup that looks good.
 - Optional encryption: set `BACKUP_AGE_RECIPIENT` (an `age` public key) in the cron environment and the dump is piped through `age -r`, producing `.sql.gz.age`. Keep the private key off the server.
 - Files older than 14 days are deleted.
+
+### Restore
+
+`./deploy/restore-db.sh <uat|production> <backup-file> [--yes]` restores a `backup-db.sh` dump. For an encrypted `.sql.gz.age` file, set `AGE_IDENTITY` to the private key file (copy it to the server only for the restore).
+
+- The dump is unpacked and checked first (gzip intact, `pg_dump`'s "dump complete" trailer present); a truncated or corrupt backup is refused before anything changes.
+- It asks you to type the environment name (`--yes` skips this, for scripted UAT refreshes).
+- The dump is restored in a single transaction into a **new** database. Only when that succeeds is `exam_api_<env>` stopped, the live database renamed to `exam_db_pre_restore_<stamp>`, the restored one renamed to `exam_db`, and the API started and health-checked. A failure before the swap leaves the live database and the API untouched.
+- The previous data is kept as `exam_db_pre_restore_<stamp>`; the script prints the rollback commands and the `dropdb` to run once you are satisfied.
+- Redis is not restored: users may need to sign in again, and the minute sweep locks any restored in-progress attempt past its deadline. If the backup predates the current migrations, run `./deploy/deploy-api.sh <env> --migrate`. Restore under the same `CONFIG_ENCRYPTION_KEY` the data was written with.
+- **Do not restore during an exam window.** Test a restore on UAT now and then; an untested backup is not a backup.
 
 ### Go-live checklist
 

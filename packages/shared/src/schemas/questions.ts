@@ -100,6 +100,8 @@ export interface ImportPreviewDto<T> {
   duplicates: ImportRowDuplicate[];
   /** Candidate import with "update existing" only. */
   updates?: T[];
+  /** Candidate import: row numbers of valid rows that attach to an existing account under a new role. */
+  linkedRows?: number[];
 }
 
 export interface QuestionImportRow {

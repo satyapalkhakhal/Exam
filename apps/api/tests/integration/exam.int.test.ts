@@ -17,6 +17,7 @@ import { createApp } from '../../src/app.js';
 import { autoSubmitAttempt, getFlagCounts, exam } from '../../src/modules/exam/index.js';
 import { sweepExpiredAttempts } from '../../src/infrastructure/queue/sweep.js';
 import { closeAutoSubmitQueue, getAutoSubmitQueue } from '../../src/infrastructure/queue/autoSubmit.queue.js';
+import { createApplication, createCandidate, createCandidates } from './helpers.js';
 import { issueRefreshToken, peekRefreshFamily, signAccess } from '../../src/modules/adminAuth/tokens.js';
 
 const RUN = crypto.randomBytes(4).toString('hex');
@@ -33,9 +34,7 @@ const mobile = () => `9${crypto.randomInt(100_000_000, 999_999_999)}`;
 
 async function makeCandidate(key: string, jobRoleId: string, extra: { locationExempt?: boolean } = {}) {
   const email = `${key}-${RUN}@exam.int.test`;
-  const c = await prisma.candidate.create({
-    data: { candidateCode: `X-${RUN}-${key}`, fullName: `Exam ${key}`, email, mobile: mobile(), jobRoleId, ...extra },
-  });
+  const c = await createCandidate({ candidateCode: `X-${RUN}-${key}`, fullName: `Exam ${key}`, email, mobile: mobile(), jobRoleId, ...extra });
   emails[key] = email;
   ids[key] = c.id;
 }
@@ -107,19 +106,19 @@ interface StateBody {
 
 async function start(key: string): Promise<StateBody> {
   const agent = await signIn(key);
-  const res = await agent.post('/api/candidate/exam/start').send({ location: HERE });
+  const res = await agent.post(`/api/candidate/exams/${ids[key]}/start`).send({ location: HERE });
   assert.equal(res.status, 200, JSON.stringify(res.body));
   return res.body.data as StateBody;
 }
 
 const save = (key: string, aqId: string, body: Record<string, unknown>) =>
-  agents[key]!.put(`/api/candidate/exam/answers/${aqId}`).send({ typedChars: 0, intervalMs: 0, ...body });
+  agents[key]!.put(`/api/candidate/exams/${ids[key]}/answers/${aqId}`).send({ typedChars: 0, intervalMs: 0, ...body });
 
 let stateA: StateBody;
 
 test('start without a granted location is LOCATION_REQUIRED, and the EXAM_START row is still written', async () => {
   const agent = await signIn('a');
-  const res = await agent.post('/api/candidate/exam/start').send({ location: { stage: 'EXAM_START', permission: 'DENIED' } });
+  const res = await agent.post(`/api/candidate/exams/${ids.a}/start`).send({ location: { stage: 'EXAM_START', permission: 'DENIED' } });
   assert.equal(res.status, 400, JSON.stringify(res.body));
   assert.equal(res.body.error.code, 'LOCATION_REQUIRED');
   const rows = await prisma.candidateLoginLog.findMany({ where: { candidateId: ids.a, stage: 'EXAM_START' } });
@@ -170,7 +169,7 @@ test('start enqueues the auto-submit job at endsAt + 10 s', async () => {
 });
 
 test('GET /exam returns the state without a session id', async () => {
-  const res = await agents.a!.get('/api/candidate/exam');
+  const res = await agents.a!.get(`/api/candidate/exams/${ids.a}/state`);
   assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.equal(res.body.data.attemptId, stateA.attemptId);
   assert.ok(!('sessionId' in res.body.data));
@@ -196,7 +195,7 @@ test('saveAnswer ignores lower clientSeq', async () => {
   const stored = await prisma.answer.findUniqueOrThrow({ where: { attemptQuestionId: aq } });
   assert.equal(stored.text, 'bb');
   assert.equal(stored.clientSeq, 2);
-  const state = await agents.a!.get('/api/candidate/exam');
+  const state = await agents.a!.get(`/api/candidate/exams/${ids.a}/state`);
   const q = (state.body.data as StateBody).questions[0]!;
   assert.equal(q.answer.text, 'bb');
   assert.equal(q.answer.clientSeq, 2);
@@ -242,7 +241,7 @@ test('a malformed save is a 400 and over-long text is refused', async () => {
 
 test('resume issues new session, same endsAt', async () => {
   const old = stateA.sessionId;
-  const res = await agents.a!.post('/api/candidate/exam/resume');
+  const res = await agents.a!.post(`/api/candidate/exams/${ids.a}/resume`);
   assert.equal(res.status, 200, JSON.stringify(res.body));
   const resumed = res.body.data as StateBody;
   assert.equal(resumed.attemptId, stateA.attemptId);
@@ -272,27 +271,27 @@ test("another candidate's attemptQuestionId is a 404", async () => {
 test('a text/plain beacon saves with the same rules', async () => {
   const aq = stateA.questions[0]!.attemptQuestionId;
   const res = await agents.a!
-    .post(`/api/candidate/exam/answers/${aq}/beacon`)
+    .post(`/api/candidate/exams/${ids.a}/answers/${aq}/beacon`)
     .set('Content-Type', 'text/plain;charset=UTF-8')
     .send(JSON.stringify({ sessionId: stateA.sessionId, clientSeq: 5, text: 'beacon text', typedChars: 7, intervalMs: 2000 }));
   assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.equal(res.body.data.accepted, true);
   assert.equal((await prisma.answer.findUniqueOrThrow({ where: { attemptQuestionId: aq } })).text, 'beacon text');
-  const junk = await agents.a!.post(`/api/candidate/exam/answers/${aq}/beacon`).set('Content-Type', 'text/plain').send('{not json');
+  const junk = await agents.a!.post(`/api/candidate/exams/${ids.a}/answers/${aq}/beacon`).set('Content-Type', 'text/plain').send('{not json');
   assert.equal(junk.status, 400);
 });
 
 test('a beacon after the access cookie expired is accepted on the live refresh cookie alone', async () => {
   const aq = stateA.questions[0]!.attemptQuestionId;
   const res = await request(app)
-    .post(`/api/candidate/exam/answers/${aq}/beacon`)
+    .post(`/api/candidate/exams/${ids.a}/answers/${aq}/beacon`)
     .set('Cookie', refreshCookies.a!)
     .set('Content-Type', 'text/plain')
     .send(JSON.stringify({ sessionId: stateA.sessionId, clientSeq: 6, text: 'after expiry', typedChars: 5, intervalMs: 2000 }));
   assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.equal((await prisma.answer.findUniqueOrThrow({ where: { attemptQuestionId: aq } })).text, 'after expiry');
   const ev = await request(app)
-    .post('/api/candidate/exam/events')
+    .post(`/api/candidate/exams/${ids.a}/events`)
     .set('Cookie', refreshCookies.a!)
     .send({ sessionId: stateA.sessionId, events: [{ type: 'PAGE_UNLOAD', at: new Date().toISOString() }] });
   assert.equal(ev.status, 200, JSON.stringify(ev.body));
@@ -300,15 +299,15 @@ test('a beacon after the access cookie expired is accepted on the live refresh c
 
 test("a refresh cookie cannot write into another candidate's attempt, and no cookie is 401", async () => {
   await start('c');
-  const stateC = (await agents.c!.get('/api/candidate/exam')).body.data as StateBody;
+  const stateC = (await agents.c!.get(`/api/candidate/exams/${ids.c}/state`)).body.data as StateBody;
   const res = await request(app)
-    .post(`/api/candidate/exam/answers/${stateC.questions[0]!.attemptQuestionId}/beacon`)
+    .post(`/api/candidate/exams/${ids.c}/answers/${stateC.questions[0]!.attemptQuestionId}/beacon`)
     .set('Cookie', refreshCookies.a!)
     .set('Content-Type', 'text/plain')
     .send(JSON.stringify({ sessionId: stateA.sessionId, clientSeq: 1, text: 'cross', typedChars: 0, intervalMs: 0 }));
   assert.equal(res.status, 404);
   const none = await request(app)
-    .post(`/api/candidate/exam/answers/${stateA.questions[0]!.attemptQuestionId}/beacon`)
+    .post(`/api/candidate/exams/${ids.a}/answers/${stateA.questions[0]!.attemptQuestionId}/beacon`)
     .set('Content-Type', 'text/plain')
     .send(JSON.stringify({ sessionId: stateA.sessionId, clientSeq: 99, text: 'anon', typedChars: 0, intervalMs: 0 }));
   assert.equal(none.status, 401);
@@ -317,13 +316,13 @@ test("a refresh cookie cannot write into another candidate's attempt, and no coo
 test('a rotated refresh cookie no longer authenticates a beacon', async () => {
   const agent = await signIn('d');
   await start('d');
-  const stateD = (await agent.get('/api/candidate/exam')).body.data as StateBody;
-  const sessionD = (await agent.post('/api/candidate/exam/resume')).body.data.sessionId as string;
+  const stateD = (await agent.get(`/api/candidate/exams/${ids.d}/state`)).body.data as StateBody;
+  const sessionD = (await agent.post(`/api/candidate/exams/${ids.d}/resume`)).body.data.sessionId as string;
   const oldRt = refreshCookies.d!;
   const rotated = await agent.post('/api/candidate/auth/refresh');
   assert.equal(rotated.status, 200);
   const res = await request(app)
-    .post(`/api/candidate/exam/answers/${stateD.questions[0]!.attemptQuestionId}/beacon`)
+    .post(`/api/candidate/exams/${ids.d}/answers/${stateD.questions[0]!.attemptQuestionId}/beacon`)
     .set('Cookie', oldRt)
     .set('Content-Type', 'text/plain')
     .send(JSON.stringify({ sessionId: sessionD, clientSeq: 1, text: 'replayed', typedChars: 0, intervalMs: 0 }));
@@ -334,7 +333,7 @@ test('events are stored with the server time, the client time kept in metadata',
   const at = '2020-01-01T00:00:00.000Z';
   const aq = stateA.questions[0]!.attemptQuestionId;
   const res = await agents.a!
-    .post('/api/candidate/exam/events')
+    .post(`/api/candidate/exams/${ids.a}/events`)
     .send({ sessionId: stateA.sessionId, events: [{ type: 'PASTE_ATTEMPT', questionId: aq, at, metadata: { key: 'v' } }, { type: 'TAB_HIDDEN', at }] });
   assert.equal(res.status, 200, JSON.stringify(res.body));
   const paste = await prisma.activityLog.findFirstOrThrow({ where: { attemptId: stateA.attemptId, eventType: 'PASTE_ATTEMPT' } });
@@ -346,12 +345,12 @@ test('events are stored with the server time, the client time kept in metadata',
 
 test('events: unknown types, more than 50, and a foreign session are refused', async () => {
   const at = new Date().toISOString();
-  const bad = await agents.a!.post('/api/candidate/exam/events').send({ sessionId: stateA.sessionId, events: [{ type: 'EXAM_SUBMITTED', at }] });
+  const bad = await agents.a!.post(`/api/candidate/exams/${ids.a}/events`).send({ sessionId: stateA.sessionId, events: [{ type: 'EXAM_SUBMITTED', at }] });
   assert.equal(bad.status, 400);
   const many = Array.from({ length: 51 }, () => ({ type: 'WINDOW_BLUR', at }));
-  const tooMany = await agents.a!.post('/api/candidate/exam/events').send({ sessionId: stateA.sessionId, events: many });
+  const tooMany = await agents.a!.post(`/api/candidate/exams/${ids.a}/events`).send({ sessionId: stateA.sessionId, events: many });
   assert.equal(tooMany.status, 400);
-  const foreign = await agents.a!.post('/api/candidate/exam/events').send({ sessionId: crypto.randomUUID(), events: [{ type: 'WINDOW_BLUR', at }] });
+  const foreign = await agents.a!.post(`/api/candidate/exams/${ids.a}/events`).send({ sessionId: crypto.randomUUID(), events: [{ type: 'WINDOW_BLUR', at }] });
   assert.equal(foreign.status, 409);
   assert.equal(foreign.body.error.code, 'SESSION_SUPERSEDED');
 });
@@ -360,11 +359,11 @@ test('an IP different from the last logged one is logged as IP_CHANGED', async (
   await prisma.activityLog.create({
     data: { candidateId: ids.a!, attemptId: stateA.attemptId, eventType: 'WINDOW_FOCUS', ip: '198.51.100.9' },
   });
-  const res = await agents.a!.post('/api/candidate/exam/events').send({ sessionId: stateA.sessionId, events: [{ type: 'WINDOW_FOCUS', at: new Date().toISOString() }] });
+  const res = await agents.a!.post(`/api/candidate/exams/${ids.a}/events`).send({ sessionId: stateA.sessionId, events: [{ type: 'WINDOW_FOCUS', at: new Date().toISOString() }] });
   assert.equal(res.status, 200);
   const changed = await prisma.activityLog.findFirstOrThrow({ where: { attemptId: stateA.attemptId, eventType: 'IP_CHANGED' } });
   assert.equal((changed.metadata as { from?: string }).from, '198.51.100.9');
-  const again = await agents.a!.post('/api/candidate/exam/events').send({ sessionId: stateA.sessionId, events: [{ type: 'WINDOW_BLUR', at: new Date().toISOString() }] });
+  const again = await agents.a!.post(`/api/candidate/exams/${ids.a}/events`).send({ sessionId: stateA.sessionId, events: [{ type: 'WINDOW_BLUR', at: new Date().toISOString() }] });
   assert.equal(again.status, 200);
   assert.equal(await prisma.activityLog.count({ where: { attemptId: stateA.attemptId, eventType: 'IP_CHANGED' } }), 1);
 });
@@ -431,8 +430,8 @@ test('sweep auto-submits expired in-progress attempts', async () => {
 });
 
 test('manual submit, then save is ATTEMPT_LOCKED and a new start is ALREADY_ATTEMPTED', async () => {
-  const stateB = (await agents.b!.post('/api/candidate/exam/resume')).body.data as StateBody;
-  const res = await agents.b!.post('/api/candidate/exam/submit').send({ sessionId: stateB.sessionId });
+  const stateB = (await agents.b!.post(`/api/candidate/exams/${ids.b}/resume`)).body.data as StateBody;
+  const res = await agents.b!.post(`/api/candidate/exams/${ids.b}/submit`).send({ sessionId: stateB.sessionId });
   assert.equal(res.status, 200, JSON.stringify(res.body));
   const attempt = await prisma.examAttempt.findUniqueOrThrow({ where: { id: stateB.attemptId } });
   assert.equal(attempt.status, 'SUBMITTED');
@@ -443,10 +442,10 @@ test('manual submit, then save is ATTEMPT_LOCKED and a new start is ALREADY_ATTE
   const late = await save('b', stateB.questions[0]!.attemptQuestionId, { sessionId: stateB.sessionId, clientSeq: 1, text: 'after submit' });
   assert.equal(late.status, 409);
   assert.equal(late.body.error.code, 'ATTEMPT_LOCKED');
-  const again = await agents.b!.post('/api/candidate/exam/start').send({ location: HERE });
+  const again = await agents.b!.post(`/api/candidate/exams/${ids.b}/start`).send({ location: HERE });
   assert.equal(again.status, 409);
   assert.equal(again.body.error.code, 'ALREADY_ATTEMPTED');
-  const state = await agents.b!.get('/api/candidate/exam');
+  const state = await agents.b!.get(`/api/candidate/exams/${ids.b}/state`);
   assert.equal(state.body.data.status, 'SUBMITTED');
 });
 
@@ -455,7 +454,7 @@ test('GET /exam/summary after submit: receipt fields and counts only, never answ
   const attempt = await prisma.examAttempt.findFirstOrThrow({ where: { candidateId: ids.b, status: { not: 'RESET' } } });
   const answered = await prisma.answer.count({ where: { attemptQuestion: { attemptId: attempt.id }, wordCount: { gt: 0 } } });
   const total = await prisma.attemptQuestion.count({ where: { attemptId: attempt.id } });
-  const res = await agents.b!.get('/api/candidate/exam/summary');
+  const res = await agents.b!.get(`/api/candidate/exams/${ids.b}/summary`);
   assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.deepEqual(res.body.data, {
     status: 'SUBMITTED',
@@ -468,17 +467,17 @@ test('GET /exam/summary after submit: receipt fields and counts only, never answ
   assert.ok(!JSON.stringify(res.body).includes('after submit'), 'no answer text in the summary');
 });
 
-test('GET /exam/summary needs a session and an attempt', async () => {
-  assert.equal((await request(app).get('/api/candidate/exam/summary')).status, 401);
+test('GET /exams/:id/summary needs a session and an attempt', async () => {
+  assert.equal((await request(app).get(`/api/candidate/exams/${crypto.randomUUID()}/summary`)).status, 401);
 });
 
 test('a location-exempt candidate starts without a location; a closed role is EXAM_NOT_OPEN', async () => {
-  const exempt = await (await signIn('exempt')).post('/api/candidate/exam/start').send({ location: { stage: 'EXAM_START', permission: 'DENIED' } });
+  const exempt = await (await signIn('exempt')).post(`/api/candidate/exams/${ids.exempt}/start`).send({ location: { stage: 'EXAM_START', permission: 'DENIED' } });
   assert.equal(exempt.status, 200, JSON.stringify(exempt.body));
-  const closed = await (await signIn('closed')).post('/api/candidate/exam/start').send({ location: HERE });
+  const closed = await (await signIn('closed')).post(`/api/candidate/exams/${ids.closed}/start`).send({ location: HERE });
   assert.equal(closed.status, 403);
   assert.equal(closed.body.error.code, 'EXAM_NOT_OPEN');
-  const none = await agents.closed!.get('/api/candidate/exam');
+  const none = await agents.closed!.get(`/api/candidate/exams/${ids.closed}/state`);
   assert.equal(none.status, 404);
 });
 
@@ -495,9 +494,9 @@ async function mintCookies(candidateId: string): Promise<string> {
 test('a superseded tab cannot submit; the attempt stays in progress', async () => {
   await makeCandidate('sup', roleId);
   const first = await start('sup');
-  const second = (await agents.sup!.post('/api/candidate/exam/resume')).body.data as StateBody;
+  const second = (await agents.sup!.post(`/api/candidate/exams/${ids.sup}/resume`)).body.data as StateBody;
   assert.notEqual(first.sessionId, second.sessionId);
-  const res = await agents.sup!.post('/api/candidate/exam/submit').send({ sessionId: first.sessionId });
+  const res = await agents.sup!.post(`/api/candidate/exams/${ids.sup}/submit`).send({ sessionId: first.sessionId });
   assert.equal(res.status, 409, JSON.stringify(res.body));
   assert.equal(res.body.error.code, 'SESSION_SUPERSEDED');
   assert.equal((await prisma.examAttempt.findUniqueOrThrow({ where: { id: first.attemptId } })).status, 'IN_PROGRESS');
@@ -506,16 +505,16 @@ test('a superseded tab cannot submit; the attempt stays in progress', async () =
 test('the beacon and events routes refuse cross-site requests with 403', async () => {
   const aq = stateA.questions[0]!.attemptQuestionId;
   const body = JSON.stringify({ sessionId: stateA.sessionId, clientSeq: 500, text: 'csrf', typedChars: 0, intervalMs: 0 });
-  const evilOrigin = await agents.a!.post(`/api/candidate/exam/answers/${aq}/beacon`).set('Origin', 'https://evil.example').set('Content-Type', 'text/plain').send(body);
+  const evilOrigin = await agents.a!.post(`/api/candidate/exams/${ids.a}/answers/${aq}/beacon`).set('Origin', 'https://evil.example').set('Content-Type', 'text/plain').send(body);
   assert.equal(evilOrigin.status, 403);
   assert.equal(evilOrigin.body.error.code, 'FORBIDDEN');
-  const crossSite = await agents.a!.post('/api/candidate/exam/events').set('Sec-Fetch-Site', 'cross-site').send({ sessionId: stateA.sessionId, events: [{ type: 'WINDOW_BLUR', at: new Date().toISOString() }] });
+  const crossSite = await agents.a!.post(`/api/candidate/exams/${ids.a}/events`).set('Sec-Fetch-Site', 'cross-site').send({ sessionId: stateA.sessionId, events: [{ type: 'WINDOW_BLUR', at: new Date().toISOString() }] });
   assert.equal(crossSite.status, 403);
-  const sameSite = await agents.a!.post('/api/candidate/exam/events').set('Sec-Fetch-Site', 'same-site').send({ sessionId: stateA.sessionId, events: [{ type: 'WINDOW_BLUR', at: new Date().toISOString() }] });
+  const sameSite = await agents.a!.post(`/api/candidate/exams/${ids.a}/events`).set('Sec-Fetch-Site', 'same-site').send({ sessionId: stateA.sessionId, events: [{ type: 'WINDOW_BLUR', at: new Date().toISOString() }] });
   assert.equal(sameSite.status, 403);
   assert.notEqual((await prisma.answer.findUniqueOrThrow({ where: { attemptQuestionId: aq } })).text, 'csrf');
   // The real page: same origin, Origin = PUBLIC_WEB_URL. Gets past the guard (the attempt itself is locked by now).
-  const ours = await agents.a!.post('/api/candidate/exam/events').set('Origin', new URL(env.PUBLIC_WEB_URL).origin).set('Sec-Fetch-Site', 'same-origin').send({ sessionId: stateA.sessionId, events: [{ type: 'WINDOW_BLUR', at: new Date().toISOString() }] });
+  const ours = await agents.a!.post(`/api/candidate/exams/${ids.a}/events`).set('Origin', new URL(env.PUBLIC_WEB_URL).origin).set('Sec-Fetch-Site', 'same-origin').send({ sessionId: stateA.sessionId, events: [{ type: 'WINDOW_BLUR', at: new Date().toISOString() }] });
   assert.notEqual(ours.status, 403, JSON.stringify(ours.body));
 });
 
@@ -528,27 +527,27 @@ test('100 concurrent starts for one role all succeed, and saves keep working mea
       { jobRoleId: role.id, text: 'Burst two.', normalizedTextHash: `burst-b-${RUN}`, maxMarks: 10, displayOrder: 2 },
     ],
   });
-  const created = await prisma.candidate.createManyAndReturn({
-    data: Array.from({ length: 101 }, (_, i) => ({
+  const created = await createCandidates(
+    Array.from({ length: 101 }, (_, i) => ({
       candidateCode: `B-${RUN}-${i}`,
       fullName: `Burst ${i}`,
       email: `burst${i}-${RUN}@exam.int.test`,
       mobile: mobile(),
       jobRoleId: role.id,
     })),
-    select: { id: true },
-  });
+  );
   const [early, ...rest] = created;
   const earlyCookie = await mintCookies(early!.id);
-  const earlyStart = await request(app).post('/api/candidate/exam/start').set('Cookie', earlyCookie).send({ location: HERE });
+  const earlyStart = await request(app).post(`/api/candidate/exams/${early!.id}/start`).set('Cookie', earlyCookie).send({ location: HERE });
   assert.equal(earlyStart.status, 200, JSON.stringify(earlyStart.body));
   const earlyState = earlyStart.body.data as StateBody;
   const cookies = await Promise.all(rest.map((c) => mintCookies(c.id)));
+  const restIds = rest.map((c) => c.id);
 
-  const starts = cookies.map((cookie) => request(app).post('/api/candidate/exam/start').set('Cookie', cookie).send({ location: HERE }));
+  const starts = cookies.map((cookie, i) => request(app).post(`/api/candidate/exams/${restIds[i]}/start`).set('Cookie', cookie).send({ location: HERE }));
   const saves = Array.from({ length: 20 }, (_, i) =>
     request(app)
-      .put(`/api/candidate/exam/answers/${earlyState.questions[0]!.attemptQuestionId}`)
+      .put(`/api/candidate/exams/${early!.id}/answers/${earlyState.questions[0]!.attemptQuestionId}`)
       .set('Cookie', earlyCookie)
       .send({ sessionId: earlyState.sessionId, clientSeq: i + 1, text: `t${i}`, typedChars: 2, intervalMs: 2000 }),
   );
@@ -562,10 +561,10 @@ test('100 concurrent starts for one role all succeed, and saves keep working mea
   assert.equal((await prisma.answer.findUniqueOrThrow({ where: { attemptQuestionId: earlyState.questions[0]!.attemptQuestionId } })).clientSeq, 20);
 
   // Ruling: an already-submitted attempt is ALREADY_ATTEMPTED even once the exam has closed.
-  const submit = await request(app).post('/api/candidate/exam/submit').set('Cookie', earlyCookie).send({ sessionId: (await request(app).post('/api/candidate/exam/resume').set('Cookie', earlyCookie)).body.data.sessionId });
+  const submit = await request(app).post(`/api/candidate/exams/${early!.id}/submit`).set('Cookie', earlyCookie).send({ sessionId: (await request(app).post(`/api/candidate/exams/${early!.id}/resume`).set('Cookie', earlyCookie)).body.data.sessionId });
   assert.equal(submit.status, 200, JSON.stringify(submit.body));
   await prisma.examSetting.update({ where: { jobRoleId: role.id }, data: { isOpen: false } });
-  const again = await request(app).post('/api/candidate/exam/start').set('Cookie', earlyCookie).send({ location: HERE });
+  const again = await request(app).post(`/api/candidate/exams/${early!.id}/start`).set('Cookie', earlyCookie).send({ location: HERE });
   assert.equal(again.status, 409, JSON.stringify(again.body));
   assert.equal(again.body.error.code, 'ALREADY_ATTEMPTED');
 });
@@ -580,18 +579,18 @@ test('I1: a repeated start of a running attempt resumes it after windowEnd and w
   const first = await start('late');
   // The window closes while the candidate is mid-exam (they keep their full duration).
   await prisma.examSetting.update({ where: { jobRoleId: role.id }, data: { windowEnd: new Date(Date.now() - 60_000) } });
-  const afterWindow = await agents.late!.post('/api/candidate/exam/start').send({ location: HERE });
+  const afterWindow = await agents.late!.post(`/api/candidate/exams/${ids.late}/start`).send({ location: HERE });
   assert.equal(afterWindow.status, 200, JSON.stringify(afterWindow.body));
   assert.equal(afterWindow.body.data.attemptId, first.attemptId);
   assert.equal(afterWindow.body.data.endsAt, first.endsAt);
   assert.notEqual(afterWindow.body.data.sessionId, first.sessionId);
   // Location since switched off: still a resume, not LOCATION_REQUIRED.
-  const noLocation = await agents.late!.post('/api/candidate/exam/start').send({ location: { stage: 'EXAM_START', permission: 'DENIED' } });
+  const noLocation = await agents.late!.post(`/api/candidate/exams/${ids.late}/start`).send({ location: { stage: 'EXAM_START', permission: 'DENIED' } });
   assert.equal(noLocation.status, 200, JSON.stringify(noLocation.body));
   assert.equal(noLocation.body.data.attemptId, first.attemptId);
   // A candidate who never started still meets the closed window.
   await makeCandidate('latenew', role.id);
-  const fresh = await (await signIn('latenew')).post('/api/candidate/exam/start').send({ location: HERE });
+  const fresh = await (await signIn('latenew')).post(`/api/candidate/exams/${ids.latenew}/start`).send({ location: HERE });
   assert.equal(fresh.status, 403);
   assert.equal(fresh.body.error.code, 'EXAM_WINDOW_CLOSED');
 });
@@ -608,4 +607,49 @@ test('I4: an Undo re-insertion sent as restoredChars is saved without a SUSPICIO
   assert.equal(res.body.data.accepted, true);
   assert.equal((await prisma.answer.findUniqueOrThrow({ where: { attemptQuestionId: aq } })).bulkInsertFlags, 0);
   assert.equal(await prisma.activityLog.count({ where: { attemptId: st.attemptId, eventType: 'SUSPICIOUS_BULK_INSERT' } }), 0);
+});
+
+
+// ---- multiple exams per account (docs/multi-exam.md) -----------------------
+
+test('one exam at a time: starting a second application while the first runs is 409 ANOTHER_EXAM_IN_PROGRESS; after submit it starts; /exams reflects progress', async () => {
+  const roleB = await prisma.jobRole.create({ data: { name: `Exam Multi B ${RUN}` } });
+  await prisma.examSetting.create({ data: { jobRoleId: roleB.id, durationMinutes: 30, isOpen: true } });
+  await prisma.question.create({ data: { jobRoleId: roleB.id, text: 'Multi B.', normalizedTextHash: `multi-b-${RUN}`, maxMarks: 10, displayOrder: 1 } });
+  const first = await createCandidate({ candidateCode: `M-${RUN}-1`, fullName: 'Multi Person', email: `multi-${RUN}@exam.int.test`, mobile: mobile(), jobRoleId: roleId, locationExempt: true });
+  const second = await createApplication(first.id, { candidateCode: `M-${RUN}-2`, fullName: 'Multi Person', jobRoleId: roleB.id, locationExempt: true });
+  const cookie = await mintCookies(first.id);
+  const DENIED = { location: { stage: 'EXAM_START', permission: 'DENIED' } };
+
+  const started = await request(app).post(`/api/candidate/exams/${first.id}/start`).set('Cookie', cookie).send(DENIED);
+  assert.equal(started.status, 200, JSON.stringify(started.body));
+
+  const blocked = await request(app).post(`/api/candidate/exams/${second.id}/start`).set('Cookie', cookie).send(DENIED);
+  assert.equal(blocked.status, 409, JSON.stringify(blocked.body));
+  assert.equal(blocked.body.error.code, 'ANOTHER_EXAM_IN_PROGRESS');
+  assert.equal(await prisma.examAttempt.count({ where: { candidateId: second.id } }), 0);
+
+  const mid = await request(app).get('/api/candidate/exams').set('Cookie', cookie);
+  assert.deepEqual(mid.body.data.exams.map((e: { applicationId: string; progress: string }) => [e.applicationId, e.progress]).sort(), [
+    [first.id, 'IN_PROGRESS'],
+    [second.id, 'NOT_STARTED'],
+  ].sort());
+
+  const resumed = await request(app).post(`/api/candidate/exams/${first.id}/resume`).set('Cookie', cookie);
+  const done = await request(app).post(`/api/candidate/exams/${first.id}/submit`).set('Cookie', cookie).send({ sessionId: resumed.body.data.sessionId });
+  assert.equal(done.status, 200, JSON.stringify(done.body));
+  const go = await request(app).post(`/api/candidate/exams/${second.id}/start`).set('Cookie', cookie).send(DENIED);
+  assert.equal(go.status, 200, JSON.stringify(go.body));
+
+  // An admin decision still reads as SUBMITTED to the candidate.
+  await prisma.candidate.update({ where: { id: first.id }, data: { status: 'SHORTLISTED' } });
+  const after = await request(app).get(`/api/candidate/exams/${first.id}`).set('Cookie', cookie);
+  assert.equal(after.body.data.exam.progress, 'SUBMITTED');
+  assert.equal(after.body.data.exam.attempt.status, 'SUBMITTED');
+  assert.equal(JSON.stringify(after.body).includes('SHORTLISTED'), false);
+
+  // Another account cannot reach the application.
+  const stranger = await createCandidate({ candidateCode: `M-${RUN}-3`, fullName: 'Stranger', email: `stranger-${RUN}@exam.int.test`, mobile: mobile(), jobRoleId: roleId });
+  const theirs = await request(app).get(`/api/candidate/exams/${first.id}`).set('Cookie', await mintCookies(stranger.id));
+  assert.equal(theirs.status, 404);
 });

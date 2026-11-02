@@ -99,7 +99,7 @@ export type CandidateBulkJobRoleInput = z.infer<typeof CandidateBulkJobRoleSchem
 
 export interface CandidateBulkJobRoleResultDto {
   updated: number;
-  skipped: { candidateId: string; candidateCode: string | null; fullName: string | null; reason: 'STARTED' | 'SAME_ROLE' | 'NOT_FOUND' }[];
+  skipped: { candidateId: string; candidateCode: string | null; fullName: string | null; reason: 'STARTED' | 'SAME_ROLE' | 'NOT_FOUND' | 'SAME_PERSON_HAS_ROLE' }[];
 }
 
 export const CandidateEligibilitySchema = z.object({ eligible: z.boolean() });
@@ -180,6 +180,8 @@ export interface CandidateDetailDto {
   attempt: { id: string; status: string; startedAt: string; submittedAt: string | null } | null;
   activity: { items: { id: string; type: string; createdAt: string; detail: unknown }[]; total: number; page: number; pageSize: number };
   flags: CandidateFlagsDto;
+  /** The same person's other applications (same account), excluding this one. */
+  otherApplications: { id: string; candidateCode: string; jobRole: { id: string; name: string }; status: string }[];
   history: { id: string; fromStatus: string | null; toStatus: string; reason: string | null; actorName: string | null; createdAt: string }[];
 }
 

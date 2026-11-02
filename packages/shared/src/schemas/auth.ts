@@ -67,13 +67,20 @@ export const LocationPayloadSchema = z
   });
 export type LocationPayloadInput = z.infer<typeof LocationPayloadSchema>;
 
+/**
+ * The signed-in person (a candidate account), not one application: per-role
+ * data (code, role, status, exemption) lives in CandidateExamDto.
+ */
 export interface CandidateSelf {
+  /** candidate_accounts.id */
   id: string;
-  candidateCode: string;
+  /** From the most recently created eligible application. */
   fullName: string;
   email: string;
-  jobRole: { id: string; name: string };
-  status: string;
+  /** A GRANTED LOGIN location exists for this login session. */
   locationCaptured: boolean;
+  /** True when every eligible application is location-exempt (the location step can be skipped). */
   locationExempt: boolean;
+  /** Number of eligible applications. */
+  examCount: number;
 }

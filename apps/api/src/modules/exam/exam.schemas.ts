@@ -3,7 +3,8 @@
 // screen and the API validate the same shapes.
 
 export {
-  AttemptQuestionParamsSchema,
+  ApplicationParamsSchema,
+  ApplicationQuestionParamsSchema,
   ExamEventsSchema,
   ExamStartSchema,
   SaveAnswerSchema,

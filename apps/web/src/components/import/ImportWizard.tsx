@@ -196,6 +196,11 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
             <Badge variant="outline">{p.summary.duplicates} duplicates</Badge>
             {p.updates && <Badge variant="default">{p.updates.length} to update</Badge>}
           </div>
+          {(p.linkedRows ?? []).length > 0 && (
+            <p role="note" className="rounded-md border border-border bg-muted/50 p-3 text-sm">
+              {(p.linkedRows ?? []).length} {(p.linkedRows ?? []).length === 1 ? 'row' : 'rows'} will be added as a new role for an existing candidate.
+            </p>
+          )}
           <Tabs defaultValue="valid">
             <TabsList>
               <TabsTrigger value="valid">Valid ({p.valid.length})</TabsTrigger>

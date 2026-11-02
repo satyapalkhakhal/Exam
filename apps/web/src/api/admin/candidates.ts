@@ -101,6 +101,8 @@ export interface CandidateDetailDto {
   activity: Paged<ActivityRow>;
   flags: CandidateFlags | null;
   history: HistoryRow[];
+  /** The same person's applications under other job roles (docs/multi-exam.md). Optional until the API ships. */
+  otherApplications?: { id: string; candidateCode: string; jobRole: { id: string; name: string }; status: string }[];
 }
 
 export interface CandidateFilters {
@@ -165,7 +167,7 @@ export interface CandidateCreate extends Omit<CandidateEdit, 'fullName' | 'email
 
 export interface BulkJobRoleResult {
   updated: number;
-  skipped: { candidateId: string; candidateCode: string | null; fullName: string | null; reason: 'STARTED' | 'SAME_ROLE' | 'NOT_FOUND' }[];
+  skipped: { candidateId: string; candidateCode: string | null; fullName: string | null; reason: 'STARTED' | 'SAME_ROLE' | 'SAME_PERSON_HAS_ROLE' | 'NOT_FOUND' }[];
 }
 
 /** Moves the given candidates to one job role; those who started (or already hold it) are skipped. */

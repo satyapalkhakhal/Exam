@@ -1,7 +1,8 @@
 // tests/candidateMobileLink.service.test.ts
-// First-time mobile registration: email + roll number pick the candidate, the SMS
-// code is bound to (candidate, mobile), the mobile links once, and every refusal
-// looks the same to the caller.
+// First-time mobile registration: email + roll number pick the account (through
+// one of its eligible applications), the SMS code is bound to (account, mobile),
+// the mobile links once to the account and all its applications, and every
+// refusal looks the same to the caller.
 
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,8 +12,9 @@ import { setRedisClient } from '../src/infrastructure/redis/redis.js';
 import { AppError } from '../src/shared/errors.js';
 import {
   createCandidateAuthService,
+  type AccountApplication,
   type CandidateAuthDeps,
-  type CandidateAuthRecord,
+  type CandidateAccountRecord,
   type CandidateAuthRepository,
 } from '../src/modules/candidateAuth/candidateAuth.service.js';
 import type { AuditRecord } from '../src/modules/audit/audit.service.js';
@@ -25,26 +27,25 @@ const MOBILE = '9876543210';
 
 beforeEach(() => setRedisClient(new RedisMock() as unknown as Redis));
 
+export const application = (id: string, over: Partial<AccountApplication> = {}): AccountApplication => ({
+  id,
+  fullName: 'Aswajith K K',
+  rollNumber: ROLL,
+  eligible: true,
+  locationExempt: false,
+  ...over,
+});
+
+/** `seed` overrides the account; `apps` replaces its applications (default: one eligible application a1). */
 function setup(
-  seed: Partial<CandidateAuthRecord> = {},
-  others: CandidateAuthRecord[] = [],
+  seed: Partial<CandidateAccountRecord> = {},
+  others: CandidateAccountRecord[] = [],
   issueError?: AppError,
+  apps: AccountApplication[] = [application('a1')],
 ) {
-  const row: CandidateAuthRecord = {
-    id: 'c1',
-    candidateCode: 'CAND-1',
-    fullName: 'Aswajith K K',
-    email: EMAIL,
-    mobile: null,
-    rollNumber: ROLL,
-    status: 'NOT_STARTED',
-    eligible: true,
-    locationExempt: false,
-    jobRole: { id: 'r1', name: 'AI & ML Engineer' },
-    ...seed,
-  };
+  const row: CandidateAccountRecord = { id: 'c1', email: EMAIL, mobile: null, applications: apps, ...seed };
   const all = [row, ...others];
-  const activity: Array<{ eventType: string; metadata?: Record<string, unknown> }> = [];
+  const activity: Array<{ candidateId: string; eventType: string; metadata?: Record<string, unknown> }> = [];
   const audits: AuditRecord[] = [];
   const issued: Array<{ purpose: string; subjectId: string; recipient: { email: string | null; mobile: string | null } }> = [];
   const verified: Array<{ purpose: string; subjectId: string }> = [];
@@ -62,8 +63,7 @@ function setup(
     },
     hasGrantedLogin: async () => false,
     recordLocation: async () => {},
-    recordActivity: async (e) => void activity.push({ eventType: e.eventType, metadata: e.metadata }),
-    findExamSetting: async () => null,
+    recordActivity: async (e) => void activity.push({ candidateId: e.candidateId, eventType: e.eventType, metadata: e.metadata }),
   };
   const deps: CandidateAuthDeps = {
     repo,
@@ -101,7 +101,7 @@ const req = (over: Partial<{ email: string; rollNumber: string; mobile: string }
 const rejectsWith = async (p: Promise<unknown>, code: string) =>
   assert.rejects(p, (e: unknown) => e instanceof AppError && e.code === code);
 
-test('a matching email + roll number sends the code by SMS only, bound to (candidate, mobile)', async () => {
+test('a matching email + roll number sends the code by SMS only, bound to (account, mobile)', async () => {
   const f = setup();
   assert.deepEqual(await f.service.requestMobileLink(req()), { sent: true });
   assert.equal(f.issued.length, 1);
@@ -111,7 +111,7 @@ test('a matching email + roll number sends the code by SMS only, bound to (candi
 });
 
 test('the roll number match ignores case and surrounding spaces', async () => {
-  const f = setup({ rollNumber: 'AB12' });
+  const f = setup({}, [], undefined, [application('a1', { rollNumber: 'AB12' })]);
   await f.service.requestMobileLink(req({ rollNumber: ' ab12 ' }));
   assert.equal(f.issued.length, 1);
 });
@@ -120,17 +120,17 @@ test('unknown email, wrong roll number, no roll on file and ineligible all get t
   for (const [seed, over] of [
     [{}, { email: 'ghost@iitg.ac.in' }],
     [{}, { rollNumber: '999' }],
-    [{ rollNumber: null }, {}],
-    [{ eligible: false }, {}],
+    [{ apps: [application('a1', { rollNumber: null })] }, {}],
+    [{ apps: [application('a1', { eligible: false })] }, {}],
   ] as const) {
-    const f = setup(seed);
+    const f = setup({}, [], undefined, 'apps' in seed ? [...seed.apps] : undefined);
     assert.deepEqual(await f.service.requestMobileLink(req(over)), { sent: true });
     assert.equal(f.issued.length, 0);
     assert.equal(f.activity.length, 0);
   }
 });
 
-test('a candidate who already has a mobile gets no SMS, and the attempt is logged for HR', async () => {
+test('an account that already has a mobile gets no SMS, and the attempt is logged for HR', async () => {
   const f = setup({ mobile: '9000000001' });
   assert.deepEqual(await f.service.requestMobileLink(req()), { sent: true });
   assert.equal(f.issued.length, 0);
@@ -140,7 +140,7 @@ test('a candidate who already has a mobile gets no SMS, and the attempt is logge
 });
 
 test("a mobile already on another candidate's record gets no SMS and is logged", async () => {
-  const other = { ...setup().row, id: 'c2', email: 'x@iitg.ac.in', mobile: MOBILE };
+  const other: CandidateAccountRecord = { id: 'c2', email: 'x@iitg.ac.in', mobile: MOBILE, applications: [application('b1')] };
   const f = setup({}, [other]);
   assert.deepEqual(await f.service.requestMobileLink(req()), { sent: true });
   assert.equal(f.issued.length, 0);
@@ -177,10 +177,10 @@ test('the code is checked against the typed mobile, so a code sent to one number
 test('verify refuses a wrong roll number, an ineligible candidate and an already-linked account with OTP_INVALID', async () => {
   for (const [seed, over] of [
     [{}, { rollNumber: '999' }],
-    [{ eligible: false }, {}],
+    [{ apps: [application('a1', { eligible: false })] }, {}],
     [{ mobile: '9000000001' }, {}],
   ] as const) {
-    const f = setup(seed);
+    const f = 'apps' in seed ? setup({}, [], undefined, [...seed.apps]) : setup(seed);
     await rejectsWith(f.service.verifyMobileLink({ ...req(over), code: '123456' }), 'OTP_INVALID');
     assert.equal(f.verified.length, 0, 'the code is not even checked');
   }
@@ -195,4 +195,22 @@ test('losing a race: mobile taken meanwhile is a 409, account linked meanwhile i
   linked.forceLink('already_linked');
   await rejectsWith(linked.service.verifyMobileLink({ ...req(), code: '123456' }), 'OTP_INVALID');
   assert.equal(linked.activity.length, 0);
+});
+
+test('mobile link across two applications: either roll number finds the account, and the refusal/registration is logged on each matching application', async () => {
+  const apps = [application('a1', { rollNumber: 'R-1' }), application('a2', { rollNumber: 'R-2' })];
+  const viaSecond = setup({}, [], undefined, apps);
+  await viaSecond.service.requestMobileLink(req({ rollNumber: 'R-2' }));
+  assert.equal(viaSecond.issued[0]!.subjectId, `c1:${MOBILE}`, 'the code is bound to the account, not the application');
+
+  const done = setup({}, [], undefined, apps);
+  const out = await done.service.verifyMobileLink({ ...req({ rollNumber: 'R-1' }), code: '123456' });
+  assert.equal(done.row.mobile, MOBILE, 'one link covers the account');
+  assert.equal(out.candidate.id, 'c1');
+  assert.equal(out.candidate.examCount, 2);
+  assert.deepEqual(done.activity.filter((a) => a.eventType === 'MOBILE_SELF_REGISTERED').map((a) => a.candidateId), ['a1']);
+
+  const same = setup({}, [], undefined, [application('a1'), application('a2')]);
+  await same.service.verifyMobileLink({ ...req(), code: '123456' });
+  assert.deepEqual(same.activity.filter((a) => a.eventType === 'MOBILE_SELF_REGISTERED').map((a) => a.candidateId).sort(), ['a1', 'a2']);
 });

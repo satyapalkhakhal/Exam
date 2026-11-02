@@ -3,7 +3,7 @@
 // normal access-cookie check, or, when the access cookie is missing or has
 // expired, the candidate refresh cookie. A refresh token is accepted only if it
 // is live and not yet rotated (peekRefreshFamily), its login family is still
-// live, the family was bound to a candidate by an authenticated exam request
+// live, the family was bound to an account by an authenticated exam request
 // (resolveFamily), no revokeAllSessions happened after that binding, and the
 // candidate is still eligible. Nothing is rotated or re-issued here, so this
 // never interferes with the client's own refresh flow. Sets req.candidate just
@@ -21,8 +21,8 @@ import {
 import { unauthorized } from '../errors.js';
 
 export interface BeaconAuthDeps {
-  isActive: (candidateId: string) => Promise<boolean>;
-  resolveFamily: (family: string) => Promise<{ candidateId: string; at: number } | null>;
+  isActive: (accountId: string) => Promise<boolean>;
+  resolveFamily: (family: string) => Promise<{ accountId: string; at: number } | null>;
 }
 
 const cookie = (req: Request, name: string): string | undefined => {
@@ -46,9 +46,9 @@ async function fromRefresh(token: string, deps: BeaconAuthDeps): Promise<{ id: s
   if (!family || !(await isRefreshFamilyLive('candidate', family))) return null;
   const binding = await deps.resolveFamily(family);
   if (!binding) return null;
-  const sva = await getSessionsValidAfter('candidate', binding.candidateId);
+  const sva = await getSessionsValidAfter('candidate', binding.accountId);
   if (sva !== null && sva >= binding.at) return null;
-  return { id: binding.candidateId, sessionFamily: family };
+  return { id: binding.accountId, sessionFamily: family };
 }
 
 export function authenticateCandidateBeacon(deps: BeaconAuthDeps) {

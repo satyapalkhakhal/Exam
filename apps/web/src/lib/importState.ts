@@ -23,6 +23,8 @@ export interface ImportPreview<V = unknown> {
   duplicates: ImportDuplicate[];
   /** Candidate import with "update existing candidates" ticked. */
   updates?: V[];
+  /** 1-based file rows that become a new role for an existing person (docs/multi-exam.md). Optional until the API ships. */
+  linkedRows?: number[];
 }
 
 export interface ImportResult {

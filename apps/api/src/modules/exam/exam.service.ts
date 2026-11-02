@@ -7,10 +7,14 @@
 // sequence; an older one is acknowledged as STALE and never written, so a late
 // request can never replace newer text. Integrity evidence (bulk-insert flags,
 // blocked pastes, tab/IP changes) is written with the server's own time.
-// Every query is scoped by the candidate id from the verified token.
+// Every query is scoped by the application id, which the route layer has
+// already checked belongs to the account in the verified token
+// (resolveApplication); `auth.id` is that account. One exam at a time: a start
+// is refused while another application of the account has a running attempt,
+// checked under the account row lock.
 
 import crypto from 'node:crypto';
-import { countWords, examAvailability, type ExamEventsInput, type ExamStartInput, type ExamState, type ExamSummaryDto, type SaveAnswerInput, type SaveAnswerResult } from '@exam/shared';
+import { countWords, examAvailability, type CandidateExamDetailDto, type CandidateExamDto, type CandidateExamListDto, type ExamEventsInput, type ExamStartInput, type ExamState, type ExamSummaryDto, type SaveAnswerInput, type SaveAnswerResult } from '@exam/shared';
 import { logger } from '../../infrastructure/logger/logger.js';
 import { AppError, conflict, forbidden, notFound } from '../../shared/errors.js';
 import type { ClientInfo } from '../../shared/utils/clientInfo.js';
@@ -33,10 +37,10 @@ const superseded = () => new AppError(409, 'SESSION_SUPERSEDED', 'This exam is o
 
 export interface ExamServiceDeps {
   repo: ExamRepository;
-  getSettings: (jobRoleId: string) => Promise<{ durationMinutes: number; isOpen: boolean; windowStart: Date | null; windowEnd: Date | null } | null>;
-  recordStartLocation: (auth: { id: string; sessionFamily: string }, location: ExamStartInput['location'], client: ClientInfo) => Promise<void>;
+  getSettings: (jobRoleId: string) => Promise<{ durationMinutes: number; isOpen: boolean; windowStart: Date | null; windowEnd: Date | null; instructions: string } | null>;
+  recordStartLocation: (auth: { id: string; sessionFamily: string }, applicationId: string, location: ExamStartInput['location'], client: ClientInfo) => Promise<void>;
   queue: { enqueue: (attemptId: string, endsAt: Date) => Promise<void>; remove: (attemptId: string) => Promise<void> };
-  bindFamily: (family: string, candidateId: string) => Promise<void>;
+  bindFamily: (family: string, accountId: string) => Promise<void>;
   now?: () => Date;
 }
 
@@ -63,6 +67,7 @@ const zeroCounts = (): IntegrityCounts => ({ pasteAttempts: 0, bulkInsert: 0, ta
 export function createExamService(deps: ExamServiceDeps) {
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
+  /** `id` is the candidate account id from the token. */
   type Auth = { id: string; sessionFamily: string };
 
   const pastGrace = (endsAt: Date, at: Date) => at.getTime() > endsAt.getTime() + SAVE_GRACE_MS;
@@ -112,12 +117,12 @@ export function createExamService(deps: ExamServiceDeps) {
   }
 
   /** New attempt-session id for an IN_PROGRESS attempt (resume, or a repeated start). */
-  async function takeOver(auth: Auth, attempt: LiveAttempt, client: ClientInfo): Promise<ExamState> {
+  async function takeOver(auth: Auth, applicationId: string, attempt: LiveAttempt, client: ClientInfo): Promise<ExamState> {
     const sessionId = crypto.randomUUID();
     await repo.transaction(async (tx) => {
       await tx.setSession(attempt.id, sessionId);
       await tx.addActivity({
-        candidateId: auth.id,
+        candidateId: applicationId,
         attemptId: attempt.id,
         eventType: 'SESSION_TAKEOVER',
         ip: client.ip,
@@ -129,20 +134,20 @@ export function createExamService(deps: ExamServiceDeps) {
     return buildState(attempt.id, sessionId);
   }
 
-  async function start(auth: Auth, input: ExamStartInput, client: ClientInfo): Promise<ExamState> {
-    const candidate = await repo.findCandidate(auth.id);
-    if (!candidate || !candidate.eligible) throw forbidden('You are not eligible to take this exam.');
+  async function start(auth: Auth, applicationId: string, input: ExamStartInput, client: ClientInfo): Promise<ExamState> {
+    const candidate = await repo.findCandidate(applicationId);
+    if (!candidate || candidate.accountId !== auth.id || !candidate.eligible) throw forbidden('You are not eligible to take this exam.');
 
     // A finished attempt answers ALREADY_ATTEMPTED whatever the window says now.
     // A running one is a repeated start (a Back gesture, a second tab): it takes
     // the session over before the window and location gates, because a started
     // candidate keeps their full duration past windowEnd (design §4) and their
     // location was checked when they first started.
-    const prior = await repo.findLiveAttempt(auth.id);
+    const prior = await repo.findLiveAttempt(applicationId);
     if (prior) {
       const settled = await settleExpired(prior);
       if (settled.status !== 'IN_PROGRESS') throw conflict('You have already taken this exam.', 'ALREADY_ATTEMPTED');
-      return takeOver(auth, settled, client);
+      return takeOver(auth, applicationId, settled, client);
     }
 
     const settings = await deps.getSettings(candidate.jobRoleId);
@@ -150,23 +155,27 @@ export function createExamService(deps: ExamServiceDeps) {
     if (availability === 'AFTER_WINDOW') throw new AppError(403, 'EXAM_WINDOW_CLOSED', 'The exam window has closed.');
     if (availability !== 'OPEN') throw new AppError(403, 'EXAM_NOT_OPEN', 'The exam is not open yet.');
 
-    await deps.recordStartLocation(auth, input.location, client);
+    await deps.recordStartLocation(auth, applicationId, input.location, client);
     if (!candidate.locationExempt && input.location.permission !== 'GRANTED') {
       throw new AppError(400, 'LOCATION_REQUIRED', 'Share your location to start the exam.');
     }
 
     const sessionId = crypto.randomUUID();
     const outcome = await repo.transaction(async (tx) => {
-      // Role settings row first (the order question writes use; shared once the
-      // role is locked), then the candidate row, then re-read the role under the
-      // lock: a concurrent role change or a second start cannot slip between the
+      // Account row first (serialises this person's starts), then the role
+      // settings row (the order question writes use; shared once the role is
+      // locked), then the candidate row, then re-read the role under the lock: a concurrent role change or a second start cannot slip between the
       // checks and the insert.
+      if (!(await tx.lockAccount(auth.id))) throw forbidden('You are not eligible to take this exam.');
       if (!(await tx.holdRoleLocked(candidate.jobRoleId))) throw new AppError(403, 'EXAM_NOT_OPEN', 'The exam is not open yet.');
-      const locked = await tx.lockCandidate(auth.id);
+      const locked = await tx.lockCandidate(applicationId);
       if (!locked || !locked.eligible) throw forbidden('You are not eligible to take this exam.');
       if (locked.jobRoleId !== candidate.jobRoleId) throw conflict('Your exam role has just changed. Please try again.');
-      const raced = await tx.findLiveAttempt(auth.id);
+      const raced = await tx.findLiveAttempt(applicationId);
       if (raced) return { kind: 'existing', attempt: raced } as const;
+      if (await tx.hasOtherRunningAttempt(auth.id, applicationId, now())) {
+        throw new AppError(409, 'ANOTHER_EXAM_IN_PROGRESS', 'Finish your other exam before starting this one.');
+      }
 
       const questions = await tx.activeQuestions(locked.jobRoleId);
       if (questions.length === 0) throw new AppError(403, 'EXAM_NOT_OPEN', 'This exam has no questions yet.');
@@ -174,7 +183,7 @@ export function createExamService(deps: ExamServiceDeps) {
       const durationMinutes = settings?.durationMinutes ?? 60;
       const endsAt = new Date(startedAt.getTime() + durationMinutes * 60_000);
       const attemptId = await tx.createAttempt({
-        candidateId: auth.id,
+        candidateId: applicationId,
         startedAt,
         endsAt,
         sessionId,
@@ -182,9 +191,9 @@ export function createExamService(deps: ExamServiceDeps) {
         userAgent: client.userAgent,
         questions,
       });
-      await tx.setCandidateStatus(auth.id, locked.status, 'IN_PROGRESS');
+      await tx.setCandidateStatus(applicationId, locked.status, 'IN_PROGRESS');
       await tx.addActivity({
-        candidateId: auth.id,
+        candidateId: applicationId,
         attemptId,
         eventType: 'EXAM_STARTED',
         ip: client.ip,
@@ -197,7 +206,7 @@ export function createExamService(deps: ExamServiceDeps) {
 
     if (outcome.kind === 'existing') {
       if (outcome.attempt.status !== 'IN_PROGRESS') throw conflict('You have already taken this exam.', 'ALREADY_ATTEMPTED');
-      return takeOver(auth, outcome.attempt, client);
+      return takeOver(auth, applicationId, outcome.attempt, client);
     }
     try {
       await deps.queue.enqueue(outcome.attemptId, outcome.endsAt);
@@ -230,16 +239,16 @@ export function createExamService(deps: ExamServiceDeps) {
     };
   }
 
-  async function getState(auth: Auth): Promise<ExamState> {
-    const attempt = await settleExpired(await liveAttempt(auth.id));
+  async function getState(auth: Auth, applicationId: string): Promise<ExamState> {
+    const attempt = await settleExpired(await liveAttempt(applicationId));
     if (attempt.status === 'IN_PROGRESS') await bind(auth);
     return buildState(attempt.id);
   }
 
-  async function resume(auth: Auth, client: ClientInfo): Promise<ExamState> {
-    const attempt = await settleExpired(await liveAttempt(auth.id));
+  async function resume(auth: Auth, applicationId: string, client: ClientInfo): Promise<ExamState> {
+    const attempt = await settleExpired(await liveAttempt(applicationId));
     if (attempt.status !== 'IN_PROGRESS') throw attemptLocked();
-    return takeOver(auth, attempt, client);
+    return takeOver(auth, applicationId, attempt, client);
   }
 
   /** IP_CHANGED when the request comes from a different IP than the attempt's last logged event. */
@@ -257,10 +266,10 @@ export function createExamService(deps: ExamServiceDeps) {
     });
   }
 
-  async function saveAnswer(auth: Auth, attemptQuestionId: string, input: SaveAnswerInput, client: ClientInfo): Promise<SaveAnswerResult> {
+  async function saveAnswer(auth: Auth, applicationId: string, attemptQuestionId: string, input: SaveAnswerInput, client: ClientInfo): Promise<SaveAnswerResult> {
     const result = await repo.transaction(async (tx) => {
       const locked = await tx.lockForSave(attemptQuestionId);
-      if (!locked || locked.attempt.candidateId !== auth.id) throw notFound('Question not found.');
+      if (!locked || locked.attempt.candidateId !== applicationId) throw notFound('Question not found.');
       const { attempt, answer } = locked;
       const at = now();
       if (attempt.status !== 'IN_PROGRESS' || pastGrace(attempt.endsAt, at)) throw attemptLocked();
@@ -290,7 +299,7 @@ export function createExamService(deps: ExamServiceDeps) {
       }
       if (assessment.flagged) {
         await tx.addActivity({
-          candidateId: auth.id,
+          candidateId: applicationId,
           attemptId: attempt.id,
           eventType: 'SUSPICIOUS_BULK_INSERT',
           questionId: attemptQuestionId,
@@ -303,24 +312,24 @@ export function createExamService(deps: ExamServiceDeps) {
       return { accepted: true, serverNow: at.toISOString(), lastSavedAt: at.toISOString(), attemptId: attempt.id } as const;
     });
     if (!result.accepted) return result;
-    await noteIp(auth.id, result.attemptId, client, input.sessionId);
+    await noteIp(applicationId, result.attemptId, client, input.sessionId);
     return { accepted: true, serverNow: result.serverNow, lastSavedAt: result.lastSavedAt };
   }
 
   /** The attempt behind a save/event/submit: the candidate's own, in progress, in this session. */
-  async function activeAttemptFor(auth: Auth, sessionId: string): Promise<LiveAttempt> {
-    const attempt = await liveAttempt(auth.id);
+  async function activeAttemptFor(applicationId: string, sessionId: string): Promise<LiveAttempt> {
+    const attempt = await liveAttempt(applicationId);
     if (attempt.status !== 'IN_PROGRESS' || pastGrace(attempt.endsAt, now())) throw attemptLocked();
     if (sessionId !== attempt.activeSessionId) throw superseded();
     return attempt;
   }
 
-  async function recordEvents(auth: Auth, input: ExamEventsInput, client: ClientInfo): Promise<{ recorded: number }> {
-    const attempt = await activeAttemptFor(auth, input.sessionId);
-    await noteIp(auth.id, attempt.id, client, input.sessionId);
+  async function recordEvents(applicationId: string, input: ExamEventsInput, client: ClientInfo): Promise<{ recorded: number }> {
+    const attempt = await activeAttemptFor(applicationId, input.sessionId);
+    await noteIp(applicationId, attempt.id, client, input.sessionId);
     const own = await repo.attemptQuestionIds(attempt.id);
     const entries: ActivityEntry[] = input.events.map((e) => ({
-      candidateId: auth.id,
+      candidateId: applicationId,
       attemptId: attempt.id,
       eventType: e.type,
       questionId: e.questionId && own.has(e.questionId) ? e.questionId : null,
@@ -333,8 +342,8 @@ export function createExamService(deps: ExamServiceDeps) {
     return { recorded: entries.length };
   }
 
-  async function submit(auth: Auth, sessionId: string, client: ClientInfo): Promise<{ status: 'SUBMITTED'; submittedAt: string }> {
-    const attempt = await liveAttempt(auth.id);
+  async function submit(applicationId: string, sessionId: string, client: ClientInfo): Promise<{ status: 'SUBMITTED'; submittedAt: string }> {
+    const attempt = await liveAttempt(applicationId);
     const at = now();
     const done = await repo.transaction(async (tx) => {
       // Status, deadline and session are checked under the attempt row lock, so a
@@ -344,11 +353,11 @@ export function createExamService(deps: ExamServiceDeps) {
       if (sessionId !== current.activeSessionId) throw superseded();
       const finished = await tx.finish(attempt.id, 'SUBMITTED', at, false);
       if (!finished) return false;
-      const from = await tx.candidateStatus(auth.id);
-      await tx.setCandidateStatus(auth.id, from, 'SUBMITTED');
+      const from = await tx.candidateStatus(applicationId);
+      await tx.setCandidateStatus(applicationId, from, 'SUBMITTED');
       await tx.writeFinalVersions(attempt.id, at);
       await tx.addActivity({
-        candidateId: auth.id,
+        candidateId: applicationId,
         attemptId: attempt.id,
         eventType: 'EXAM_SUBMITTED',
         ip: client.ip,
@@ -389,6 +398,61 @@ export function createExamService(deps: ExamServiceDeps) {
       });
       return true;
     });
+  }
+
+  // ---- candidate exam list ----------------------------------------------------
+
+  const SUBMITTED_LIKE = new Set(['SUBMITTED', 'AUTO_SUBMITTED', 'EVALUATED', 'SHORTLISTED', 'REJECTED']);
+
+  /** The account's eligible applications; expired running attempts are locked first so the list never shows a stale IN_PROGRESS. */
+  async function loadExams(accountId: string, applicationId?: string): Promise<CandidateExamDto[]> {
+    let apps = await repo.listApplications(accountId, applicationId);
+    const expired = apps.filter((a) => a.attempt?.status === 'IN_PROGRESS' && pastGrace(a.attempt.endsAt, now()));
+    if (expired.length > 0) {
+      for (const a of expired) await autoSubmitAttempt(a.attempt!.id);
+      apps = await repo.listApplications(accountId, applicationId);
+    }
+    const settings = new Map<string, Awaited<ReturnType<ExamServiceDeps['getSettings']>>>();
+    for (const roleId of new Set(apps.map((a) => a.jobRole.id))) settings.set(roleId, await deps.getSettings(roleId));
+    return apps.map((a) => {
+      const s = settings.get(a.jobRole.id) ?? null;
+      const att = a.attempt;
+      return {
+        applicationId: a.id,
+        candidateCode: a.candidateCode,
+        jobRole: a.jobRole,
+        progress: a.status === 'NOT_STARTED' ? 'NOT_STARTED' : a.status === 'IN_PROGRESS' ? 'IN_PROGRESS' : SUBMITTED_LIKE.has(a.status) ? 'SUBMITTED' : 'NOT_STARTED',
+        locationExempt: a.locationExempt,
+        durationMinutes: s?.durationMinutes ?? 60,
+        windowStart: s?.windowStart?.toISOString() ?? null,
+        windowEnd: s?.windowEnd?.toISOString() ?? null,
+        isOpen: s?.isOpen ?? false,
+        instructions: s?.instructions ?? '',
+        attempt:
+          att && att.status !== 'RESET'
+            ? {
+                attemptId: att.id,
+                status: att.status,
+                submitType: att.submitType,
+                startedAt: att.startedAt.toISOString(),
+                endsAt: att.endsAt.toISOString(),
+                submittedAt: att.submittedAt?.toISOString() ?? null,
+                questionCount: att.questionCount,
+                answeredCount: att.answeredCount,
+              }
+            : null,
+      };
+    });
+  }
+
+  async function listExams(accountId: string): Promise<CandidateExamListDto> {
+    return { serverNow: now().toISOString(), exams: await loadExams(accountId) };
+  }
+
+  async function getExam(accountId: string, applicationId: string): Promise<CandidateExamDetailDto> {
+    const [exam] = await loadExams(accountId, applicationId);
+    if (!exam) throw notFound('Exam not found.');
+    return { serverNow: now().toISOString(), exam };
   }
 
   const listExpiredAttemptIds = (cutoff: Date) => repo.listExpiredAttemptIds(cutoff);
@@ -475,6 +539,8 @@ export function createExamService(deps: ExamServiceDeps) {
   }
 
   return {
+    listExams,
+    getExam,
     getSummary,
     start,
     getState,

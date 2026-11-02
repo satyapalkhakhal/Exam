@@ -1,6 +1,7 @@
 // modules/exam/exam.controller.ts
-// Thin HTTP layer for the candidate exam. The candidate id always comes from
-// req.candidate (the verified token), never from the URL or the body. The
+// Thin HTTP layer for the candidate exam. The account id comes from
+// req.candidate (the verified token) and the application id from req.applicationId
+// (the URL param, already checked against the account), never from the body. The
 // beacon variant receives a text/plain body (sendBeacon's default) holding the
 // same JSON as the normal save; it is parsed and validated here so both paths
 // run the identical service call.
@@ -20,6 +21,12 @@ const wrap = (fn: Handler) => (req: Request, res: Response, next: NextFunction) 
 const authed = (req: Request) => {
   if (!req.candidate) throw unauthorized();
   return req.candidate;
+};
+
+/** The application resolveApplication verified belongs to the signed-in account. */
+const app = (req: Request): string => {
+  if (!req.applicationId) throw unauthorized();
+  return req.applicationId;
 };
 
 const param = (req: Request): string => String(req.params.attemptQuestionId);
@@ -46,13 +53,17 @@ function parseBeacon(body: unknown) {
 
 export function createExamController(service: ExamService) {
   return {
-    start: wrap(async (req, res) => ok(res, await service.start(authed(req), req.body, clientInfo(req)))),
-    state: wrap(async (req, res) => ok(res, await service.getState(authed(req)))),
-    summary: wrap(async (req, res) => ok(res, await service.getSummary(authed(req).id))),
-    resume: wrap(async (req, res) => ok(res, await service.resume(authed(req), clientInfo(req)))),
-    save: wrap(async (req, res) => ok(res, await service.saveAnswer(authed(req), param(req), req.body, clientInfo(req)))),
-    beacon: wrap(async (req, res) => ok(res, await service.saveAnswer(authed(req), param(req), parseBeacon(req.body), clientInfo(req)))),
-    events: wrap(async (req, res) => ok(res, await service.recordEvents(authed(req), req.body, clientInfo(req)))),
-    submit: wrap(async (req, res) => ok(res, await service.submit(authed(req), req.body.sessionId, clientInfo(req)))),
+    list: wrap(async (req, res) => ok(res, await service.listExams(authed(req).id))),
+    detail: wrap(async (req, res) => ok(res, await service.getExam(authed(req).id, app(req)))),
+    start: wrap(async (req, res) => ok(res, await service.start(authed(req), app(req), req.body, clientInfo(req)))),
+    state: wrap(async (req, res) => ok(res, await service.getState(authed(req), app(req)))),
+    summary: wrap(async (req, res) => ok(res, await service.getSummary(app(req)))),
+    resume: wrap(async (req, res) => ok(res, await service.resume(authed(req), app(req), clientInfo(req)))),
+    save: wrap(async (req, res) => ok(res, await service.saveAnswer(authed(req), app(req), param(req), req.body, clientInfo(req)))),
+    beacon: wrap(async (req, res) =>
+      ok(res, await service.saveAnswer(authed(req), app(req), param(req), parseBeacon(req.body), clientInfo(req))),
+    ),
+    events: wrap(async (req, res) => ok(res, await service.recordEvents(app(req), req.body, clientInfo(req)))),
+    submit: wrap(async (req, res) => ok(res, await service.submit(app(req), req.body.sessionId, clientInfo(req)))),
   };
 }

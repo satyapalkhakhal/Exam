@@ -3,14 +3,21 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCandidateRows, TEMPLATE_COLUMNS, type ParseContext } from '../src/modules/candidates/candidateImport.parser.js';
+import { parseCandidateRows, TEMPLATE_COLUMNS, type ExistingAccount, type ParseContext } from '../src/modules/candidates/candidateImport.parser.js';
 
 const DEFAULT_ROLE = 'role-default';
 const ctx = (over: Partial<ParseContext> = {}): ParseContext => ({
   defaultJobRoleId: DEFAULT_ROLE,
   rolesByLowerName: new Map([['analyst', 'role-analyst']]),
-  existingEmails: new Set(),
-  existingMobiles: new Set(),
+  accountsByEmail: new Map(),
+  mobileOwners: new Map(),
+  ...over,
+});
+
+const account = (roles: Record<string, string> = {}, over: Partial<ExistingAccount> = {}): ExistingAccount => ({
+  accountId: 'acc-1',
+  mobile: null,
+  roles: new Map(Object.entries(roles).map(([role, status], i) => [role, { id: `cand-${i + 1}`, status }])),
   ...over,
 });
 
@@ -52,8 +59,8 @@ test('the same email in another case is an IN_FILE duplicate at row 3', () => {
   assert.deepEqual(r.duplicates, [{ row: 3, reason: 'IN_FILE' }]);
 });
 
-test('an email already in the database is EXISTS', () => {
-  const r = parseCandidateRows([sample], ctx({ existingEmails: new Set(['k.ajith@iitg.ac.in']) }));
+test('an email already holding this role in the database is EXISTS', () => {
+  const r = parseCandidateRows([sample], ctx({ accountsByEmail: new Map([['k.ajith@iitg.ac.in', account({ [DEFAULT_ROLE]: 'NOT_STARTED' })]]) }));
   assert.equal(r.valid.length, 0);
   assert.deepEqual(r.duplicates, [{ row: 2, reason: 'EXISTS' }]);
 });
@@ -62,7 +69,7 @@ test('a repeated mobile is a duplicate in the file and against the database', ()
   const a = { ...sample, mobile: '9876543210' };
   const b = { ...sample, email: 'b@x.in', mobile: '+91 98765 43210' };
   assert.deepEqual(parseCandidateRows([a, b], ctx()).duplicates, [{ row: 3, reason: 'IN_FILE' }]);
-  assert.deepEqual(parseCandidateRows([b], ctx({ existingMobiles: new Set(['9876543210']) })).duplicates, [
+  assert.deepEqual(parseCandidateRows([b], ctx({ mobileOwners: new Map([['9876543210', 'acc-9']]) })).duplicates, [
     { row: 2, reason: 'EXISTS' },
   ]);
 });
@@ -141,32 +148,61 @@ test('roll number, discipline and programme over 200 characters are errors, matc
   }
 });
 
-// --- "Update existing candidates" mode ------------------------------------------
+// --- Several roles per person -----------------------------------------------------
 
-const existing = (over: Partial<{ id: string; status: string; mobile: string | null }> = {}) => ({
-  id: 'cand-1',
-  status: 'NOT_STARTED',
-  mobile: null as string | null,
-  ...over,
+test('the same email under another role in one file is valid (one account, two applications)', () => {
+  const r = parseCandidateRows([sample, { ...sample, job_role: 'Analyst' }], ctx());
+  assert.deepEqual(r.duplicates, []);
+  assert.deepEqual(r.valid.map((v) => v.jobRoleId), [DEFAULT_ROLE, 'role-analyst']);
 });
 
-const updateCtx = (people: Record<string, ReturnType<typeof existing>>, mobileOwners: Record<string, string> = {}) =>
-  ctx({
-    existingEmails: new Set(Object.keys(people)),
-    existingMobiles: new Set(Object.keys(mobileOwners)),
-    updateExisting: true,
-    existingByEmail: new Map(Object.entries(people)),
-    mobileOwners: new Map(Object.entries(mobileOwners)),
-  });
+test('the same email in the same role twice in the file is an IN_FILE duplicate, even with a different case', () => {
+  const r = parseCandidateRows([sample, { ...sample, email: 'K.AJITH@iitg.ac.in', job_role: 'Default' }], ctx({ rolesByLowerName: new Map([['default', DEFAULT_ROLE]]) }));
+  assert.equal(r.valid.length, 1);
+  assert.deepEqual(r.duplicates, [{ row: 3, reason: 'IN_FILE' }]);
+});
 
-test('without updateExisting an existing email stays an EXISTS duplicate', () => {
-  const r = parseCandidateRows([sample], ctx({ existingEmails: new Set([sample.email]) }));
+test('an existing account without this role links: valid, and listed in linkedRows', () => {
+  const r = parseCandidateRows([sample], ctx({ accountsByEmail: new Map([[sample.email, account({ 'role-analyst': 'SUBMITTED' })]]) }));
+  assert.equal(r.valid.length, 1);
+  assert.deepEqual(r.linkedRows, [2]);
+  assert.deepEqual(r.duplicates, []);
+});
+
+test('a brand new email is not linked', () => {
+  assert.deepEqual(parseCandidateRows([sample], ctx()).linkedRows, []);
+});
+
+test('linking with a mobile owned by a different account is an error on mobile', () => {
+  const r = parseCandidateRows(
+    [{ ...sample, mobile: '9876543210' }],
+    ctx({ accountsByEmail: new Map([[sample.email, account({ 'role-analyst': 'SUBMITTED' })]]), mobileOwners: new Map([['9876543210', 'acc-9']]) }),
+  );
+  assert.equal(r.valid.length, 0);
+  assert.deepEqual(r.errors.map((e) => [e.row, e.field]), [[2, 'mobile']]);
+});
+
+test("linking with the account's own mobile is fine", () => {
+  const r = parseCandidateRows(
+    [{ ...sample, mobile: '9876543210' }],
+    ctx({ accountsByEmail: new Map([[sample.email, account({ 'role-analyst': 'SUBMITTED' }, { mobile: '9876543210' })]]), mobileOwners: new Map([['9876543210', 'acc-1']]) }),
+  );
+  assert.equal(r.valid.length, 1);
+});
+
+// --- "Update existing candidates" mode ------------------------------------------
+
+const updateCtx = (people: Record<string, ExistingAccount>, mobileOwners: Record<string, string> = {}) =>
+  ctx({ accountsByEmail: new Map(Object.entries(people)), mobileOwners: new Map(Object.entries(mobileOwners)), updateExisting: true });
+
+test('without updateExisting an existing email + role stays an EXISTS duplicate', () => {
+  const r = parseCandidateRows([sample], ctx({ accountsByEmail: new Map([[sample.email, account({ [DEFAULT_ROLE]: 'NOT_STARTED' })]]) }));
   assert.deepEqual(r.duplicates, [{ row: 2, reason: 'EXISTS' }]);
   assert.deepEqual(r.updates, []);
 });
 
-test('updateExisting: an existing not-started candidate becomes an update to the chosen job profile; blanks keep values', () => {
-  const r = parseCandidateRows([{ ...sample, major_cpi: '', 'major.programme': '' }], updateCtx({ [sample.email]: existing() }));
+test('updateExisting: an existing not-started application (email + role) becomes an update; blanks keep values', () => {
+  const r = parseCandidateRows([{ ...sample, major_cpi: '', 'major.programme': '' }], updateCtx({ [sample.email]: account({ [DEFAULT_ROLE]: 'NOT_STARTED' }) }));
   assert.deepEqual(r.valid, []);
   assert.deepEqual(r.duplicates, []);
   assert.equal(r.updates.length, 1);
@@ -179,36 +215,36 @@ test('updateExisting: an existing not-started candidate becomes an update to the
   assert.equal(u.programme, null);
 });
 
-test('updateExisting: the job_role column still overrides the chosen profile', () => {
-  const r = parseCandidateRows([{ ...sample, job_role: 'Analyst' }], updateCtx({ [sample.email]: existing() }));
-  assert.equal(r.updates[0]!.jobRoleId, 'role-analyst');
+test('updateExisting: the same email under another role links as a new application instead of moving the old one', () => {
+  const r = parseCandidateRows([{ ...sample, job_role: 'Analyst' }], updateCtx({ [sample.email]: account({ [DEFAULT_ROLE]: 'NOT_STARTED' }) }));
+  assert.deepEqual(r.updates, []);
+  assert.equal(r.valid[0]!.jobRoleId, 'role-analyst');
+  assert.deepEqual(r.linkedRows, [2]);
 });
 
-test('updateExisting: a candidate who has started is an error, not an update', () => {
-  const r = parseCandidateRows([sample], updateCtx({ [sample.email]: existing({ status: 'SUBMITTED' }) }));
+test('updateExisting: an application that has started is an error, not an update', () => {
+  const r = parseCandidateRows([sample], updateCtx({ [sample.email]: account({ [DEFAULT_ROLE]: 'SUBMITTED' }) }));
   assert.deepEqual(r.updates, []);
   assert.deepEqual(r.errors, [{ row: 2, field: 'email', message: 'This candidate has already started an exam and cannot be updated by import' }]);
 });
 
-test("updateExisting: a mobile owned by someone else is an error; the candidate's own mobile is fine", () => {
-  const other = parseCandidateRows([{ ...sample, mobile: '9876543210' }], updateCtx({ [sample.email]: existing() }, { '9876543210': 'cand-2' }));
+test("updateExisting: a mobile owned by another account is an error; the account's own mobile is fine", () => {
+  const people = { [sample.email]: account({ [DEFAULT_ROLE]: 'NOT_STARTED' }) };
+  const other = parseCandidateRows([{ ...sample, mobile: '9876543210' }], updateCtx(people, { '9876543210': 'acc-2' }));
   assert.deepEqual(other.errors, [{ row: 2, field: 'mobile', message: 'This mobile belongs to another candidate' }]);
-  const own = parseCandidateRows(
-    [{ ...sample, mobile: '9876543210' }],
-    updateCtx({ [sample.email]: existing({ mobile: '9876543210' }) }, { '9876543210': 'cand-1' }),
-  );
+  const own = parseCandidateRows([{ ...sample, mobile: '9876543210' }], updateCtx(people, { '9876543210': 'acc-1' }));
   assert.equal(own.updates.length, 1);
   assert.equal(own.updates[0]!.mobile, '9876543210');
 });
 
-test('updateExisting: the same existing email twice in one file → second is an IN_FILE duplicate', () => {
-  const r = parseCandidateRows([sample, sample], updateCtx({ [sample.email]: existing() }));
+test('updateExisting: the same email + role twice in one file → second is an IN_FILE duplicate', () => {
+  const r = parseCandidateRows([sample, sample], updateCtx({ [sample.email]: account({ [DEFAULT_ROLE]: 'NOT_STARTED' }) }));
   assert.equal(r.updates.length, 1);
   assert.deepEqual(r.duplicates, [{ row: 3, reason: 'IN_FILE' }]);
 });
 
 test('updateExisting: new emails are still created as usual alongside updates', () => {
-  const r = parseCandidateRows([sample, { ...sample, email: 'new@iitg.ac.in', roll_number: '1' }], updateCtx({ [sample.email]: existing() }));
+  const r = parseCandidateRows([sample, { ...sample, email: 'new@iitg.ac.in', roll_number: '1' }], updateCtx({ [sample.email]: account({ [DEFAULT_ROLE]: 'NOT_STARTED' }) }));
   assert.equal(r.updates.length, 1);
   assert.equal(r.valid.length, 1);
   assert.equal(r.valid[0]!.email, 'new@iitg.ac.in');

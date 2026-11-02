@@ -1,26 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { markCandidateStatus, useCandidateAuth } from '../src/stores/candidateAuth.js';
+import { useCandidateAuth } from '../src/stores/candidateAuth.js';
 
 const base = {
-  id: 'c1',
-  candidateCode: 'C-1',
+  id: 'a1',
   fullName: 'Test',
   email: 't@example.com',
-  jobRole: { id: 'r1', name: 'Role' },
-  status: 'NOT_STARTED',
-  locationCaptured: true,
+  locationCaptured: false,
   locationExempt: false,
+  examCount: 2,
 };
 
-test('I1: a successful start marks the stored candidate IN_PROGRESS so Back shows Resume', () => {
+test('stores the account-level candidate and clears it', () => {
   useCandidateAuth.getState().setCandidate({ ...base });
-  markCandidateStatus('IN_PROGRESS');
-  assert.equal(useCandidateAuth.getState().candidate?.status, 'IN_PROGRESS');
-});
-
-test('markCandidateStatus is a no-op when signed out', () => {
+  assert.equal(useCandidateAuth.getState().candidate?.examCount, 2);
+  const c = useCandidateAuth.getState().candidate!;
+  useCandidateAuth.getState().setCandidate({ ...c, locationCaptured: true });
+  assert.equal(useCandidateAuth.getState().candidate?.locationCaptured, true);
   useCandidateAuth.getState().clear();
-  markCandidateStatus('IN_PROGRESS');
   assert.equal(useCandidateAuth.getState().candidate, null);
 });

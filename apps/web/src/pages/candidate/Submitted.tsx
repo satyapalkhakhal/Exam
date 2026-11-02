@@ -4,19 +4,24 @@
 // how many questions were answered, the time taken, and whether the result is awaiting or
 // declared. Still never marks, answers or the outcome itself.
 
-import { Navigate } from 'react-router';
+import { Link, Navigate, useParams } from 'react-router';
 import { CheckCircle2, Printer } from 'lucide-react';
 import { CandidateSignOut } from '@/components/layout/CandidateSignOut';
 import { Button } from '@/components/ui/button';
-import { useExamSummary } from '@/api/candidate/exam';
+import { useCandidateExam, useExamSummary } from '@/api/candidate/exam';
 import { receiptRows } from '@/lib/submissionReceipt';
+import { examPaths } from '@/lib/examSections';
 import { useCandidateAuth } from '@/stores/candidateAuth';
 
 export default function CandidateSubmitted() {
   const candidate = useCandidateAuth((s) => s.candidate);
-  const summary = useExamSummary();
+  const { applicationId = '' } = useParams();
+  const summary = useExamSummary(applicationId);
+  const detail = useCandidateExam(applicationId);
+  const exam = detail.data?.exam;
 
-  if (summary.data?.status === 'IN_PROGRESS') return <Navigate to="/exam" replace />;
+  if (summary.data?.status === 'IN_PROGRESS') return <Navigate to={examPaths.take(applicationId)} replace />;
+  if (summary.isError || detail.isError) return <Navigate to="/dashboard" replace />;
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-background px-4 py-10">
@@ -31,10 +36,10 @@ export default function CandidateSubmitted() {
 
         {summary.isPending && <p className="text-sm text-muted-foreground" role="status">Loading your receipt…</p>}
 
-        {candidate && summary.data && (
+        {candidate && exam && summary.data && (
           <section aria-label="Submission receipt" className="rounded-lg border border-border bg-card p-4 text-left">
             <dl className="divide-y divide-border text-sm">
-              {receiptRows(candidate, summary.data).map((r) => (
+              {receiptRows({ fullName: candidate.fullName, email: candidate.email, candidateCode: exam.candidateCode, jobRole: exam.jobRole, status: exam.progress }, summary.data).map((r) => (
                 <div key={r.label} className="flex justify-between gap-4 py-2">
                   <dt className="text-muted-foreground">{r.label}</dt>
                   <dd className="text-right font-medium text-foreground">{r.value}</dd>
@@ -55,6 +60,9 @@ export default function CandidateSubmitted() {
               Print / save receipt
             </Button>
           )}
+          <Button asChild variant="outline">
+            <Link to="/dashboard">Back to my exams</Link>
+          </Button>
           <CandidateSignOut />
         </div>
       </div>

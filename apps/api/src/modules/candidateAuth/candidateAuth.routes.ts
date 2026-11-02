@@ -57,6 +57,5 @@ export function createCandidateAuthRouter(service: CandidateAuthService): Router
   r.post('/auth/logout', c.logout);
   r.get('/me', auth, c.me);
   r.post('/location', auth, candidateLocationLimiter, validate({ body: LocationPayloadSchema }), c.location);
-  r.get('/exam/info', auth, c.examInfo);
   return r;
 }

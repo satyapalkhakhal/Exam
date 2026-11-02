@@ -3,8 +3,9 @@
 // only reads, locks and writes. Writes that must agree with what was checked
 // run inside `transaction`, whose methods take the row locks the service
 // relies on:
-// - start locks the role's exam_settings row, then the candidate row, so two
-//   starts (or a start and a role change) serialise;
+// - start locks the candidate account row (one exam at a time per person),
+//   then the role's exam_settings row, then the application's candidate row, so
+//   two starts (or a start and a role change) serialise;
 // - a save holds the attempt FOR SHARE and its answer FOR UPDATE, so two saves
 //   of one answer apply in order and a submit cannot interleave with a save;
 // - submit and auto-submit flip the status with a guarded update, so only one
@@ -76,6 +77,21 @@ function txMethods(tx: Tx) {
         UPDATE exam_settings SET questions_locked = true, updated_at = now()
         WHERE job_role_id = ${jobRoleId}::uuid AND questions_locked = false`;
       return true;
+    },
+
+    /** The account row FOR UPDATE: a person's starts serialise here. False when it does not exist. */
+    async lockAccount(accountId: string): Promise<boolean> {
+      const rows = await tx.$queryRaw<{ id: string }[]>`SELECT id::text FROM candidate_accounts WHERE id = ${accountId}::uuid FOR UPDATE`;
+      return rows.length > 0;
+    },
+
+    /** Another application of the account with an unexpired IN_PROGRESS attempt. */
+    async hasOtherRunningAttempt(accountId: string, exceptApplicationId: string, at: Date): Promise<boolean> {
+      const row = await tx.examAttempt.findFirst({
+        where: { status: 'IN_PROGRESS', endsAt: { gt: at }, candidate: { accountId, id: { not: exceptApplicationId } } },
+        select: { id: true },
+      });
+      return row !== null;
     },
 
     async lockCandidate(id: string) {
@@ -242,7 +258,53 @@ export const examRepository = {
   findCandidate(id: string) {
     return prisma.candidate.findUnique({
       where: { id },
-      select: { id: true, eligible: true, locationExempt: true, jobRoleId: true, status: true },
+      select: { id: true, accountId: true, eligible: true, locationExempt: true, jobRoleId: true, status: true },
+    });
+  },
+
+  /** True when the application exists, is eligible and belongs to the account. */
+  async ownsApplication(accountId: string, applicationId: string): Promise<boolean> {
+    const row = await prisma.candidate.findFirst({ where: { id: applicationId, accountId, eligible: true }, select: { id: true } });
+    return row !== null;
+  },
+
+  /** The account's eligible applications (one when `applicationId` is given), ordered by role name, with the current attempt and its counts. */
+  async listApplications(accountId: string, applicationId?: string) {
+    const rows = await prisma.candidate.findMany({
+      where: { accountId, eligible: true, ...(applicationId ? { id: applicationId } : {}) },
+      orderBy: [{ jobRole: { name: 'asc' } }, { id: 'asc' }],
+      select: {
+        id: true,
+        candidateCode: true,
+        status: true,
+        locationExempt: true,
+        jobRole: { select: { id: true, name: true } },
+        attempts: {
+          where: { status: { not: 'RESET' } },
+          take: 1,
+          select: { id: true, status: true, submitType: true, startedAt: true, endsAt: true, submittedAt: true },
+        },
+      },
+    });
+    const attemptIds = rows.flatMap((r) => r.attempts.map((a) => a.id));
+    const counts = attemptIds.length
+      ? await prisma.$queryRaw<{ attempt_id: string; total: bigint; answered: bigint }[]>`
+          SELECT q.attempt_id::text AS attempt_id, COUNT(*) AS total, COUNT(*) FILTER (WHERE a.word_count > 0) AS answered
+          FROM attempt_questions q LEFT JOIN answers a ON a.attempt_question_id = q.id
+          WHERE q.attempt_id = ANY(${attemptIds}::uuid[])
+          GROUP BY q.attempt_id`
+      : [];
+    const byAttempt = new Map(counts.map((c) => [c.attempt_id, { questionCount: Number(c.total), answeredCount: Number(c.answered) }]));
+    return rows.map((r) => {
+      const a = r.attempts[0];
+      return {
+        id: r.id,
+        candidateCode: r.candidateCode,
+        status: r.status,
+        locationExempt: r.locationExempt,
+        jobRole: r.jobRole,
+        attempt: a ? { ...a, ...(byAttempt.get(a.id) ?? { questionCount: 0, answeredCount: 0 }) } : null,
+      };
     });
   },
 

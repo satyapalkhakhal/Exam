@@ -13,6 +13,7 @@ import { useBulkJobRole, type BulkJobRoleResult } from '@/api/admin/candidates';
 const REASON: Record<BulkJobRoleResult['skipped'][number]['reason'], string> = {
   STARTED: 'Already started an exam',
   SAME_ROLE: 'Already in this job role',
+  SAME_PERSON_HAS_ROLE: 'This person already has an application for this role',
   NOT_FOUND: 'No longer exists',
 };
 

@@ -12,6 +12,7 @@ import CandidateLogin from '@/pages/candidate/Login';
 import CandidateRegister from '@/pages/candidate/Register';
 import CandidateLocation from '@/pages/candidate/Location';
 import CandidateDashboard from '@/pages/candidate/Dashboard';
+import CandidateExamDetail from '@/pages/candidate/ExamDetail';
 import CandidateExam from '@/pages/candidate/Exam';
 import CandidateSubmitted from '@/pages/candidate/Submitted';
 
@@ -41,8 +42,11 @@ export function App() {
         <Route element={<CandidateRoute />}>
           <Route path="/location" element={<CandidateLocation />} />
           <Route path="/dashboard" element={<CandidateDashboard />} />
-          <Route path="/exam" element={<CandidateExam />} />
-          <Route path="/submitted" element={<CandidateSubmitted />} />
+          <Route path="/exams/:applicationId" element={<CandidateExamDetail />} />
+          <Route path="/exams/:applicationId/take" element={<CandidateExam />} />
+          <Route path="/exams/:applicationId/submitted" element={<CandidateSubmitted />} />
+          <Route path="/exam" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/submitted" element={<Navigate to="/dashboard" replace />} />
         </Route>
 
         <Route path="/admin/login" element={<Login />} />

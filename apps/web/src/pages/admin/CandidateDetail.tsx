@@ -221,6 +221,7 @@ export default function CandidateDetail() {
   if (isPending) return <p className="text-sm text-muted-foreground" role="status">Loading…</p>;
   if (error || !data) return <p className="text-sm text-destructive" role="alert">{error?.message ?? 'Candidate not found'}</p>;
   const { candidate: c, loginLogs, activity, flags, history, attempt } = data;
+  const otherApplications = data.otherApplications ?? [];
   const integrity = flags?.integrity;
   const locationFlags = flags?.location ?? [];
   const flagTotal = (integrity ? integrity.pasteAttempts + integrity.bulkInsert + integrity.ipChanges : 0) + locationFlags.length;
@@ -250,6 +251,21 @@ export default function CandidateDetail() {
           <Button variant="destructive" size="sm" onClick={() => setResetStep('reason')}>Reset attempt</Button>
         </div>
       </div>
+      {otherApplications.length > 0 && (
+        <section aria-label="Other applications" className="rounded-lg border border-border bg-card p-3 text-sm">
+          <h2 className="mb-1 font-medium">Other applications by this person</h2>
+          <ul className="space-y-1">
+            {otherApplications.map((o) => (
+              <li key={o.id}>
+                <Link to={`/admin/candidates/${o.id}`} className="text-primary hover:underline">
+                  <span className="font-mono">{o.candidateCode}</span> · {o.jobRole.name}
+                </Link>{' '}
+                <Badge variant="outline">{statusText(o.status)}</Badge>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {(eligibility.error || reset.error) && (
         <p role="alert" className="text-sm text-destructive">{(eligibility.error ?? reset.error)?.message}</p>
       )}

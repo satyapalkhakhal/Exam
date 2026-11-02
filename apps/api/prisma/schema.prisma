@@ -183,12 +183,29 @@ model ImportBatch {
   @@map("import_batches")
 }
 
+// The person who signs in (docs/multi-exam.md). One account holds one
+// application (a candidates row) per job role; email/mobile live here and are
+// copied onto each application row.
+model CandidateAccount {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email     String   @unique
+  mobile    String?  @unique
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  applications Candidate[]
+
+  @@map("candidate_accounts")
+}
+
+// One application = (account x job role): code, status, marks, flags, history.
 model Candidate {
   id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId      String          @map("account_id") @db.Uuid
   candidateCode  String          @unique @map("candidate_code")
   fullName       String          @map("full_name")
-  email          String          @unique
-  mobile         String?         @unique
+  email          String
+  mobile         String?
   rollNumber     String?         @map("roll_number")
   xPercentage    Decimal?        @map("x_percentage") @db.Decimal(5, 2)
   xiiPercentage  Decimal?        @map("xii_percentage") @db.Decimal(5, 2)
@@ -204,6 +221,7 @@ model Candidate {
   createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
 
+  account      CandidateAccount         @relation(fields: [accountId], references: [id], onDelete: Restrict)
   jobRole      JobRole                  @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
   importBatch  ImportBatch?             @relation(fields: [importBatchId], references: [id], onDelete: Restrict)
   attempts     ExamAttempt[]
@@ -211,9 +229,12 @@ model Candidate {
   loginLogs    CandidateLoginLog[]
   history      CandidateStatusHistory[]
 
+  @@unique([accountId, jobRoleId])
   @@index([jobRoleId, status])
   @@index([importBatchId])
   @@index([rollNumber])
+  @@index([email])
+  @@index([mobile])
   @@map("candidates")
 }
 

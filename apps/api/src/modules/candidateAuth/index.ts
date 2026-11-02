@@ -9,7 +9,7 @@ import { createCandidateAuthService } from './candidateAuth.service.js';
 
 export { createCandidateAuthRouter } from './candidateAuth.routes.js';
 export { createCandidateAuthService } from './candidateAuth.service.js';
-export type { CandidateAuthService, CandidateAuthRepository, CandidateAuthRecord } from './candidateAuth.service.js';
+export type { CandidateAuthService, CandidateAuthRepository, CandidateAccountRecord } from './candidateAuth.service.js';
 
 export const candidateAuthService = createCandidateAuthService({
   repo: candidateAuthRepository,

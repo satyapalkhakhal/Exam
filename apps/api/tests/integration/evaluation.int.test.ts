@@ -14,6 +14,7 @@ import type { Express } from 'express';
 import { env } from '../../src/infrastructure/config/env.js';
 import { prisma } from '../../src/infrastructure/db/prisma.js';
 import { getRedis } from '../../src/infrastructure/redis/redis.js';
+import { createCandidate } from './helpers.js';
 import { createApp } from '../../src/app.js';
 
 const RUN = crypto.randomBytes(4).toString('hex');
@@ -51,17 +52,15 @@ async function signIn(who: Who) {
 
 /** A candidate with a submitted attempt over the role's questions. */
 async function submittedCandidate(key: string, jobRoleId: string, qs: { id: string; text: string; max: number }[], submittedAt: Date, fullName = `Cand ${key} ${RUN}`) {
-  const c = await prisma.candidate.create({
-    data: {
-      candidateCode: `EV-${RUN}-${key}`,
-      fullName,
-      email: `${key}-${RUN}@eval.int.test`,
-      mobile: mobile(),
-      rollNumber: `R-${RUN}-${key}`,
-      majorCpi: 8.5,
-      jobRoleId,
-      status: 'SUBMITTED',
-    },
+  const c = await createCandidate({
+    candidateCode: `EV-${RUN}-${key}`,
+    fullName,
+    email: `${key}-${RUN}@eval.int.test`,
+    mobile: mobile(),
+    rollNumber: `R-${RUN}-${key}`,
+    majorCpi: 8.5,
+    jobRoleId,
+    status: 'SUBMITTED',
   });
   const a = await prisma.examAttempt.create({
     data: {
@@ -122,9 +121,7 @@ before(async () => {
   await prisma.candidateLoginLog.create({
     data: { candidateId, stage: 'EXAM_START', permission: 'GRANTED', latitude: 26.1, longitude: 91.7, ip: '198.51.100.20', userAgent: 'x', browser: 'x', os: 'x', deviceType: 'desktop' },
   });
-  await prisma.candidate.create({
-    data: { candidateCode: `EV-${RUN}-ns`, fullName: 'Not Started', email: `ns-${RUN}@eval.int.test`, jobRoleId: roleId },
-  });
+  await createCandidate({ candidateCode: `EV-${RUN}-ns`, fullName: 'Not Started', email: `ns-${RUN}@eval.int.test`, jobRoleId: roleId });
 
   // Leaderboard role: tied totals separated by submit time.
   const bRole = await prisma.jobRole.create({ data: { name: `Eval Board ${RUN}`, examSetting: { create: {} } } });

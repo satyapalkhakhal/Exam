@@ -1,9 +1,12 @@
 // modules/candidates/candidates.service.ts
-// Candidate import and management (design §6). Import is two steps like the
+// Candidate import and management (design §6, docs/multi-exam.md). A candidate
+// row is one application (account x job role); email and mobile belong to the
+// account. Import is two steps like the
 // questions: preview parses and caches the valid drafts in Redis (30 min, bound
 // to the uploading admin); confirm mints codes from the sequence and inserts
-// them with the ImportBatch and audit row in one transaction. Disabling a
-// candidate or resetting an attempt revokes their sessions at once. PII (names,
+// them with the ImportBatch and audit row in one transaction (an email that
+// already has an account gets a new application on it). Disabling a
+// candidate or resetting an attempt revokes the account's sessions at once. PII (names,
 // emails, mobiles) is never copied into audit metadata.
 
 import { randomUUID } from 'node:crypto';
@@ -34,6 +37,7 @@ import {
   TEMPLATE_COLUMNS,
   type CandidateDraft,
   type CandidateUpdateDraft,
+  type ExistingAccount,
   type ParsedCandidates,
 } from './candidateImport.parser.js';
 
@@ -53,6 +57,7 @@ type Num = { toNumber(): number } | number | null;
 
 export interface CandidateRow {
   id: string;
+  accountId: string;
   candidateCode: string;
   fullName: string;
   email: string;
@@ -79,13 +84,14 @@ export interface CandidateDetailRows {
     accuracyM: number | null; ip: string; browser: string; os: string; deviceType: string;
   }[];
   attempt: { id: string; status: string; startedAt: Date; submittedAt: Date | null } | null;
+  otherApplications: { id: string; candidateCode: string; status: string; jobRole: { id: string; name: string } }[];
   activity: { rows: { id: string; eventType: string; createdAt: Date; metadata: unknown }[]; total: number };
   history: { id: string; fromStatus: string | null; toStatus: string; comment: string | null; createdAt: Date; byAdmin: { name: string } | null }[];
 }
 
 export interface ImportCommit {
   jobRoleId: string;
-  /** Update mode: existing candidates to move/refresh (null field = keep stored value). */
+  /** Update mode: existing applications to refresh (null field = keep stored value). */
   updates: CandidateUpdateDraft[];
   /** One CANDIDATE_UPDATED audit row per candidate actually updated. */
   updateAudit: (u: CandidateUpdateDraft, fromJobRoleId: string) => AuditRecord;
@@ -103,16 +109,11 @@ export type CandidateChanges = Partial<Omit<CandidateUpdateInput, 'mobile'>> & {
 export interface CandidatesRepository {
   jobRoleExists(id: string): Promise<boolean>;
   rolesByLowerName(): Promise<Map<string, string>>;
-  existingEmailsAndMobiles(): Promise<{
-    emails: Set<string>;
-    mobiles: Set<string>;
-    byEmail: Map<string, { id: string; status: string; mobile: string | null }>;
-    mobileOwners: Map<string, string>;
-  }>;
+  existingAccounts(): Promise<{ accountsByEmail: Map<string, ExistingAccount>; mobileOwners: Map<string, string> }>;
   lastImportOf(jobRoleId: string, fileHash: string): Promise<Date | null>;
   /** Creates the new rows and applies the updates in one transaction. */
   confirmImport(input: ImportCommit): Promise<{ imported: number; updated: number }>;
-  /** Throws CONFLICT when the email or mobile belongs to another candidate. */
+  /** Attaches to the account that owns the email (or creates it). Throws CONFLICT when the person already holds the role or the mobile belongs to another account. */
   create(data: CandidateCreateInput & { candidateCode: string }, audit: (id: string) => AuditRecord): Promise<CandidateRow>;
   /** Candidates matching the filters (flagged ignored) that could carry a review flag. */
   possiblyFlaggedIds(query: CandidateListQuery): Promise<string[]>;
@@ -120,12 +121,13 @@ export interface CandidatesRepository {
   list(query: CandidateListQuery, ids?: { in: string[] } | { notIn: string[] }): Promise<{ rows: CandidateRow[]; total: number }>;
   detail(id: string, activitySkip: number, activityTake: number): Promise<CandidateDetailRows | null>;
   findById(id: string): Promise<CandidateRow | null>;
-  /** Throws CONFLICT when the email or mobile belongs to another candidate. */
+  /** Email and mobile changes go to the account (and every application's copy). Throws CONFLICT on a clash with another account or an already-held role. */
   update(id: string, data: CandidateChanges, audit: AuditRecord): Promise<CandidateRow>;
   setEligible(id: string, eligible: boolean, audit: AuditRecord): Promise<CandidateRow>;
   /**
    * One transaction: locks the candidates (id order), moves each NOT_STARTED one whose
-   * role differs, and writes one audit row per move. Others are returned as skipped.
+   * role differs and whose account does not already hold the target role, and writes one
+   * audit row per move. Others are returned as skipped.
    */
   bulkSetJobRole(
     ids: string[],
@@ -175,7 +177,8 @@ export const toRowDto = (r: CandidateRow): CandidateRowDto => ({
 
 export interface CandidatesDeps {
   redis: () => Redis;
-  revokeSessions: (candidateId: string) => Promise<void>;
+  /** Revokes every session of the candidate account. */
+  revokeSessions: (accountId: string) => Promise<void>;
   /** The exam module's flag score per candidate. */
   flagCounts: (candidateIds: string[]) => Promise<Map<string, number>>;
   /** The exam module's flags for one candidate, and their score. */
@@ -221,6 +224,7 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
         os: l.os,
         deviceType: l.deviceType,
       })),
+      otherApplications: d.otherApplications.map((o) => ({ id: o.id, candidateCode: o.candidateCode, jobRole: o.jobRole, status: o.status })),
       attempt: d.attempt
         ? {
             id: d.attempt.id,
@@ -294,7 +298,8 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
   }
 
   async function setEligibility(id: string, eligible: boolean, actorId: string, ip: string | null): Promise<CandidateRowDto> {
-    if (!(await repo.findById(id))) throw notFound('Candidate not found');
+    const found = await repo.findById(id);
+    if (!found) throw notFound('Candidate not found');
     const row = await repo.setEligible(id, eligible, {
       adminId: actorId,
       action: eligible ? 'CANDIDATE_ENABLED' : 'CANDIDATE_DISABLED',
@@ -303,7 +308,7 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
       metadata: {},
       ip,
     });
-    if (!eligible) await deps.revokeSessions(id);
+    if (!eligible) await deps.revokeSessions(found.accountId);
     return toRowDto(row);
   }
 
@@ -321,7 +326,8 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
   }
 
   async function resetAttempt(id: string, reason: string, actorId: string, ip: string | null): Promise<{ status: 'NOT_STARTED' }> {
-    if (!(await repo.findById(id))) throw notFound('Candidate not found');
+    const found = await repo.findById(id);
+    if (!found) throw notFound('Candidate not found');
     const done = await repo.resetAttempt(id, actorId, reason, {
       adminId: actorId,
       action: 'CANDIDATE_ATTEMPT_RESET',
@@ -331,7 +337,7 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
       ip,
     });
     if (!done) throw conflict('This candidate has no attempt to reset');
-    await deps.revokeSessions(id);
+    await deps.revokeSessions(found.accountId);
     return { status: 'NOT_STARTED' };
   }
 
@@ -347,17 +353,15 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
     if (missing.length > 0) {
       throw badRequest(`Missing required column: ${missing.join(', ')}. Expected: ${TEMPLATE_COLUMNS.join(', ')}`);
     }
-    const existing = await repo.existingEmailsAndMobiles();
+    const existing = await repo.existingAccounts();
     const parsed = parseCandidateRows(
       sheet.rows,
       {
         defaultJobRoleId: jobRoleId,
         rolesByLowerName: await repo.rolesByLowerName(),
-        existingEmails: existing.emails,
-        existingMobiles: existing.mobiles,
-        updateExisting,
-        existingByEmail: existing.byEmail,
+        accountsByEmail: existing.accountsByEmail,
         mobileOwners: existing.mobileOwners,
+        updateExisting,
       },
       sheet.rowNumbers,
     );
@@ -378,6 +382,7 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
       valid: parsed.valid.map((d) => ({ row: d.row, fullName: d.fullName, email: d.email, mobile: d.mobile, rollNumber: d.rollNumber })),
       errors: parsed.errors,
       duplicates: parsed.duplicates,
+      linkedRows: parsed.linkedRows,
       ...(updateExisting
         ? { updates: parsed.updates.map((u) => ({ row: u.row, fullName: u.fullName, email: u.email, mobile: u.mobile, rollNumber: u.rollNumber })) }
         : {}),

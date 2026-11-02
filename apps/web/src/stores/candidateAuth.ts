@@ -16,13 +16,3 @@ export const useCandidateAuth = create<CandidateAuthState>((set) => ({
   setCandidate: (candidate) => set({ candidate }),
   clear: () => set({ candidate: null }),
 }));
-
-/**
- * Mirror an exam status change into the signed-in candidate. /me is not
- * refetched while the store is set, so without this a candidate who goes Back
- * from /exam after Start sees Start (or "window closed") instead of Resume.
- */
-export function markCandidateStatus(status: string): void {
-  const c = useCandidateAuth.getState().candidate;
-  if (c && c.status !== status) useCandidateAuth.getState().setCandidate({ ...c, status });
-}

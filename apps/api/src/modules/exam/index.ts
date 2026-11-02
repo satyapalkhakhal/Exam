@@ -21,7 +21,7 @@ export { assessSave } from './integrity.js';
 export const examService = createExamService({
   repo: examRepository,
   getSettings: (jobRoleId) => jobRoles.getSettings(jobRoleId),
-  recordStartLocation: async (auth, location, client) => {
+  recordStartLocation: async (auth, applicationId, location, client) => {
     await candidateAuthService.recordLocation(
       auth,
       {
@@ -32,6 +32,7 @@ export const examService = createExamService({
         ...(location.accuracyM !== undefined ? { accuracyM: location.accuracyM } : {}),
       },
       client,
+      applicationId,
     );
   },
   queue: { enqueue: (id, endsAt) => enqueueAutoSubmit(id, endsAt), remove: removeAutoSubmit },
@@ -39,6 +40,7 @@ export const examService = createExamService({
 });
 
 export const examAuth = { isActive: candidateAuthService.isActive, resolveFamily: resolveExamFamily };
+export const ownsApplication = examRepository.ownsApplication;
 
 export { flagBreakdown, flagScore, TAB_HIDDEN_THRESHOLD } from './flagScore.js';
 export type { CandidateFlags, FlagBreakdown } from './flagScore.js';

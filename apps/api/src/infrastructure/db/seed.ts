@@ -1,7 +1,7 @@
 // infrastructure/db/seed.ts
 // Idempotent seed: the 7 job roles with default exam settings, disabled SMS and
 // email config rows, and the Super Admin from SEED_ADMIN_EMAIL/PASSWORD (never
-// overwritten once it exists). SEED_DEMO=true adds 3 candidates + 2 questions
+// overwritten once it exists). SEED_DEMO=true adds 3 candidates (each with its sign-in account) + 2 questions
 // on the Backend Engineer role. Usage: pnpm --filter @exam/api seed
 
 import bcrypt from 'bcrypt';
@@ -66,10 +66,15 @@ async function seedSuperAdmin(): Promise<void> {
 async function seedDemo(): Promise<void> {
   const role = await prisma.jobRole.findUniqueOrThrow({ where: { name: seedData.demo.roleName } });
   for (const c of seedData.demo.candidates) {
+    const account = await prisma.candidateAccount.upsert({
+      where: { email: c.email },
+      update: {},
+      create: { email: c.email, mobile: c.mobile },
+    });
     await prisma.candidate.upsert({
       where: { candidateCode: c.candidateCode },
       update: {},
-      create: { ...c, jobRoleId: role.id },
+      create: { ...c, accountId: account.id, jobRoleId: role.id },
     });
   }
   for (const [i, q] of seedData.demo.questions.entries()) {

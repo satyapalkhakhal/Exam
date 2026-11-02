@@ -11,7 +11,7 @@ import { createJobRolesRouter, jobRoles } from './modules/jobRoles/index.js';
 import { createQuestionsRouter, createRoleQuestionsRouter, questions } from './modules/questions/index.js';
 import { candidates, createCandidatesRouter } from './modules/candidates/index.js';
 import { candidateAuthService, createCandidateAuthRouter } from './modules/candidateAuth/index.js';
-import { createExamRouter, examAuth, examService } from './modules/exam/index.js';
+import { createExamRouter, examAuth, examService, ownsApplication } from './modules/exam/index.js';
 import { createEvaluationRouter, evaluation } from './modules/evaluation/index.js';
 import { createResultsRouter, results } from './modules/results/index.js';
 import { audit, createAuditRouter } from './modules/audit/index.js';
@@ -45,4 +45,4 @@ router.use('/admin/submissions', authenticateAdmin, createEvaluationRouter(evalu
 // Last /admin mount: dashboard, leaderboard, decisions, exports (per-route roles).
 router.use('/admin', authenticateAdmin, createResultsRouter(results));
 router.use('/candidate', createCandidateAuthRouter(candidateAuthService));
-router.use('/candidate/exam', createExamRouter(examService, examAuth));
+router.use('/candidate/exams', createExamRouter(examService, examAuth, ownsApplication));

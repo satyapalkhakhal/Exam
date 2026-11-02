@@ -7,7 +7,7 @@
 // the real deadline; the client only flushes what it has and gets out of the way.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Navigate, useNavigate } from 'react-router';
+import { Navigate, useNavigate, useParams } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Flag } from 'lucide-react';
 import { countWords } from '@exam/shared';
@@ -21,6 +21,8 @@ import {
   beaconEvents,
   forgetSession,
   getExamState,
+  useCandidateExam,
+  useInvalidateExams,
   postEvents,
   readSessionId,
   resumeExam,
@@ -35,7 +37,8 @@ import { createExamLifecycle, type ExamLifecycle, type LifecyclePhase } from '@/
 import { createServerClock, type ServerClock } from '@/lib/serverClock';
 import { tabPresenceFor } from '@/lib/tabPresence';
 import { cn } from '@/lib/utils';
-import { markCandidateStatus, useCandidateAuth } from '@/stores/candidateAuth';
+import { useCandidateAuth } from '@/stores/candidateAuth';
+import { examPaths } from '@/lib/examSections';
 import type { ExamState } from '@/types/exam';
 
 interface Boot {
@@ -44,7 +47,7 @@ interface Boot {
   receivedAt: number;
 }
 
-const BOOT_KEY = ['candidate', 'exam', 'boot'] as const;
+const bootKey = (applicationId: string) => ['candidate', 'exam', 'boot', applicationId] as const;
 const BLOCKED_TOAST = 'Pasting, copying and dragging text are disabled during the exam. This attempt has been recorded.';
 const TIME_UP = 'Time is up — your answers have been submitted';
 const BLOCKED_EVENT: Record<BlockedKind, ExamEventType> = {
@@ -55,8 +58,8 @@ const BLOCKED_EVENT: Record<BlockedKind, ExamEventType> = {
   CONTEXT_MENU: 'CONTEXT_MENU',
 };
 
-async function bootExam(): Promise<Boot> {
-  const state = await getExamState();
+async function bootExam(applicationId: string): Promise<Boot> {
+  const state = await getExamState(applicationId);
   if (state.status !== 'IN_PROGRESS') return { state, sessionId: '', receivedAt: Date.now() };
   const stored = readSessionId(state.attemptId);
   // A stored id is ours only if no other live tab is using it: "Duplicate tab" copies
@@ -66,7 +69,7 @@ async function bootExam(): Promise<Boot> {
   }
   // A new or duplicated tab (or a reopened browser): take over, which the server logs as
   // SESSION_TAKEOVER and which supersedes the other window.
-  const resumed = await resumeExam();
+  const resumed = await resumeExam(applicationId);
   return { state: resumed, sessionId: resumed.sessionId ?? '', receivedAt: Date.now() };
 }
 
@@ -100,10 +103,11 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const within = (p: Promise<unknown>, ms: number) => Promise.race([p.then(() => undefined, () => undefined), sleep(ms)]);
 
 export default function CandidateExam() {
+  const { applicationId = '' } = useParams();
   const qc = useQueryClient();
   const boot = useQuery({
-    queryKey: BOOT_KEY,
-    queryFn: bootExam,
+    queryKey: bootKey(applicationId),
+    queryFn: () => bootExam(applicationId),
     gcTime: 0,
     staleTime: Infinity,
     retry: (n, err) => !(err instanceof ApiError) && n < 3,
@@ -117,9 +121,9 @@ export default function CandidateExam() {
   }, []);
 
   const takeOver = useCallback(async () => {
-    const s = await resumeExam();
-    qc.setQueryData<Boot>(BOOT_KEY, { state: s, sessionId: s.sessionId ?? '', receivedAt: Date.now() });
-  }, [qc]);
+    const s = await resumeExam(applicationId);
+    qc.setQueryData<Boot>(bootKey(applicationId), { state: s, sessionId: s.sessionId ?? '', receivedAt: Date.now() });
+  }, [qc, applicationId]);
 
   if (boot.isPending) {
     return (
@@ -131,7 +135,7 @@ export default function CandidateExam() {
   if (boot.isError) {
     const code = boot.error instanceof ApiError ? boot.error.code : null;
     if (code === 'NOT_FOUND' || code === 'FORBIDDEN') return <Navigate to="/dashboard" replace />;
-    if (code === 'ATTEMPT_LOCKED' || code === 'ALREADY_ATTEMPTED') return <Navigate to="/submitted" replace />;
+    if (code === 'ATTEMPT_LOCKED' || code === 'ALREADY_ATTEMPTED') return <Navigate to={examPaths.submitted(applicationId)} replace />;
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-background p-8 text-center">
         <p className="text-sm text-foreground" role="alert">
@@ -143,8 +147,8 @@ export default function CandidateExam() {
       </div>
     );
   }
-  if (boot.data.state.status !== 'IN_PROGRESS') return <Navigate to="/submitted" replace />;
-  return <ExamRunner key={boot.data.sessionId} boot={boot.data} onTakeOver={takeOver} />;
+  if (boot.data.state.status !== 'IN_PROGRESS') return <Navigate to={examPaths.submitted(applicationId)} replace />;
+  return <ExamRunner key={boot.data.sessionId} applicationId={applicationId} boot={boot.data} onTakeOver={takeOver} />;
 }
 
 interface Local {
@@ -153,10 +157,12 @@ interface Local {
   visited: boolean;
 }
 
-function ExamRunner({ boot, onTakeOver }: { boot: Boot; onTakeOver: () => Promise<void> }) {
+function ExamRunner({ applicationId, boot, onTakeOver }: { applicationId: string; boot: Boot; onTakeOver: () => Promise<void> }) {
   const { state, sessionId } = boot;
   const navigate = useNavigate();
   const candidate = useCandidateAuth((s) => s.candidate);
+  const examInfo = useCandidateExam(applicationId).data?.exam;
+  const invalidateExams = useInvalidateExams();
   const questions = useMemo(() => [...state.questions].sort((a, b) => a.order - b.order), [state.questions]);
   const mirrorKey = useCallback((aqId: string) => `exam:${state.attemptId}:${aqId}`, [state.attemptId]);
 
@@ -199,18 +205,20 @@ function ExamRunner({ boot, onTakeOver }: { boot: Boot; onTakeOver: () => Promis
   const lifecycleRef = useRef<ExamLifecycle | null>(null);
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
+  const invalidateRef = useRef(invalidateExams);
+  invalidateRef.current = invalidateExams;
 
   // ---- autosaver + event queue + lifecycle (one set per session) ------------------------
   useEffect(() => {
     const saver = createAutosaver({
-      save: (p) => saveAnswer(sessionId, p),
-      beacon: (p) => beaconAnswer(sessionId, p),
+      save: (p) => saveAnswer(applicationId, sessionId, p),
+      beacon: (p) => beaconAnswer(applicationId, sessionId, p),
       debounceMs: 2000,
       storage: safeLocal,
       key: mirrorKey,
       now: () => clockRef.current.now(),
       resolveStale: async (id) => {
-        const fresh = await getExamState();
+        const fresh = await getExamState(applicationId);
         clockRef.current = createServerClock(fresh.serverNow);
         if (fresh.status !== 'IN_PROGRESS') throw Object.assign(new Error('locked'), { code: 'ATTEMPT_LOCKED' });
         const a = fresh.questions.find((q) => q.attemptQuestionId === id)?.answer;
@@ -239,8 +247,8 @@ function ExamRunner({ boot, onTakeOver }: { boot: Boot; onTakeOver: () => Promis
     saverRef.current = saver;
 
     const events = createEventQueue({
-      send: (batch) => postEvents(sessionId, batch),
-      beacon: (batch) => beaconEvents(sessionId, batch),
+      send: (batch) => postEvents(applicationId, sessionId, batch),
+      beacon: (batch) => beaconEvents(applicationId, sessionId, batch),
       onSuperseded: () => lifecycleRef.current?.supersede(),
       intervalMs: 5000,
     });
@@ -263,8 +271,8 @@ function ExamRunner({ boot, onTakeOver }: { boot: Boot; onTakeOver: () => Promis
         if (s.phase !== 'active') setSubmitOpen(false);
       },
       onTimeUpDone: () => {
-        markCandidateStatus('AUTO_SUBMITTED');
-        navigateRef.current('/submitted', { replace: true });
+        void invalidateRef.current();
+        navigateRef.current(examPaths.submitted(applicationId), { replace: true });
       },
     });
     lifecycleRef.current = lifecycle;
@@ -297,9 +305,9 @@ function ExamRunner({ boot, onTakeOver }: { boot: Boot; onTakeOver: () => Promis
       return;
     }
     lifecycle.abandon();
-    markCandidateStatus('SUBMITTED');
-    navigate('/submitted', { replace: true });
-  }, [navigate]);
+    void invalidateExams();
+    navigate(examPaths.submitted(applicationId), { replace: true });
+  }, [navigate, applicationId, invalidateExams]);
 
   useEffect(() => {
     if (status === 'locked') onLocked();
@@ -313,8 +321,8 @@ function ExamRunner({ boot, onTakeOver }: { boot: Boot; onTakeOver: () => Promis
 
   // Re-sync the clock (and notice a server-side lock) every 60 s.
   const sync = useQuery({
-    queryKey: ['candidate', 'exam', 'sync', sessionId],
-    queryFn: getExamState,
+    queryKey: ['candidate', 'exam', 'sync', applicationId, sessionId],
+    queryFn: () => getExamState(applicationId),
     initialData: state,
     initialDataUpdatedAt: boot.receivedAt,
     staleTime: 60_000,
@@ -450,10 +458,10 @@ function ExamRunner({ boot, onTakeOver }: { boot: Boot; onTakeOver: () => Promis
     }
     if (eventsRef.current) await within(eventsRef.current.flush(), 3000);
     try {
-      await submitExam(sessionId);
+      await submitExam(applicationId, sessionId);
       lifecycleRef.current?.finishSubmitted(); // clears local copies only if this tab owns the session
-      markCandidateStatus('SUBMITTED');
-      navigate('/submitted', { replace: true });
+      void invalidateExams();
+      navigate(examPaths.submitted(applicationId), { replace: true });
     } catch (e) {
       setSubmitting(false);
       if (e instanceof ApiError && e.code === 'SESSION_SUPERSEDED') {
@@ -486,8 +494,8 @@ function ExamRunner({ boot, onTakeOver }: { boot: Boot; onTakeOver: () => Promis
     <div className="min-h-screen bg-background text-foreground">
       <ExamHeader
         name={candidate?.fullName ?? ''}
-        code={candidate?.candidateCode ?? ''}
-        role={candidate?.jobRole.name ?? ''}
+        code={examInfo?.candidateCode ?? ''}
+        role={examInfo?.jobRole.name ?? ''}
         remainingMs={remaining}
         status={status}
       />

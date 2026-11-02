@@ -1,7 +1,9 @@
 // scripts/purge-candidates.ts
 // Retention step from deployment §10: anonymises the personal fields of every
 // finished candidate created before a cut-off date, and keeps what the
-// shortlisting record needs (candidateCode, status, answers and marks). Login
+// shortlisting record needs (candidateCode, status, answers and marks). A candidate
+// account (the sign-in identity shared by a person's applications) is anonymised
+// once every one of its applications has been. Login
 // logs lose their coordinates, IP and user agent, and activity logs their IP and
 // user agent (rows stay; the purge is the only writer besides the app's inserts). It is a dry run unless
 // --yes is passed, and it writes one audit row when it applies.
@@ -40,6 +42,11 @@ export function anonymizeCandidate<T extends PurgeableCandidate>(row: T): T {
     programme: null,
     extra: {},
   };
+}
+
+/** The anonymised sign-in identity of a candidate account: no email, no mobile. */
+export function anonymizeAccount(id: string): { email: string; mobile: null } {
+  return { email: `anon+${id}@invalid`, mobile: null };
 }
 
 const IP_PLACEHOLDER = '0.0.0.0';
@@ -87,8 +94,14 @@ async function main(): Promise<void> {
       }),
     ]);
   }
+  // An account goes only when none of its applications still holds personal data.
+  const accounts = await prisma.candidateAccount.findMany({
+    where: { NOT: { email: { endsWith: '@invalid' } }, applications: { every: { fullName: 'Anonymised' } } },
+    select: { id: true },
+  });
+  for (const a of accounts) await prisma.candidateAccount.update({ where: { id: a.id }, data: anonymizeAccount(a.id) });
   await prisma.adminAuditLog.create({
-    data: { action: 'CANDIDATES_PURGED', entity: 'candidate', metadata: { before: before.toISOString(), count: rows.length, via: 'cli' } },
+    data: { action: 'CANDIDATES_PURGED', entity: 'candidate', metadata: { before: before.toISOString(), count: rows.length, accounts: accounts.length, via: 'cli' } },
   });
   console.log(`Anonymised ${rows.length} candidate(s) created before ${before.toISOString().slice(0, 10)}.`);
 }

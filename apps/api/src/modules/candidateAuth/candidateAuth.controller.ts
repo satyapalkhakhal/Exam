@@ -1,9 +1,9 @@
 // modules/candidateAuth/candidateAuth.controller.ts
-// Thin HTTP layer: tokens only ever travel in httpOnly cookies. The candidate
+// Thin HTTP layer: tokens only ever travel in httpOnly cookies. The account
 // id always comes from req.candidate (the verified token), never from the URL.
 
 import type { NextFunction, Request, Response } from 'express';
-import { unauthorized } from '../../shared/errors.js';
+import { badRequest, unauthorized } from '../../shared/errors.js';
 import { ok } from '../../shared/http.js';
 import { clientInfo } from '../../shared/utils/clientInfo.js';
 import { COOKIES, clearAuthCookies, setAuthCookies, shouldClearCookiesAfterRefreshError } from '../adminAuth/tokens.js';
@@ -60,7 +60,10 @@ export function createCandidateAuthController(service: CandidateAuthService) {
       const c = authed(req);
       return ok(res, await service.me(c.id, c.sessionFamily));
     }),
-    location: wrap(async (req, res) => ok(res, await service.recordLocation(authed(req), req.body, clientInfo(req)))),
-    examInfo: wrap(async (req, res) => ok(res, await service.examInfo(authed(req).id))),
+    location: wrap(async (req, res) => {
+      // An exam-start location belongs to one application and travels in the start body.
+      if (req.body.stage === 'EXAM_START') throw badRequest('The exam start location is sent with the exam start.');
+      return ok(res, await service.recordLocation(authed(req), req.body, clientInfo(req)));
+    }),
   };
 }

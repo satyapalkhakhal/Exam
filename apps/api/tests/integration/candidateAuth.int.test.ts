@@ -9,6 +9,8 @@ import { env } from '../../src/infrastructure/config/env.js';
 import { prisma } from '../../src/infrastructure/db/prisma.js';
 import { getRedis } from '../../src/infrastructure/redis/redis.js';
 import { createApp } from '../../src/app.js';
+import crypto from 'node:crypto';
+import { createApplication, createCandidate } from './helpers.js';
 import {
   CANDIDATE_OTP_IP_LIMIT,
   CANDIDATE_VERIFY_ID_LIMIT,
@@ -26,23 +28,17 @@ before(async () => {
   assert.match(env.DATABASE_URL, /\/exam_test(\?|$)/);
   assert.match(env.REDIS_URL, /\/15$/);
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE candidate_login_logs, activity_logs, admin_audit_logs, candidates, exam_settings, job_roles RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE candidate_login_logs, activity_logs, admin_audit_logs, candidate_accounts, candidates, exam_settings, job_roles RESTART IDENTITY CASCADE',
   );
   const role = await prisma.jobRole.create({ data: { name: 'Analyst' } });
   roleId = role.id;
   await prisma.examSetting.create({
     data: { jobRoleId: role.id, durationMinutes: 45, instructions: 'Be honest.', isOpen: true, windowEnd: new Date('2030-01-01T00:00:00Z') },
   });
-  const c = await prisma.candidate.create({
-    data: { candidateCode: 'C-001', fullName: 'Asha Rao', email: EMAIL, mobile: '9876543210', jobRoleId: role.id },
-  });
+  const c = await createCandidate({ candidateCode: 'C-001', fullName: 'Asha Rao', email: EMAIL, mobile: '9876543210', jobRoleId: role.id });
   candidateId = c.id;
-  await prisma.candidate.create({
-    data: { candidateCode: 'C-002', fullName: 'Not Eligible', email: 'no@int.test', mobile: '9000000002', jobRoleId: role.id, eligible: false },
-  });
-  const r = await prisma.candidate.create({
-    data: { candidateCode: 'C-003', fullName: 'Ravi Nair', email: REG_EMAIL, rollNumber: 'R-003', jobRoleId: role.id },
-  });
+  await createCandidate({ candidateCode: 'C-002', fullName: 'Not Eligible', email: 'no@int.test', mobile: '9000000002', jobRoleId: role.id, eligible: false });
+  const r = await createCandidate({ candidateCode: 'C-003', fullName: 'Ravi Nair', email: REG_EMAIL, rollNumber: 'R-003', jobRoleId: role.id });
   regId = r.id;
   app = createApp();
 });
@@ -55,6 +51,12 @@ after(async () => {
   await prisma.$disconnect();
   await getRedis().quit();
 });
+
+/** The mobile lives on the account; each application carries a copy. */
+async function clearMobile(accountId: string) {
+  await prisma.candidateAccount.update({ where: { id: accountId }, data: { mobile: null } });
+  await prisma.candidate.updateMany({ where: { accountId }, data: { mobile: null } });
+}
 
 async function signIn(identifier = EMAIL) {
   const agent = request.agent(app);
@@ -107,13 +109,11 @@ test('verify with 123456 returns CandidateSelf, sets cand cookies (httpOnly, Str
   assert.deepEqual(verify.body.data, {
     candidate: {
       id: candidateId,
-      candidateCode: 'C-001',
       fullName: 'Asha Rao',
       email: EMAIL,
-      jobRole: { id: roleId, name: 'Analyst' },
-      status: 'NOT_STARTED',
       locationCaptured: false,
       locationExempt: false,
+      examCount: 1,
     },
   });
   for (const name of ['exam_cand_at', 'exam_cand_rt']) {
@@ -190,7 +190,7 @@ test('I3: two tabs refreshing with the same cookie: the late one is a plain 401 
   assert.equal((await agent.post('/api/candidate/auth/refresh')).status, 200);
 });
 
-test('denied / timeout / unavailable are logged without coordinates and leave locationCaptured false; EXAM_START GRANTED does not count', async () => {
+test('denied / timeout / unavailable are logged without coordinates and leave locationCaptured false; an EXAM_START location is refused here (it travels with the exam start)', async () => {
   await prisma.activityLog.deleteMany({ where: { candidateId, eventType: { startsWith: 'LOCATION_' } } });
   const { agent } = await signIn();
   const d = await agent.post('/api/candidate/location').send({ stage: 'LOGIN', permission: 'DENIED', latitude: 10, longitude: 10 });
@@ -199,7 +199,8 @@ test('denied / timeout / unavailable are logged without coordinates and leave lo
   await agent.post('/api/candidate/location').send({ stage: 'LOGIN', permission: 'TIMEOUT' });
   await agent.post('/api/candidate/location').send({ stage: 'LOGIN', permission: 'UNSUPPORTED' });
   const s = await agent.post('/api/candidate/location').send({ stage: 'EXAM_START', permission: 'GRANTED', latitude: 1, longitude: 2 });
-  assert.equal(s.body.data.locationCaptured, false);
+  assert.equal(s.status, 400);
+  assert.equal((await agent.get('/api/candidate/me')).body.data.candidate.locationCaptured, false);
 
   const denied = await prisma.candidateLoginLog.findFirstOrThrow({ where: { candidateId, permission: 'DENIED' } });
   assert.equal(denied.latitude, null);
@@ -238,18 +239,72 @@ test('logout revokes the session: refresh afterwards is 401', async () => {
   assert.equal((await agent.post('/api/candidate/auth/refresh')).status, 401);
 });
 
-test('exam/info returns the role setting and server time; needs a session', async () => {
-  assert.equal((await request(app).get('/api/candidate/exam/info')).status, 401);
+test('the old /exam/info and /exam/* routes are gone', async () => {
   const { agent } = await signIn();
-  const res = await agent.get('/api/candidate/exam/info');
-  assert.equal(res.status, 200, JSON.stringify(res.body));
-  const d = res.body.data;
-  assert.equal(d.durationMinutes, 45);
-  assert.equal(d.windowStart, null);
-  assert.equal(d.windowEnd, '2030-01-01T00:00:00.000Z');
-  assert.equal(d.instructions, 'Be honest.');
-  assert.equal(d.isOpen, true);
-  assert.ok(!Number.isNaN(Date.parse(d.serverNow)));
+  assert.equal((await agent.get('/api/candidate/exam/info')).status, 404);
+  assert.equal((await agent.get('/api/candidate/exam')).status, 404);
+});
+
+test('/exams lists the eligible applications of the account ordered by role name; ineligible ones are hidden; the detail is owned', async () => {
+  const role2 = await prisma.jobRole.create({ data: { name: 'Auditor' } });
+  await prisma.examSetting.create({ data: { jobRoleId: role2.id, durationMinutes: 30, instructions: 'Audit.', isOpen: false } });
+  const role3 = await prisma.jobRole.create({ data: { name: 'Zoologist' } });
+  const second = await createApplication(candidateId, { candidateCode: 'C-101', fullName: 'Asha Rao', jobRoleId: role2.id, locationExempt: true });
+  await createApplication(candidateId, { candidateCode: 'C-102', fullName: 'Asha Rao', jobRoleId: role3.id, eligible: false });
+  try {
+    const { agent } = await signIn();
+    const list = await agent.get('/api/candidate/exams');
+    assert.equal(list.status, 200, JSON.stringify(list.body));
+    assert.deepEqual(list.body.data.exams.map((e: { jobRole: { name: string } }) => e.jobRole.name), ['Analyst', 'Auditor']);
+    const analyst = list.body.data.exams[0];
+    assert.equal(analyst.durationMinutes, 45);
+    assert.equal(analyst.windowEnd, '2030-01-01T00:00:00.000Z');
+    assert.equal(analyst.instructions, 'Be honest.');
+    assert.equal(analyst.isOpen, true);
+    assert.equal(analyst.progress, 'NOT_STARTED');
+    assert.equal(analyst.attempt, null);
+    assert.ok(!Number.isNaN(Date.parse(list.body.data.serverNow)));
+    assert.equal((await agent.get('/api/candidate/me')).body.data.candidate.examCount, 2);
+
+    const one = await agent.get(`/api/candidate/exams/${second.id}`);
+    assert.equal(one.status, 200);
+    assert.equal(one.body.data.exam.candidateCode, 'C-101');
+    assert.equal(one.body.data.exam.locationExempt, true);
+
+    // Someone else's application, an ineligible one and a made-up id are all a 404.
+    const other = await prisma.candidate.findFirstOrThrow({ where: { candidateCode: 'C-003' } });
+    const hidden = await prisma.candidate.findFirstOrThrow({ where: { candidateCode: 'C-102' } });
+    for (const id of [other.id, hidden.id, crypto.randomUUID()]) {
+      const res = await agent.get(`/api/candidate/exams/${id}`);
+      assert.equal(res.status, 404, id);
+      assert.equal((await agent.get(`/api/candidate/exams/${id}/state`)).status, 404);
+      assert.equal((await agent.post(`/api/candidate/exams/${id}/start`).send({ location: { stage: 'EXAM_START', permission: 'DENIED' } })).status, 404);
+    }
+    assert.equal((await agent.get('/api/candidate/exams/not-a-uuid')).status, 400);
+    assert.equal((await request(app).get('/api/candidate/exams')).status, 401);
+  } finally {
+    await prisma.candidate.deleteMany({ where: { candidateCode: { in: ['C-101', 'C-102'] } } });
+  }
+});
+
+test('login by mobile and by email reach the same account, and LOGIN location is stored per eligible application', async () => {
+  const role2 = await prisma.jobRole.create({ data: { name: 'Banker' } });
+  await createApplication(candidateId, { candidateCode: 'C-201', fullName: 'Asha Rao', jobRoleId: role2.id });
+  try {
+    const byMobile = await signIn('9876543210');
+    assert.equal(byMobile.verify.body.data.candidate.id, candidateId);
+    await getRedis().flushdb();
+    const byEmail = await signIn();
+    assert.equal(byEmail.verify.body.data.candidate.id, candidateId);
+    assert.equal(byEmail.verify.body.data.candidate.examCount, 2);
+    await prisma.candidateLoginLog.deleteMany({ where: { candidate: { accountId: candidateId } } });
+    const loc = await byEmail.agent.post('/api/candidate/location').send({ stage: 'LOGIN', permission: 'GRANTED', latitude: 1, longitude: 2 });
+    assert.equal(loc.body.data.locationCaptured, true);
+    assert.equal(await prisma.candidateLoginLog.count({ where: { candidate: { accountId: candidateId }, stage: 'LOGIN' } }), 2);
+  } finally {
+    await prisma.candidateLoginLog.deleteMany({ where: { candidate: { accountId: candidateId } } });
+    await prisma.candidate.deleteMany({ where: { candidateCode: 'C-201' } });
+  }
 });
 
 test('a deactivated (ineligible) candidate loses access on the next request', async () => {
@@ -364,7 +419,7 @@ const REG = { email: REG_EMAIL, rollNumber: 'R-003', mobile: '9123456780' };
 const linkKeys = () => getRedis().keys('exam:otp:candidate_mobile_link:*');
 
 test('register-mobile: matching email + roll sends a code bound to (candidate, mobile); +91 and spaces are accepted', async () => {
-  await prisma.candidate.update({ where: { id: regId }, data: { mobile: null } });
+  await clearMobile(regId);
   const res = await request(app).post('/api/candidate/auth/register-mobile/request').send({ ...REG, mobile: '+91 91234 56780' });
   assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.deepEqual(res.body, { success: true, data: { sent: true } });
@@ -372,7 +427,7 @@ test('register-mobile: matching email + roll sends a code bound to (candidate, m
 });
 
 test('register-mobile: wrong roll, unknown email, a mobile already used and an invalid mobile send nothing', async () => {
-  await prisma.candidate.update({ where: { id: regId }, data: { mobile: null } });
+  await clearMobile(regId);
   for (const body of [
     { ...REG, rollNumber: 'R-999' },
     { ...REG, email: 'ghost@int.test' },
@@ -387,7 +442,7 @@ test('register-mobile: wrong roll, unknown email, a mobile already used and an i
 });
 
 test('register-mobile: verify links the mobile, signs in, logs it; the mobile then works for login and cannot be re-linked', async () => {
-  await prisma.candidate.update({ where: { id: regId }, data: { mobile: null } });
+  await clearMobile(regId);
   const agent = request.agent(app);
   assert.equal((await agent.post('/api/candidate/auth/register-mobile/request').send(REG)).status, 200);
   const wrongMobile = await agent.post('/api/candidate/auth/register-mobile/verify').send({ ...REG, mobile: '9123456781', code: '123456' });
@@ -401,6 +456,7 @@ test('register-mobile: verify links the mobile, signs in, logs it; the mobile th
 
   const row = await prisma.candidate.findUniqueOrThrow({ where: { id: regId } });
   assert.equal(row.mobile, '9123456780');
+  assert.equal((await prisma.candidateAccount.findUniqueOrThrow({ where: { id: regId } })).mobile, '9123456780');
   const ev = await prisma.activityLog.findFirst({ where: { candidateId: regId, eventType: 'MOBILE_SELF_REGISTERED' } });
   assert.ok(ev);
   const audit = await prisma.adminAuditLog.findFirst({ where: { entityId: regId, action: 'CANDIDATE_MOBILE_SELF_REGISTERED' } });
@@ -418,7 +474,7 @@ test('register-mobile: verify links the mobile, signs in, logs it; the mobile th
 });
 
 test('register-mobile/request is limited to 5 per email per window', async () => {
-  await prisma.candidate.update({ where: { id: regId }, data: { mobile: null } });
+  await clearMobile(regId);
   const statuses: number[] = [];
   for (let i = 0; i < 6; i++) {
     // Clear the 60 s per-code cooldown so only the per-email limiter can refuse.

@@ -1,6 +1,8 @@
 // modules/exam/exam.routes.ts
-// /api/candidate/exam: start, state, resume, autosave, events and submit. All
-// run as the signed-in candidate. The answer beacon and the events endpoint are
+// /api/candidate/exams: the candidate's exam list, and per application
+// (/:applicationId) detail, start, state, resume, autosave, events and submit.
+// All run as the signed-in account; resolveApplication 404s an application that
+// is not the account's own or not eligible. The answer beacon and the events endpoint are
 // what the page sends on pagehide, so they also accept the refresh cookie when
 // the access cookie has expired (authenticateCandidateBeacon). The beacon gets
 // its own text/plain parser (sendBeacon cannot send application/json) with the
@@ -12,34 +14,50 @@ import { authenticateCandidate } from '../../shared/middleware/authenticateCandi
 import { authenticateCandidateBeacon, type BeaconAuthDeps } from '../../shared/middleware/authenticateCandidateBeacon.js';
 import { candidateExamWriteLimiter } from '../../shared/middleware/rateLimit.js';
 import { sameOriginOnly } from '../../shared/middleware/sameOriginOnly.js';
+import { resolveApplication } from '../../shared/middleware/resolveApplication.js';
 import { validate } from '../../shared/middleware/validate.js';
 import { createExamController } from './exam.controller.js';
-import { AttemptQuestionParamsSchema, ExamEventsSchema, ExamStartSchema, SaveAnswerSchema, SubmitExamSchema } from './exam.schemas.js';
+import { ApplicationParamsSchema, ApplicationQuestionParamsSchema, ExamEventsSchema, ExamStartSchema, SaveAnswerSchema, SubmitExamSchema } from './exam.schemas.js';
 import type { ExamService } from './exam.service.js';
 
 const BODY_LIMIT = '256kb';
 
-export function createExamRouter(service: ExamService, auth: BeaconAuthDeps): Router {
+export function createExamRouter(service: ExamService, auth: BeaconAuthDeps, owns: (accountId: string, applicationId: string) => Promise<boolean>): Router {
   const c = createExamController(service);
   const strict = authenticateCandidate(auth.isActive);
   const unload = authenticateCandidateBeacon(auth);
-  const params = validate({ params: AttemptQuestionParamsSchema });
+  const appParams = validate({ params: ApplicationParamsSchema });
+  const ownApp = resolveApplication(owns);
+  const answerParams = validate({ params: ApplicationQuestionParamsSchema });
   const r = Router();
-  r.post('/start', strict, validate({ body: ExamStartSchema }), c.start);
-  r.get('/', strict, c.state);
-  r.get('/summary', strict, c.summary);
-  r.post('/resume', strict, c.resume);
-  r.put('/answers/:attemptQuestionId', strict, candidateExamWriteLimiter, params, validate({ body: SaveAnswerSchema }), c.save);
+  r.get('/', strict, c.list);
+  r.get('/:applicationId', strict, appParams, ownApp, c.detail);
+  r.post('/:applicationId/start', strict, appParams, ownApp, validate({ body: ExamStartSchema }), c.start);
+  r.get('/:applicationId/state', strict, appParams, ownApp, c.state);
+  r.get('/:applicationId/summary', strict, appParams, ownApp, c.summary);
+  r.post('/:applicationId/resume', strict, appParams, ownApp, c.resume);
+  r.put(
+    '/:applicationId/answers/:attemptQuestionId',
+    strict,
+    appParams,
+    ownApp,
+    candidateExamWriteLimiter,
+    answerParams,
+    validate({ body: SaveAnswerSchema }),
+    c.save,
+  );
   r.post(
-    '/answers/:attemptQuestionId/beacon',
+    '/:applicationId/answers/:attemptQuestionId/beacon',
     sameOriginOnly,
     express.text({ type: 'text/plain', limit: BODY_LIMIT }),
     unload,
+    appParams,
+    ownApp,
     candidateExamWriteLimiter,
-    params,
+    answerParams,
     c.beacon,
   );
-  r.post('/events', sameOriginOnly, unload, candidateExamWriteLimiter, validate({ body: ExamEventsSchema }), c.events);
-  r.post('/submit', strict, validate({ body: SubmitExamSchema }), c.submit);
+  r.post('/:applicationId/events', sameOriginOnly, unload, appParams, ownApp, candidateExamWriteLimiter, validate({ body: ExamEventsSchema }), c.events);
+  r.post('/:applicationId/submit', strict, appParams, ownApp, validate({ body: SubmitExamSchema }), c.submit);
   return r;
 }

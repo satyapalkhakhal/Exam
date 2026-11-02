@@ -1,7 +1,7 @@
 // shared/middleware/authenticateCandidate.ts
-// Candidate routes: verifies the candidate access cookie (candidate secret +
+// Candidate routes (the token subject is a candidate account id): verifies the candidate access cookie (candidate secret +
 // audience, so an admin token is rejected), requires the login-session family
-// it carries, and re-checks that the candidate is still eligible so a
+// it carries, and re-checks that the account still has an eligible application so a
 // deactivation takes effect on the next request. A token issued before
 // revokeAllSessions('candidate', id) is refused, and so is one whose login
 // family was revoked (logout, refresh-token reuse). Sets
@@ -21,7 +21,7 @@ declare global {
   }
 }
 
-export function authenticateCandidate(isActive: (candidateId: string) => Promise<boolean>) {
+export function authenticateCandidate(isActive: (accountId: string) => Promise<boolean>) {
   return (req: Request, _res: Response, next: NextFunction): void => {
     const token: unknown = req.cookies?.[COOKIES.candidate.access];
     if (typeof token !== 'string' || token === '') {

@@ -56,3 +56,8 @@ test('log scrub payloads clear IP and device data, using one IP placeholder for 
   assert.equal(LOG_SCRUB.loginLog.latitude, null);
   assert.equal(LOG_SCRUB.loginLog.longitude, null);
 });
+
+test('anonymizeAccount clears the sign-in identity of a purged account', async () => {
+  const { anonymizeAccount } = await import('../src/scripts/purge-candidates.js');
+  assert.deepEqual(anonymizeAccount('acc-1'), { email: 'anon+acc-1@invalid', mobile: null });
+});
