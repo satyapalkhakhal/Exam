@@ -3,9 +3,11 @@
 // finished candidate created before a cut-off date, and keeps what the
 // shortlisting record needs (candidateCode, status, answers and marks). A candidate
 // account (the sign-in identity shared by a person's applications) is anonymised
-// once every one of its applications has been. Login
-// logs lose their coordinates, IP and user agent, and activity logs their IP and
-// user agent (rows stay; the purge is the only writer besides the app's inserts). It is a dry run unless
+// once every one of its applications has been. Login logs lose their
+// coordinates, IP and user agent, activity logs their IP and user agent, and
+// email dispatches (docs/email-templates.md) their address and rendered
+// content (rows stay; the purge is the only writer besides the app's inserts).
+// It is a dry run unless
 // --yes is passed, and it writes one audit row when it applies.
 // Usage: pnpm --filter @exam/api purge-candidates --before 2027-04-30 [--yes]
 
@@ -57,6 +59,10 @@ export const LOG_SCRUB = {
   activityLog: { ip: IP_PLACEHOLDER, userAgent: null },
 } as const;
 
+/** Update payload for a purged candidate's email dispatches: address and rendered content go, the record stays. */
+export const EMAIL_DISPATCH_SCRUB = (candidateId: string) =>
+  ({ toEmail: `anon+${candidateId}@invalid`, subject: 'Anonymised', html: '', text: '' }) as const;
+
 export function parsePurgeArgs(argv: string[]): { before: Date; apply: boolean } {
   const i = argv.indexOf('--before');
   const raw = i >= 0 ? argv[i + 1] : undefined;
@@ -91,6 +97,10 @@ async function main(): Promise<void> {
       prisma.activityLog.updateMany({
         where: { candidateId: row.id },
         data: LOG_SCRUB.activityLog,
+      }),
+      prisma.emailDispatch.updateMany({
+        where: { candidateId: row.id },
+        data: EMAIL_DISPATCH_SCRUB(row.id),
       }),
     ]);
   }

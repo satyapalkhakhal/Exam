@@ -36,6 +36,17 @@ enum AdminRole {
   EVALUATOR
 }
 
+enum EmailTemplateKey {
+  SUBMISSION_RECEIVED
+  SHORTLISTED
+}
+
+enum EmailDispatchStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
 enum ImportKind {
   CANDIDATES
   QUESTIONS
@@ -102,6 +113,7 @@ model AdminUser {
   statusHistory        CandidateStatusHistory[]
   systemConfigsUpdated SystemConfig[]
   auditLogs            AdminAuditLog[]
+  emailDispatches      EmailDispatch[]
 
   @@map("admin_users")
 }
@@ -228,6 +240,7 @@ model Candidate {
   activityLogs ActivityLog[]
   loginLogs    CandidateLoginLog[]
   history      CandidateStatusHistory[]
+  emails       EmailDispatch[]
 
   @@unique([accountId, jobRoleId])
   @@index([jobRoleId, status])
@@ -428,6 +441,36 @@ model SystemConfig {
 
   @@index([updatedById])
   @@map("system_configs")
+}
+
+// One row per manual candidate email (docs/email-templates.md). The rendered
+// subject/html/text are stored so the record shows exactly what was sent; the
+// purge script anonymises them with the candidate.
+model EmailDispatch {
+  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  batchId     String              @map("batch_id") @db.Uuid
+  template    EmailTemplateKey
+  candidateId String              @map("candidate_id") @db.Uuid
+  toEmail     String              @map("to_email")
+  subject     String
+  html        String
+  text        String
+  status      EmailDispatchStatus @default(QUEUED)
+  error       String?
+  attempts    Int                 @default(0)
+  sentById    String              @map("sent_by_id") @db.Uuid
+  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  sentAt      DateTime?           @map("sent_at") @db.Timestamptz(6)
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+  sentBy    AdminUser @relation(fields: [sentById], references: [id], onDelete: Restrict)
+
+  @@index([candidateId, template])
+  @@index([batchId])
+  @@index([status])
+  @@index([sentById])
+  @@index([createdAt])
+  @@map("email_dispatches")
 }
 
 model AdminAuditLog {

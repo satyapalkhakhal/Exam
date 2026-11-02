@@ -22,6 +22,8 @@ import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { SendEmailDialog } from '@/components/admin/SendEmailDialog';
+import { EmailDispatchTable } from '@/components/admin/EmailDispatchTable';
 import { useRoles } from '@/api/admin/roles';
 import {
   useCandidate,
@@ -214,6 +216,7 @@ export default function CandidateDetail() {
   const eligibility = useSetEligibility(id);
   const exempt = useSetLocationExempt(id);
   const reset = useResetAttempt(id);
+  const [emailOpen, setEmailOpen] = useState(false);
   const [exemptOpen, setExemptOpen] = useState(false);
   const [resetStep, setResetStep] = useState<'closed' | 'reason' | 'confirm'>('closed');
   const [resetReason, setResetReason] = useState('');
@@ -248,6 +251,7 @@ export default function CandidateDetail() {
             <Switch checked={c.locationExempt} disabled={exempt.isPending} onCheckedChange={() => setExemptOpen(true)} aria-label="Exempt from location" />
             Location exempt
           </label>
+          <Button variant="outline" size="sm" onClick={() => setEmailOpen(true)}>Send email</Button>
           <Button variant="destructive" size="sm" onClick={() => setResetStep('reason')}>Reset attempt</Button>
         </div>
       </div>
@@ -277,6 +281,7 @@ export default function CandidateDetail() {
           <TabsTrigger value="activity">Activity</TabsTrigger>
           <TabsTrigger value="flags">Flags ({flagTotal})</TabsTrigger>
           <TabsTrigger value="history">History</TabsTrigger>
+          <TabsTrigger value="emails">Emails</TabsTrigger>
         </TabsList>
 
         <TabsContent value="profile"><ProfileForm c={c} /></TabsContent>
@@ -368,8 +373,15 @@ export default function CandidateDetail() {
             </Table>
           </div>
         </TabsContent>
+        <TabsContent value="emails"><EmailDispatchTable candidateId={c.id} /></TabsContent>
       </Tabs>
 
+      <SendEmailDialog
+        open={emailOpen}
+        candidateIds={[c.id]}
+        defaultTemplate={c.status === 'SHORTLISTED' ? 'SHORTLISTED' : 'SUBMISSION_RECEIVED'}
+        onClose={() => setEmailOpen(false)}
+      />
       <ReasonDialog
         open={exemptOpen}
         title={c.locationExempt ? 'Remove location exemption' : 'Exempt from location'}

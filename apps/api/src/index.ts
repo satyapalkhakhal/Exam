@@ -1,5 +1,5 @@
 // index.ts
-// Process entry: starts the HTTP server, the auto-submit worker and the minute
+// Process entry: starts the HTTP server, the auto-submit and email workers and the minute
 // sweep (design §7.6), and shuts them down cleanly on SIGTERM/SIGINT.
 
 import { app } from './app.js';
@@ -9,6 +9,8 @@ import { STATIC_OTP_BANNER, otpPosture } from './infrastructure/config/bootCheck
 import { getEmailConfig, getSmsConfig, isChannelReady } from './modules/messaging/index.js';
 import { closeAutoSubmitQueue } from './infrastructure/queue/autoSubmit.queue.js';
 import { startAutoSubmitWorker } from './infrastructure/queue/autoSubmit.worker.js';
+import { closeEmailQueue } from './infrastructure/queue/email.queue.js';
+import { startEmailWorker } from './infrastructure/queue/email.worker.js';
 import { startSweep } from './infrastructure/queue/sweep.js';
 
 const server = app.listen(env.PORT, () => {
@@ -33,13 +35,14 @@ Promise.all([getSmsConfig(), getEmailConfig()])
   });
 
 const worker = startAutoSubmitWorker();
+const emailWorker = startEmailWorker();
 const sweep = startSweep();
 
 function shutdown(signal: string): void {
   logger.info('shutting down', { signal });
   clearInterval(sweep);
   server.close(() => {
-    Promise.allSettled([worker.close(), closeAutoSubmitQueue()]).finally(() => process.exit(0));
+    Promise.allSettled([worker.close(), emailWorker.close(), closeAutoSubmitQueue(), closeEmailQueue()]).finally(() => process.exit(0));
   });
   setTimeout(() => process.exit(1), 10_000).unref();
 }

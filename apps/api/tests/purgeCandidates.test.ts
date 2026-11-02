@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { anonymizeCandidate, parsePurgeArgs, LOG_SCRUB } from '../src/scripts/purge-candidates.js';
+import { anonymizeCandidate, parsePurgeArgs, LOG_SCRUB, EMAIL_DISPATCH_SCRUB } from '../src/scripts/purge-candidates.js';
 
 const row = {
   id: '6b1f0c52-1111-4222-8333-944455556666',
@@ -60,4 +60,12 @@ test('log scrub payloads clear IP and device data, using one IP placeholder for 
 test('anonymizeAccount clears the sign-in identity of a purged account', async () => {
   const { anonymizeAccount } = await import('../src/scripts/purge-candidates.js');
   assert.deepEqual(anonymizeAccount('acc-1'), { email: 'anon+acc-1@invalid', mobile: null });
+});
+
+test('EMAIL_DISPATCH_SCRUB removes the address and rendered content', () => {
+  const s = EMAIL_DISPATCH_SCRUB(row.id);
+  assert.equal(s.toEmail, `anon+${row.id}@invalid`);
+  assert.equal(s.html, '');
+  assert.equal(s.text, '');
+  assert.equal(s.subject, 'Anonymised');
 });

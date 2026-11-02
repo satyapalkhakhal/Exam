@@ -29,6 +29,7 @@ const CandidateDetail = lazy(() => import('@/pages/admin/CandidateDetail'));
 const Submissions = lazy(() => import('@/pages/admin/Submissions'));
 const Marking = lazy(() => import('@/pages/admin/Marking'));
 const Leaderboard = lazy(() => import('@/pages/admin/Leaderboard'));
+const EmailTemplates = lazy(() => import('@/pages/admin/EmailTemplates'));
 
 const SA = [AdminRole.SUPER_ADMIN] as const;
 const Fallback = <div className="p-8 text-sm text-muted-foreground" role="status">Loading…</div>;
@@ -61,6 +62,7 @@ export function App() {
               <Route path="/admin/questions" element={<Questions />} />
               <Route path="/admin/settings" element={<Roles />} />
               <Route path="/admin/leaderboard" element={<Leaderboard />} />
+              <Route path="/admin/email-templates" element={<EmailTemplates />} />
               <Route path="/admin/users" element={<AdminUsers />} />
               <Route path="/admin/integrations" element={<Integrations />} />
               <Route path="/admin/audit" element={<AuditLog />} />

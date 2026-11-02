@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { SendEmailDialog } from '@/components/admin/SendEmailDialog';
 import { ReasonDialog } from '@/components/admin/ReasonDialog';
 import { TableHeaderFilter, TableHeaderFilterText } from '@/components/ui/table-header-filter';
 import { matchesCandidateSearch } from '@/lib/candidateSearch';
@@ -24,6 +25,7 @@ export default function Leaderboard() {
   const board = useLeaderboard(jobRoleId);
   const decide = useDecision();
   const [target, setTarget] = useState<{ row: LeaderboardRow; decision: Decision } | null>(null);
+  const [emailRow, setEmailRow] = useState<LeaderboardRow | null>(null);
   const [search, setSearch] = useState('');
   // Filters the loaded board; ranks stay the real ranks.
   const rows = (board.data ?? []).filter((r) => matchesCandidateSearch(r, search));
@@ -89,6 +91,7 @@ export default function Leaderboard() {
                   <div className="flex gap-1.5">
                     <Button size="sm" variant="outline" disabled={r.status === 'SHORTLISTED'} onClick={() => setTarget({ row: r, decision: 'SHORTLISTED' })}>Shortlist</Button>
                     <Button size="sm" variant="outline" disabled={r.status === 'REJECTED'} onClick={() => setTarget({ row: r, decision: 'REJECTED' })}>Reject</Button>
+                    <Button size="sm" variant="outline" onClick={() => setEmailRow(r)}>Email</Button>
                   </div>
                 </TableCell>
               </TableRow>
@@ -96,6 +99,12 @@ export default function Leaderboard() {
           </TableBody>
         </Table>
       </div>
+      <SendEmailDialog
+        open={emailRow !== null}
+        candidateIds={emailRow ? [emailRow.candidateId] : []}
+        defaultTemplate={emailRow?.status === 'SHORTLISTED' ? 'SHORTLISTED' : 'SUBMISSION_RECEIVED'}
+        onClose={() => setEmailRow(null)}
+      />
       <ReasonDialog
         open={target !== null}
         onOpenChange={(o) => {

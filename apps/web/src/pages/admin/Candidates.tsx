@@ -9,6 +9,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react';
 import { ImportWizard } from '@/components/import/ImportWizard';
 import { AddCandidateDialog } from '@/components/admin/AddCandidateDialog';
+import { SendEmailDialog } from '@/components/admin/SendEmailDialog';
 import { BulkJobRoleDialog } from '@/components/admin/BulkJobRoleDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -54,6 +55,7 @@ export default function Candidates() {
   const [importing, setImporting] = useState(false);
   const [adding, setAdding] = useState(false);
   // Ticked candidates, kept across pages and filter changes so several pages can be moved together.
+  const [emailing, setEmailing] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [moving, setMoving] = useState(false);
   const roles = useRoles();
@@ -96,6 +98,7 @@ export default function Candidates() {
               <span className="text-sm text-muted-foreground">{selected.size} selected</span>
               <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}>Clear</Button>
               <Button variant="outline" onClick={() => setMoving(true)}>Change job role</Button>
+              <Button variant="outline" onClick={() => setEmailing(true)}>Send email</Button>
             </>
           )}
           <Button variant="outline" onClick={() => setAdding(true)}>Add candidate</Button>
@@ -200,6 +203,7 @@ export default function Candidates() {
         onClose={() => setMoving(false)}
         onDone={() => setSelected(new Set())}
       />
+      <SendEmailDialog open={emailing} candidateIds={[...selected]} onClose={() => setEmailing(false)} onDone={() => setSelected(new Set())} />
       <AddCandidateDialog
         open={adding}
         roles={roles.data ?? []}

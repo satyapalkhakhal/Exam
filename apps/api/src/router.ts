@@ -16,6 +16,7 @@ import { createEvaluationRouter, evaluation } from './modules/evaluation/index.j
 import { createResultsRouter, results } from './modules/results/index.js';
 import { audit, createAuditRouter } from './modules/audit/index.js';
 import { createIntegrationsRouter, createIntegrationsService, integrationsRepository } from './modules/integrations/index.js';
+import { createEmailTemplatesRouter, createEmailsRouter, emails } from './modules/emails/index.js';
 import { sendEmail, sendSms } from './modules/messaging/index.js';
 import { systemConfig } from './modules/systemConfig/index.js';
 import { authenticateAdmin } from './shared/middleware/authenticateAdmin.js';
@@ -37,6 +38,8 @@ router.use('/admin/auth', createAdminAuthRouter(adminAuthService));
 router.use('/admin/users', ...superAdminOnly, createAdminUsersRouter(adminUsersService));
 router.use('/admin/audit', ...superAdminOnly, createAuditRouter(audit));
 router.use('/admin/integrations', ...superAdminOnly, createIntegrationsRouter(integrationsService));
+router.use('/admin/email-templates', ...superAdminOnly, createEmailTemplatesRouter(emails));
+router.use('/admin/emails', ...superAdminOnly, createEmailsRouter(emails));
 router.use('/admin/roles', authenticateAdmin, createJobRolesRouter(jobRoles));
 router.use('/admin/roles', authenticateAdmin, createRoleQuestionsRouter(questions));
 router.use('/admin/questions', authenticateAdmin, createQuestionsRouter(questions));

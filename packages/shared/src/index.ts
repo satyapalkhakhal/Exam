@@ -11,3 +11,4 @@ export * from './schemas/candidates.js';
 export * from './schemas/exam.js';
 export * from './schemas/candidateExams.js';
 export * from './schemas/evaluation.js';
+export * from './schemas/emails.js';
