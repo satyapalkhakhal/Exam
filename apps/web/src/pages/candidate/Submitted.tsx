@@ -1,7 +1,8 @@
 // src/pages/candidate/Submitted.tsx
 // Why: the end of the candidate journey (design 7.6). A submission receipt the candidate can
-// print or keep: who, which job role, when, manual or auto-submitted, how many questions were
-// answered and the time taken. Still never marks, answers or results.
+// print or keep: who, which job profile, when it started and ended, manual or auto-submitted,
+// how many questions were answered, the time taken, and whether the result is awaiting or
+// declared. Still never marks, answers or the outcome itself.
 
 import { Navigate } from 'react-router';
 import { CheckCircle2, Printer } from 'lucide-react';

@@ -1,14 +1,24 @@
 // src/lib/submissionReceipt.ts
 // Why: the rows of the candidate's submission receipt (who, what, when, how many answered).
-// Pure so it is unit tested; deliberately has no place for marks or answers.
+// Pure so it is unit tested; deliberately has no place for marks, answers or the outcome itself:
+// the result row only says whether HR has decided, never what they decided.
 
 import type { ExamSummaryDto } from '@exam/shared';
 import { formatIst } from '@/lib/istTime';
 
 export interface ReceiptCandidate {
   fullName: string;
+  email: string;
   candidateCode: string;
   jobRole: { name: string };
+  status: string;
+}
+
+const DECIDED = new Set(['SHORTLISTED', 'REJECTED']);
+
+/** "Declared" once HR has shortlisted or rejected; the outcome is told to the candidate by HR, not here. */
+export function resultLabel(status: string): string {
+  return DECIDED.has(status) ? 'Declared — HR will contact you' : 'Awaiting';
 }
 
 /** "52 min 30 s", "1 h 5 min", "40 s"; "-" when either time is missing. */
@@ -27,11 +37,14 @@ export function receiptRows(c: ReceiptCandidate, s: ExamSummaryDto): { label: st
   const auto = s.submitType === 'AUTO' || s.status === 'AUTO_SUBMITTED';
   return [
     { label: 'Name', value: c.fullName },
-    { label: 'Candidate code', value: c.candidateCode },
-    { label: 'Job role', value: c.jobRole.name },
+    { label: 'Email', value: c.email },
+    { label: 'Exam code', value: c.candidateCode },
+    { label: 'Job profile', value: c.jobRole.name },
+    { label: 'Started at', value: formatIst(s.startedAt) },
     { label: 'Submitted at', value: formatIst(s.submittedAt) },
+    { label: 'Time taken', value: timeTaken(s.startedAt, s.submittedAt) },
     { label: 'Submission', value: auto ? 'Auto-submitted when time was up' : 'Submitted by you' },
     { label: 'Questions', value: `${s.answeredCount} of ${s.questionCount} answered` },
-    { label: 'Time taken', value: timeTaken(s.startedAt, s.submittedAt) },
+    { label: 'Result', value: resultLabel(c.status) },
   ];
 }
