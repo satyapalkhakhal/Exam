@@ -277,6 +277,7 @@ export const examRepository = {
         id: true,
         candidateCode: true,
         status: true,
+        result: true,
         locationExempt: true,
         jobRole: { select: { id: true, name: true } },
         attempts: {
@@ -301,6 +302,7 @@ export const examRepository = {
         id: r.id,
         candidateCode: r.candidateCode,
         status: r.status,
+        result: r.result,
         locationExempt: r.locationExempt,
         jobRole: r.jobRole,
         attempt: a ? { ...a, ...(byAttempt.get(a.id) ?? { questionCount: 0, answeredCount: 0 }) } : null,

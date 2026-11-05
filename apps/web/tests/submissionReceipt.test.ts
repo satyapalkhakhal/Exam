@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { receiptRows, resultLabel, timeTaken } from '../src/lib/submissionReceipt.js';
+import { receiptRows, selectionLabel, timeTaken } from '../src/lib/submissionReceipt.js';
 
 const candidate = {
   fullName: 'Aswajith K K',
   email: 'k.aswajith@iitg.ac.in',
   candidateCode: 'ARH-EX-000123',
   jobRole: { name: 'AI & ML Engineer' },
-  status: 'SUBMITTED',
+  selectedForNextRound: 'AWAITED' as const,
 };
 const summary = {
   status: 'SUBMITTED' as const,
@@ -29,14 +29,17 @@ test('receipt rows for a manual submission', () => {
   assert.equal(rows['Time taken'], '52 min 30 s');
   assert.match(rows['Started at']!, /01 Nov 2026/);
   assert.match(rows['Submitted at']!, /01 Nov 2026/);
-  assert.equal(rows['Result'], 'Awaiting');
+  assert.equal(rows['Selected for next round'], 'Result awaited');
+  assert.equal(rows['Result'], undefined, 'the old Result row is replaced');
 });
 
-test('result is awaiting until HR decides, then declared without revealing the outcome', () => {
-  for (const s of ['SUBMITTED', 'AUTO_SUBMITTED', 'EVALUATED']) assert.equal(resultLabel(s), 'Awaiting');
-  for (const s of ['SHORTLISTED', 'REJECTED']) assert.equal(resultLabel(s), 'Declared — HR will contact you');
-  const rows = receiptRows({ ...candidate, status: 'REJECTED' }, summary).map((r) => r.value).join(' ');
-  assert.doesNotMatch(rows, /reject|shortlist|selected/i);
+test('selected for next round: Yes when shortlisted, No when rejected, Result awaited otherwise', () => {
+  assert.equal(selectionLabel('YES'), 'Yes');
+  assert.equal(selectionLabel('NO'), 'No');
+  assert.equal(selectionLabel('AWAITED'), 'Result awaited');
+  const row = (v: 'YES' | 'NO' | 'AWAITED') =>
+    receiptRows({ ...candidate, selectedForNextRound: v }, summary).find((r) => r.label === 'Selected for next round')?.value;
+  assert.deepEqual([row('YES'), row('NO'), row('AWAITED')], ['Yes', 'No', 'Result awaited']);
 });
 
 test('auto-submitted wording and missing times', () => {

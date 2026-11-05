@@ -485,3 +485,21 @@ test('register-mobile/request is limited to 5 per email per window', async () =>
   }
   assert.deepEqual(statuses, [200, 200, 200, 200, 200, 429]);
 });
+
+test('/exams tells the candidate whether they were selected for the next round: YES, NO or AWAITED', async () => {
+  const email = 'selection@int.test';
+  const c = await createCandidate({ candidateCode: 'SEL-1', fullName: 'Sel Person', email, jobRoleId: roleId, status: 'EVALUATED' });
+  const { agent } = await signIn(email);
+  const selection = async () => {
+    const r = await agent.get('/api/candidate/exams');
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    return r.body.data.exams.map((e: { selectedForNextRound: string }) => e.selectedForNextRound);
+  };
+  assert.deepEqual(await selection(), ['AWAITED']);
+  await prisma.candidate.update({ where: { id: c.id }, data: { result: 'SHORTLISTED' } });
+  assert.deepEqual(await selection(), ['YES']);
+  await prisma.candidate.update({ where: { id: c.id }, data: { result: 'REJECTED' } });
+  assert.deepEqual(await selection(), ['NO']);
+  const detail = await agent.get(`/api/candidate/exams/${c.id}`);
+  assert.equal(detail.body.data.exam.selectedForNextRound, 'NO');
+});

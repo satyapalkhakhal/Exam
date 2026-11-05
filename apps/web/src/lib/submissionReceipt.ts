@@ -1,9 +1,8 @@
 // src/lib/submissionReceipt.ts
-// Why: the rows of the candidate's submission receipt (who, what, when, how many answered).
-// Pure so it is unit tested; deliberately has no place for marks, answers or the outcome itself:
-// the result row only says whether HR has decided, never what they decided.
+// Why: the rows of the candidate's submission receipt (who, what, when, how many answered, and
+// whether HR selected them for the next round). Pure so it is unit tested; never marks or answers.
 
-import type { ExamSummaryDto } from '@exam/shared';
+import type { CandidateSelection, ExamSummaryDto } from '@exam/shared';
 import { formatIst } from '@/lib/istTime';
 
 export interface ReceiptCandidate {
@@ -11,14 +10,14 @@ export interface ReceiptCandidate {
   email: string;
   candidateCode: string;
   jobRole: { name: string };
-  status: string;
+  selectedForNextRound: CandidateSelection;
 }
 
-const DECIDED = new Set(['SHORTLISTED', 'REJECTED']);
+const SELECTION_LABEL: Record<CandidateSelection, string> = { YES: 'Yes', NO: 'No', AWAITED: 'Result awaited' };
 
-/** "Declared" once HR has shortlisted or rejected; the outcome is told to the candidate by HR, not here. */
-export function resultLabel(status: string): string {
-  return DECIDED.has(status) ? 'Declared — HR will contact you' : 'Awaiting';
+/** "Yes" once shortlisted, "No" once rejected, "Result awaited" until HR decides. */
+export function selectionLabel(s: CandidateSelection): string {
+  return SELECTION_LABEL[s];
 }
 
 /** "52 min 30 s", "1 h 5 min", "40 s"; "-" when either time is missing. */
@@ -45,6 +44,6 @@ export function receiptRows(c: ReceiptCandidate, s: ExamSummaryDto): { label: st
     { label: 'Time taken', value: timeTaken(s.startedAt, s.submittedAt) },
     { label: 'Submission', value: auto ? 'Auto-submitted when time was up' : 'Submitted by you' },
     { label: 'Questions', value: `${s.answeredCount} of ${s.questionCount} answered` },
-    { label: 'Result', value: resultLabel(c.status) },
+    { label: 'Selected for next round', value: selectionLabel(c.selectedForNextRound) },
   ];
 }

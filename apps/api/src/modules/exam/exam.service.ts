@@ -423,6 +423,7 @@ export function createExamService(deps: ExamServiceDeps) {
         jobRole: a.jobRole,
         progress: a.status === 'NOT_STARTED' ? 'NOT_STARTED' : a.status === 'IN_PROGRESS' ? 'IN_PROGRESS' : SUBMITTED_LIKE.has(a.status) ? 'SUBMITTED' : 'NOT_STARTED',
         locationExempt: a.locationExempt,
+        selectedForNextRound: a.result === 'SHORTLISTED' ? 'YES' : a.result === 'REJECTED' ? 'NO' : 'AWAITED',
         durationMinutes: s?.durationMinutes ?? 60,
         windowStart: s?.windowStart?.toISOString() ?? null,
         windowEnd: s?.windowEnd?.toISOString() ?? null,

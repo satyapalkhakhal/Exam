@@ -8,6 +8,7 @@ const mk = (id: string, over: Partial<CandidateExamDto> = {}): CandidateExamDto 
   candidateCode: `C-${id}`,
   jobRole: { id: `r-${id}`, name: `Role ${id}` },
   progress: 'NOT_STARTED',
+  selectedForNextRound: 'AWAITED',
   locationExempt: false,
   durationMinutes: 60,
   windowStart: null,

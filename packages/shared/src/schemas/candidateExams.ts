@@ -11,11 +11,13 @@ export const ApplicationParamsSchema = z.object({ applicationId: z.string().uuid
 export const ApplicationQuestionParamsSchema = ApplicationParamsSchema.extend({ attemptQuestionId: z.string().uuid() });
 
 /**
- * What the candidate is told about one application. Admin decisions
- * (EVALUATED / SHORTLISTED / REJECTED) are never exposed: all of them read as
- * SUBMITTED here.
+ * What the candidate is told about one application's exam: EVALUATED reads as
+ * SUBMITTED here (marks are never exposed).
  */
 export type CandidateExamProgress = 'NOT_STARTED' | 'IN_PROGRESS' | 'SUBMITTED';
+
+/** HR's outcome as the candidate sees it (user decision 2026-11-05): shortlisted YES, rejected NO, no decision yet AWAITED. */
+export type CandidateSelection = 'YES' | 'NO' | 'AWAITED';
 
 export interface CandidateExamAttemptDto {
   attemptId: string;
@@ -34,6 +36,7 @@ export interface CandidateExamDto {
   candidateCode: string;
   jobRole: { id: string; name: string };
   progress: CandidateExamProgress;
+  selectedForNextRound: CandidateSelection;
   locationExempt: boolean;
   durationMinutes: number;
   windowStart: string | null;

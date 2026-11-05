@@ -43,7 +43,7 @@ export default function CandidateSubmitted() {
           {candidate && exam && summary.data && (
             <section aria-label="Submission receipt" className="rounded-lg border border-border bg-card p-4 text-left">
               <dl className="divide-y divide-border text-sm">
-                {receiptRows({ fullName: candidate.fullName, email: candidate.email, candidateCode: exam.candidateCode, jobRole: exam.jobRole, status: exam.progress }, summary.data).map((r) => (
+                {receiptRows({ fullName: candidate.fullName, email: candidate.email, candidateCode: exam.candidateCode, jobRole: exam.jobRole, selectedForNextRound: exam.selectedForNextRound }, summary.data).map((r) => (
                   <div key={r.label} className="flex justify-between gap-4 py-2">
                     <dt className="text-muted-foreground">{r.label}</dt>
                     <dd className="text-right font-medium text-foreground">{r.value}</dd>
