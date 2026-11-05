@@ -139,6 +139,13 @@ export function fetchMatchingCandidateIds(f: CandidateFilters): Promise<Candidat
   return apiFetch<CandidateMatchingIdsDto>('admin', `/candidates/ids?${candidateQuery(f).toString()}`);
 }
 
+/** The full email and mobile of one candidate (the "Show" button). The API audits every call. */
+export function useRevealContact(id: string) {
+  return useMutation({
+    mutationFn: () => apiFetch<{ email: string; mobile: string | null }>('admin', `/candidates/${id}/contact`),
+  });
+}
+
 export function useCandidate(id: string, activityPage: number) {
   return useQuery({
     queryKey: ['admin', 'candidates', 'detail', id, activityPage],

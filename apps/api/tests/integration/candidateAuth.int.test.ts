@@ -18,6 +18,7 @@ import {
 } from '../../src/shared/middleware/rateLimit.js';
 
 const EMAIL = 'cand@int.test';
+const MASKED_EMAIL = 'c****d@int.test';
 let app: Express;
 let candidateId = '';
 let roleId = '';
@@ -110,7 +111,7 @@ test('verify with 123456 returns CandidateSelf, sets cand cookies (httpOnly, Str
     candidate: {
       id: candidateId,
       fullName: 'Asha Rao',
-      email: EMAIL,
+      email: MASKED_EMAIL,
       locationCaptured: false,
       locationExempt: false,
       examCount: 1,

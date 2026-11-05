@@ -9,7 +9,7 @@ import { Link, useParams } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Eye } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
@@ -29,6 +29,7 @@ import { useRoles } from '@/api/admin/roles';
 import {
   useCandidate,
   useEditCandidate,
+  useRevealContact,
   useResetAttempt,
   useSetEligibility,
   useSetLocationExempt,
@@ -39,6 +40,7 @@ import {
 import { formatIst } from '@/lib/istTime';
 import { templateForResult } from '@/lib/emailTemplates';
 import { historyChangeText } from '@/lib/historyChange';
+import { contactPatch } from '@/lib/contactPatch';
 import { statusText } from './Candidates';
 
 /** Activity metadata is arbitrary JSON; never hand an object to React as a child. */
@@ -81,6 +83,8 @@ const profileSchema = z.object({
   jobRoleId: z.string().min(1),
 });
 type PValues = z.infer<typeof profileSchema>;
+// While email and mobile are still masked they are read-only and never sent, so they are not validated.
+const maskedProfileSchema = profileSchema.extend({ email: z.string(), mobile: z.string() });
 
 const num = (v: string) => (v === '' ? null : Number(v));
 const txt = (v: string) => (v === '' ? null : v);
@@ -88,9 +92,11 @@ const txt = (v: string) => (v === '' ? null : v);
 function ProfileForm({ c }: { c: CandidateDetailProfile }) {
   const roles = useRoles();
   const edit = useEditCandidate(c.id);
+  const reveal = useRevealContact(c.id);
+  const revealed = reveal.data !== undefined;
   const [saved, setSaved] = useState(false);
-  const { register, handleSubmit, formState: { errors, isDirty } } = useForm<PValues>({
-    resolver: zodResolver(profileSchema),
+  const { register, handleSubmit, setValue, formState: { errors, isDirty } } = useForm<PValues>({
+    resolver: zodResolver(revealed ? profileSchema : maskedProfileSchema),
     values: {
       fullName: c.fullName,
       email: c.email,
@@ -119,8 +125,7 @@ function ProfileForm({ c }: { c: CandidateDetailProfile }) {
         setSaved(false);
         const body: CandidateEdit = {
           fullName: v.fullName,
-          email: v.email.toLowerCase(),
-          mobile: txt(v.mobile),
+          ...contactPatch(revealed, v),
           rollNumber: txt(v.rollNumber),
           xPercentage: num(v.xPercentage),
           xiiPercentage: num(v.xiiPercentage),
@@ -130,13 +135,49 @@ function ProfileForm({ c }: { c: CandidateDetailProfile }) {
           // Only sent when it changed: the server rejects any role change after the exam started.
           ...(v.jobRoleId !== c.jobRoleId ? { jobRoleId: v.jobRoleId } : {}),
         };
-        edit.mutate(body, { onSuccess: () => setSaved(true) });
+        edit.mutate(body, {
+          onSuccess: () => {
+            setSaved(true);
+            // The reloaded profile is masked again; editing email or mobile needs another Show.
+            reveal.reset();
+          },
+        });
       })}
     >
       <div className="grid gap-3 sm:grid-cols-2">
         {field('fullName', 'Name')}
-        {field('email', 'Email', 'email')}
-        {field('mobile', 'Mobile')}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <Label htmlFor="cd-email">Email</Label>
+            {!revealed && (
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                className="h-auto p-0"
+                disabled={reveal.isPending}
+                onClick={() =>
+                  reveal.mutate(undefined, {
+                    onSuccess: (full) => {
+                      setValue('email', full.email);
+                      setValue('mobile', full.mobile ?? '');
+                    },
+                  })
+                }
+              >
+                <Eye className="mr-1 h-3.5 w-3.5" />
+                {reveal.isPending ? 'Loading…' : 'Show email & mobile'}
+              </Button>
+            )}
+          </div>
+          <Input id="cd-email" type={revealed ? 'email' : 'text'} readOnly={!revealed} error={errors.email?.message} {...register('email')} />
+          {reveal.error && <p role="alert" className="text-xs text-destructive">{reveal.error.message}</p>}
+          {!revealed && <p className="text-xs text-muted-foreground">Masked. Click Show to see or edit them; this is logged.</p>}
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="cd-mobile">Mobile</Label>
+          <Input id="cd-mobile" readOnly={!revealed} error={errors.mobile?.message} {...register('mobile')} />
+        </div>
         {field('rollNumber', 'Roll number')}
         {field('xPercentage', 'X percentage', 'number')}
         {field('xiiPercentage', 'XII percentage', 'number')}

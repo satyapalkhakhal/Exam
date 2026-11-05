@@ -2,6 +2,7 @@
 // the role-change guard, eligibility session revocation and attempt reset.
 
 import { test, before, after } from 'node:test';
+import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import bcrypt from 'bcrypt';
 import request from 'supertest';
@@ -162,8 +163,9 @@ test('edit lower-cases email; a duplicate email is 409; role change allowed only
   const bina = await prisma.candidate.findFirstOrThrow({ where: { email: 'bina@iitg.ac.in' } });
   const e = await sa.patch(`/api/admin/candidates/${bina.id}`).send({ email: 'Bina.R@iitg.ac.in', mobile: '+91 98765 43210' });
   assert.equal(e.status, 200, JSON.stringify(e.body));
-  assert.equal(e.body.data.email, 'bina.r@iitg.ac.in');
-  assert.equal(e.body.data.mobile, '9876543210');
+  assert.equal(e.body.data.email, 'b****r@iitg.ac.in', 'responses are masked');
+  const saved = await prisma.candidate.findUniqueOrThrow({ where: { id: bina.id } });
+  assert.deepEqual({ email: saved.email, mobile: saved.mobile }, { email: 'bina.r@iitg.ac.in', mobile: '9876543210' });
   assert.equal((await sa.patch(`/api/admin/candidates/${bina.id}`).send({ email: 'chandan@iitg.ac.in' })).status, 409);
 
   assert.equal((await sa.patch(`/api/admin/candidates/${bina.id}`).send({ jobRoleId: role2Id })).status, 200);
@@ -246,8 +248,10 @@ test('create one candidate by hand: code minted, email lower-cased, mobile norma
   assert.equal(res.status, 201, JSON.stringify(res.body));
   const c = res.body.data;
   assert.match(c.candidateCode, /^ARH-EX-\d{6}$/);
-  assert.equal(c.email, 'dipak.rout@cands.test');
-  assert.equal(c.mobile, '9004541335');
+  assert.equal(c.email, 'd****t@cands.test');
+  assert.equal(c.mobile, '90******35');
+  const stored = await prisma.candidate.findUniqueOrThrow({ where: { id: c.id } });
+  assert.deepEqual({ email: stored.email, mobile: stored.mobile }, { email: 'dipak.rout@cands.test', mobile: '9004541335' });
   assert.equal(c.status, 'NOT_STARTED');
   assert.equal(c.majorCpi, null);
   const audit = await prisma.adminAuditLog.findFirst({ where: { entityId: c.id, action: 'CANDIDATE_CREATED' } });
@@ -411,7 +415,7 @@ test('list search also matches mobile', async () => {
   await prisma.candidate.updateMany({ where: { email: 'srch1@iitg.ac.in' }, data: { mobile: '9812345670' } });
   const res = await sa.get('/api/admin/candidates?search=98123456');
   assert.equal(res.status, 200);
-  assert.deepEqual(res.body.data.items.map((c: { email: string }) => c.email), ['srch1@iitg.ac.in']);
+  assert.deepEqual(res.body.data.items.map((c: { email: string }) => c.email), ['s****1@iitg.ac.in']);
 });
 
 // --- Several roles per person (docs/multi-exam.md) --------------------------------
@@ -484,7 +488,7 @@ test('add candidate: an email that has an account attaches to it; the same role 
   const third = await prisma.jobRole.create({ data: { name: 'C Role Three', examSetting: { create: {} } } });
   const ok = await sa.post('/api/admin/candidates').send({ ...body, jobRoleId: third.id });
   assert.equal(ok.status, 201, JSON.stringify(ok.body));
-  assert.equal(ok.body.data.mobile, '9822222222', 'the application carries the account mobile');
+  assert.equal(ok.body.data.mobile, '98******22', 'the application carries the account mobile (masked in the reply)');
   assert.equal((await sa.post('/api/admin/candidates').send({ ...body, jobRoleId: third.id })).status, 409);
   assert.equal((await sa.post('/api/admin/candidates').send({ ...body, jobRoleId: third.id, mobile: '9833333333' })).status, 409);
 });
@@ -681,4 +685,43 @@ test('GET /ids returns all matching ids (with jobRoleIdById) across pages; >1000
   const big = await sa.get(`/api/admin/candidates/ids?jobRoleId=${bulkRole.id}`);
   assert.equal(big.status, 400);
   assert.match(big.body.error.message, /More than 1000 candidates match/);
+});
+
+// ---- masked email / mobile (2026-11-05) ---------------------------------------
+
+test('list and detail mask email and mobile; search still matches the full values', async () => {
+  const c = await createCandidate({ candidateCode: 'MSK-1', fullName: 'Mask Person', email: 'mask.person@iitg.ac.in', mobile: '9123456780', jobRoleId: roleId });
+  const list = await sa.get('/api/admin/candidates?search=mask.person%40iitg.ac.in');
+  assert.equal(list.status, 200, JSON.stringify(list.body));
+  assert.equal(list.body.data.total, 1);
+  assert.equal(list.body.data.items[0].email, 'm****n@iitg.ac.in');
+  assert.equal(list.body.data.items[0].mobile, '91******80');
+  assert.equal((await sa.get('/api/admin/candidates?search=9123456780')).body.data.total, 1);
+  const d = await sa.get(`/api/admin/candidates/${c.id}`);
+  assert.equal(d.body.data.candidate.email, 'm****n@iitg.ac.in');
+  assert.equal(d.body.data.candidate.mobile, '91******80');
+  assert.ok(!JSON.stringify(d.body).includes('mask.person@'), 'no full email anywhere in the detail payload');
+  assert.ok(!JSON.stringify(d.body).includes('9123456780'), 'no full mobile anywhere in the detail payload');
+});
+
+test('GET /:id/contact reveals the full email and mobile to a Super Admin, audited; evaluator is 403', async () => {
+  const c = await prisma.candidate.findUniqueOrThrow({ where: { candidateCode: 'MSK-1' } });
+  const r = await sa.get(`/api/admin/candidates/${c.id}/contact`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.data, { email: 'mask.person@iitg.ac.in', mobile: '9123456780' });
+  const audit = await prisma.adminAuditLog.findMany({ where: { action: 'CANDIDATE_CONTACT_REVEALED', entityId: c.id } });
+  assert.equal(audit.length, 1);
+  assert.ok(!JSON.stringify(audit[0]!.metadata ?? {}).includes('mask.person'), 'the audit row does not copy the PII');
+  assert.equal((await ev.get(`/api/admin/candidates/${c.id}/contact`)).status, 403);
+  assert.equal((await sa.get(`/api/admin/candidates/${crypto.randomUUID()}/contact`)).status, 404);
+});
+
+test('saving a masked email back is refused; editing other fields without email/mobile keeps them', async () => {
+  const c = await prisma.candidate.findUniqueOrThrow({ where: { candidateCode: 'MSK-1' } });
+  const bad = await sa.patch(`/api/admin/candidates/${c.id}`).send({ email: 'm****n@iitg.ac.in' });
+  assert.equal(bad.status, 400);
+  const ok = await sa.patch(`/api/admin/candidates/${c.id}`).send({ fullName: 'Mask Person Two' });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  const row = await prisma.candidate.findUniqueOrThrow({ where: { id: c.id } });
+  assert.deepEqual({ email: row.email, mobile: row.mobile, name: row.fullName }, { email: 'mask.person@iitg.ac.in', mobile: '9123456780', name: 'Mask Person Two' });
 });

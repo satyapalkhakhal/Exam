@@ -320,7 +320,7 @@ export function createEmailsService(deps: EmailsDeps) {
   async function listDispatches(q: EmailDispatchListQuery): Promise<Paginated<EmailDispatchDto>> {
     const { items, total } = await repo.listDispatches(q);
     return {
-      items: items.map((r) => ({ ...r, createdAt: r.createdAt.toISOString(), sentAt: r.sentAt ? r.sentAt.toISOString() : null })),
+      items: items.map((r) => ({ ...r, toEmail: maskEmail(r.toEmail), createdAt: r.createdAt.toISOString(), sentAt: r.sentAt ? r.sentAt.toISOString() : null })),
       total,
       page: q.page,
       pageSize: q.pageSize,

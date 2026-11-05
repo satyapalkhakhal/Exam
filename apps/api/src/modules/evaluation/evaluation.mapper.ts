@@ -8,6 +8,7 @@
 // same idea: whitelisted event types with time and question only (an IP change
 // shows that it happened, never the addresses).
 
+import { maskEmail } from '../../shared/utils/piiMask.js';
 import type {
   AdminRole,
   CandidatePiiDto,
@@ -105,7 +106,8 @@ export function toCandidatePii(c: CandidateSource): CandidatePiiDto {
   return {
     candidateId: c.id,
     fullName: c.fullName,
-    email: c.email,
+    // Masked like everywhere else; HR reveals the full value on the candidate page.
+    email: maskEmail(c.email),
     rollNumber: c.rollNumber,
     majorCpi: num(c.majorCpi),
     xPercentage: num(c.xPercentage),

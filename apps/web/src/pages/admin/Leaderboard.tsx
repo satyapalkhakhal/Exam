@@ -57,7 +57,7 @@ export default function Leaderboard() {
                 <span className="inline-flex items-center gap-1.5">
                   Candidate
                   <TableHeaderFilter active={Boolean(search)} ariaLabel="Search by name, email, roll number or code" className="w-56">
-                    <TableHeaderFilterText label="Search" value={search} onChange={setSearch} hint="Name, email, roll number or code" />
+                    <TableHeaderFilterText label="Search" value={search} onChange={setSearch} hint="Name, roll number or code (emails are masked here)" />
                   </TableHeaderFilter>
                 </span>
               </TableHead>

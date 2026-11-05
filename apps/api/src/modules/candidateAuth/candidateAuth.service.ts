@@ -25,7 +25,7 @@
 import type { CandidateSelf } from '@exam/shared';
 import { logger } from '../../infrastructure/logger/logger.js';
 import { AppError, badRequest, conflict, unauthorized } from '../../shared/errors.js';
-import { maskMobile } from '../../shared/utils/piiMask.js';
+import { maskEmail, maskMobile } from '../../shared/utils/piiMask.js';
 import type { ClientInfo } from '../../shared/utils/clientInfo.js';
 import type { AuditRecord } from '../audit/index.js';
 import { issueRefreshToken, peekRefreshFamily, revokeRefreshToken, rotateRefreshToken, signAccess } from '../adminAuth/tokens.js';
@@ -118,7 +118,8 @@ export function createCandidateAuthService(deps: CandidateAuthDeps) {
     return {
       id: a.id,
       fullName: eligible[0]?.fullName ?? '',
-      email: a.email,
+      // The candidate's own address, still masked: the browser never needs it in full.
+      email: maskEmail(a.email),
       locationCaptured,
       locationExempt: eligible.length > 0 && eligible.every((x) => x.locationExempt),
       examCount: eligible.length,

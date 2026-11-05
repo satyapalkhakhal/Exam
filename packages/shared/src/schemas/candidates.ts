@@ -29,7 +29,14 @@ export const CANDIDATE_NAME_MAX = 150;
 export const CANDIDATE_TEXT_MAX = 200;
 
 const name = z.string().trim().min(2).max(CANDIDATE_NAME_MAX);
-const email = z.string().trim().toLowerCase().email().max(254);
+const email = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .email()
+  .max(254)
+  // The API only ever shows masked addresses (a****z@x); one must never be saved back.
+  .refine((v) => !v.includes('*'), 'Click Show to see and edit the full email');
 const mobile = z
   .string()
   .trim()

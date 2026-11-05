@@ -26,6 +26,7 @@ export function createCandidatesController(service: CandidatesService) {
   return {
     list: wrap(async (req, res) => ok(res, await service.list(req.query as never))),
     matchingIds: wrap(async (req, res) => ok(res, await service.matchingIds(req.query as never))),
+    contact: wrap(async (req, res) => ok(res, await service.revealContact((req.params as { id: string }).id, actorId(req), ipOf(req)))),
     detail: wrap(async (req, res) => ok(res, await service.detail(idOf(req), req.query as never))),
     create: wrap(async (req, res) => ok(res, await service.create(req.body, actorId(req), ipOf(req)), 201)),
     update: wrap(async (req, res) => ok(res, await service.update(idOf(req), req.body, actorId(req), ipOf(req)))),

@@ -33,6 +33,7 @@ import type {
 import { CANDIDATE_BULK_MAX } from '@exam/shared';
 import { AppError, badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { sha256 } from '../../shared/utils/hash.js';
+import { maskEmail, maskMobile } from '../../shared/utils/piiMask.js';
 import { readSheet } from '../../shared/utils/spreadsheet.js';
 import type { AuditRecord } from '../audit/index.js';
 import { nextCandidateCodes } from './candidateCode.js';
@@ -185,12 +186,13 @@ const ENTITY = 'candidate';
 
 const num = (n: Num): number | null => (n === null ? null : typeof n === 'number' ? n : n.toNumber());
 
+/** Email and mobile leave the API masked; the full values only through revealContact (audited). */
 export const toRowDto = (r: CandidateRow): CandidateRowDto => ({
   id: r.id,
   candidateCode: r.candidateCode,
   fullName: r.fullName,
-  email: r.email,
-  mobile: r.mobile,
+  email: maskEmail(r.email),
+  mobile: r.mobile ? maskMobile(r.mobile) : null,
   rollNumber: r.rollNumber,
   xPercentage: num(r.xPercentage),
   xiiPercentage: num(r.xiiPercentage),
@@ -229,6 +231,7 @@ export interface CandidatesDeps {
   /** The exam module's flags for one candidate, and their score. */
   getFlags: (candidateId: string) => Promise<CandidateFlagsDto>;
   flagScore: (flags: CandidateFlagsDto) => number;
+  audit: (entry: AuditRecord) => Promise<void>;
 }
 
 export function createCandidatesService(repo: CandidatesRepository, deps: CandidatesDeps) {
@@ -357,6 +360,14 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
       metadata: { via: 'bulk', fromJobRoleId, toJobRoleId: input.jobRoleId },
       ip,
     }));
+  }
+
+  /** The full email and mobile of one candidate (the Show button), audited without copying them. */
+  async function revealContact(id: string, actorId: string, ip: string | null): Promise<{ email: string; mobile: string | null }> {
+    const row = await repo.findById(id);
+    if (!row) throw notFound('Candidate not found');
+    await deps.audit({ adminId: actorId, action: 'CANDIDATE_CONTACT_REVEALED', entity: ENTITY, entityId: id, metadata: {}, ip });
+    return { email: row.email, mobile: row.mobile };
   }
 
   async function setEligibility(id: string, eligible: boolean, actorId: string, ip: string | null): Promise<CandidateRowDto> {
@@ -501,7 +512,7 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
     return { imported, skipped: cached.total - imported - updated, ...(updates.length > 0 ? { updated } : {}) };
   }
 
-  return { list, matchingIds, detail, create, update, bulkSetJobRole, setEligibility, setLocationExempt, resetAttempt, previewImport, confirmImport };
+  return { list, matchingIds, revealContact, detail, create, update, bulkSetJobRole, setEligibility, setLocationExempt, resetAttempt, previewImport, confirmImport };
 }
 
 export type CandidatesService = ReturnType<typeof createCandidatesService>;

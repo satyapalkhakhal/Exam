@@ -622,3 +622,17 @@ test('results.xlsx has a Result column', async () => {
   const header = (ws.getRow(1).values as unknown[]).slice(1);
   assert.equal(header[header.indexOf('Status') + 1], 'Result');
 });
+
+test('Super Admin views mask the candidate email (submissions, marking, leaderboard)', async () => {
+  const full = (await prisma.candidate.findUniqueOrThrow({ where: { candidateCode: `EV-${RUN}-m` } })).email;
+  const masked = /^[a-z0-9]\*\*\*\*[a-z0-9]@eval\.int\.test$/;
+  const subs = await agents.sa.get(`/api/admin/submissions?search=${encodeURIComponent(full)}`);
+  assert.equal(subs.body.data.items.length, 1, 'search still matches the full email');
+  assert.match(subs.body.data.items[0].email, masked);
+  const view = await agents.sa.get(`/api/admin/submissions/${attemptId}`);
+  assert.match(view.body.data.email, masked);
+  const board = await agents.sa.get(`/api/admin/leaderboard?jobRoleId=${boardRoleId}`);
+  assert.ok(board.body.data.items.length > 0);
+  for (const row of board.body.data.items) assert.match(row.email, masked);
+  assert.ok(!JSON.stringify([subs.body, view.body, board.body]).includes(full));
+});

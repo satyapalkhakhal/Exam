@@ -175,6 +175,7 @@ test('send queues dispatches and jobs, skips with reasons, blocks repeats until 
   assert.equal(list.body.data.total, 1);
   assert.equal(list.body.data.items[0].error, 'provider down');
   assert.equal(list.body.data.items[0].sentByName, 'M Super');
+  assert.match(list.body.data.items[0].toEmail, /^m\*\*\*\*[0-9]@cands\.test$/, 'the recipient is masked in the list');
 });
 
 test('shortlisted emails go only to candidates whose result is SHORTLISTED', async () => {

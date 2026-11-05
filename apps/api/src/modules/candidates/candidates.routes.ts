@@ -34,6 +34,7 @@ export function createCandidatesRouter(service: CandidatesService): Router {
   r.post('/import/preview', adminUploadLimiter, uploadSpreadsheet('file'), validate({ body: CandidateImportPreviewBodySchema }), c.preview);
   r.post('/import/confirm', validate({ body: ImportConfirmSchema }), c.confirm);
   r.get('/:id', validate({ params: IdParamsSchema, query: CandidateDetailQuerySchema }), c.detail);
+  r.get('/:id/contact', validate({ params: IdParamsSchema }), c.contact);
   r.patch('/:id', validate({ params: IdParamsSchema, body: CandidateUpdateSchema }), c.update);
   r.post('/bulk/job-role', validate({ body: CandidateBulkJobRoleSchema }), c.bulkJobRole);
   r.patch('/:id/eligibility', validate({ params: IdParamsSchema, body: CandidateEligibilitySchema }), c.eligibility);

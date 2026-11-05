@@ -5,6 +5,7 @@
 
 import { getRedis } from '../../infrastructure/redis/redis.js';
 import { revokeAllSessions } from '../adminAuth/index.js';
+import { audit } from '../audit/index.js';
 import { exam, flagScore, getFlagCounts } from '../exam/index.js';
 import { candidatesRepository } from './candidates.repository.js';
 import { createCandidatesService } from './candidates.service.js';
@@ -20,4 +21,5 @@ export const candidates = createCandidatesService(candidatesRepository, {
   flagCounts: getFlagCounts,
   getFlags: exam.getFlags,
   flagScore,
+  audit: (entry) => audit.record(entry),
 });
