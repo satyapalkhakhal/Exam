@@ -17,7 +17,7 @@
 //
 // Look (approved mockup 2026-11-05): Arihant Capital header with a purple-to-green
 // rule, purple headings and buttons, and on the two outcome emails a horizontal
-// ArihantPlus strip as the last row. Images (logo, app icon) load from
+// ArihantPlus strip as the last row. Images (both logos) load from
 // `assetBaseUrl` (the exam site's public URL); without it they are left out and
 // the text still reads correctly.
 
@@ -180,19 +180,18 @@ function storeButtonHtml(href: string, top: string, label: string): string {
 }
 
 function plusStripHtml(assetBaseUrl: string | undefined): string {
-  const icon = assetUrl(assetBaseUrl, '/email/arihantplus-icon.jpg');
-  const iconCell = icon
-    ? `<td style="padding-right:10px"><img src="${escapeHtml(icon)}" width="32" height="32" alt="ArihantPlus" style="display:block;border-radius:8px;border:0"></td>`
-    : '';
+  // The official ArihantPlus logo (from web.arihantplus.com, rasterised to a transparent PNG at 3x).
+  // Without an asset URL the same name is spelled out in text.
+  const logo = assetUrl(assetBaseUrl, '/email/arihantplus-logo.png');
+  const brand = logo
+    ? `<img src="${escapeHtml(logo)}" width="150" height="25" alt="ArihantPlus" style="display:block;border:0;width:150px;height:25px">`
+    : `<span style="font-size:17px;font-weight:bold;color:${C.ink}">Arihant<span style="color:${C.green};font-size:13px;letter-spacing:1px;padding-left:2px">PLUS</span></span>`;
   return (
     `<tr><td style="padding:20px 28px 18px;background:${C.lav};background-image:linear-gradient(100deg,#faf5ff 0%,#e7d4fa 100%);border-top:1px solid ${C.lav2}">` +
     '<table role="presentation" cellpadding="0" cellspacing="0" width="100%"><tr>' +
     '<td valign="middle" style="padding-right:14px">' +
-    '<table role="presentation" cellpadding="0" cellspacing="0"><tr>' +
-    iconCell +
-    `<td style="font-size:17px;font-weight:bold;color:${C.ink}">Arihant<span style="color:${C.green};font-size:13px;letter-spacing:1px;padding-left:2px">PLUS</span>` +
-    `<div style="font-size:10px;font-weight:bold;letter-spacing:1.1px;text-transform:uppercase;color:${C.muted};margin-top:2px">Trading &amp; investing app by Arihant Capital</div></td>` +
-    '</tr></table>' +
+    brand +
+    `<div style="font-size:10px;font-weight:bold;letter-spacing:1.1px;text-transform:uppercase;color:${C.muted};margin-top:8px">Trading &amp; investing app by Arihant Capital</div>` +
     `<div style="font-size:13px;line-height:1.55;color:${C.muted};margin:10px 0 10px"><b style="color:${C.primary}">Algo Trading</b> with Quantlab, Stratzy and Trade Bridge, plus stocks, F&amp;O, IPO and mutual funds in one app.</div>` +
     chipHtml('Algo Trading', true) +
     ['F&O', 'IPO & NCD', 'Mutual Funds & SIP', 'Research', 'Commodity'].map((c) => chipHtml(c)).join('') +
