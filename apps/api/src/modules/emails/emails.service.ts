@@ -33,6 +33,7 @@ import {
   buildShortlistEmail,
   buildSubmissionEmail,
   unknownPlaceholders,
+  type AssessmentSummary,
   type EmailContent,
   type EmailTemplate,
   type NextRoundDetails,
@@ -69,10 +70,13 @@ export interface EmailCandidate {
   /** The current (non-RESET) attempt, if any. */
   attempt: {
     status: string;
+    startedAt: Date | null;
     submittedAt: Date | null;
     submitType: 'MANUAL' | 'AUTO' | null;
     answeredCount: number;
     questionCount: number;
+    /** Set only once marking is complete (the attempt's stored totals). */
+    score: { total: number; max: number; percentage: number } | null;
   } | null;
 }
 
@@ -124,6 +128,8 @@ export interface EmailsDeps {
   /** Adds one queue job per dispatch id. */
   enqueue: (dispatchIds: string[]) => Promise<void>;
   newBatchId: () => string;
+  /** Exam site's public URL; the emails load their logo and app icon from it. */
+  assetBaseUrl?: string;
 }
 
 const isCustom = (v: Partial<EmailTemplate>): v is EmailTemplate =>
@@ -199,10 +205,25 @@ export function createEmailsService(deps: EmailsDeps) {
     const template: EmailTemplate = { subject: input.subject ?? saved.subject, body: input.body ?? saved.body };
     assertKnownPlaceholders(key, template);
     const [cfg, role] = await Promise.all([deps.getEmailConfig(), repo.firstActiveRoleName()]);
-    const base = { fullName: SAMPLE.fullName, candidateCode: SAMPLE.candidateCode, jobRoleName: role ?? SAMPLE.fallbackRole, contactEmail: contactOf(cfg) };
+    const base = {
+      fullName: SAMPLE.fullName,
+      candidateCode: SAMPLE.candidateCode,
+      jobRoleName: role ?? SAMPLE.fallbackRole,
+      contactEmail: contactOf(cfg),
+      assetBaseUrl: deps.assetBaseUrl,
+    };
     if (key === 'SUBMISSION_RECEIVED') return buildSubmissionEmail({ ...base, submittedAt: new Date(), submitType: 'MANUAL', answeredCount: 2, questionCount: 3 }, template);
     if (key === 'REJECTED') return buildRejectionEmail(base, template);
-    return buildShortlistEmail({ ...base, nextRound: toNextRound(input.nextRound) }, template);
+    const now = Date.now();
+    const sample: AssessmentSummary = {
+      startedAt: new Date(now - 52.5 * 60_000),
+      submittedAt: new Date(now),
+      submitType: 'MANUAL',
+      answeredCount: 8,
+      questionCount: 10,
+      score: { total: 34.5, max: 50, percentage: 69 },
+    };
+    return buildShortlistEmail({ ...base, nextRound: toNextRound(input.nextRound), assessment: sample }, template);
   }
 
   async function sendTest(key: EmailTemplateKey, input: EmailPreviewInput, adminId: string): Promise<{ sentTo: string }> {
@@ -220,8 +241,14 @@ export function createEmailsService(deps: EmailsDeps) {
   }
 
   function render(key: EmailTemplateKey, c: EmailCandidate, template: EmailTemplate, contactEmail: string, nextRound: NextRoundDetails | undefined): EmailContent {
-    const base = { fullName: c.fullName, candidateCode: c.candidateCode, jobRoleName: c.jobRoleName, contactEmail };
-    if (key === 'SHORTLISTED') return buildShortlistEmail({ ...base, nextRound }, template);
+    const base = { fullName: c.fullName, candidateCode: c.candidateCode, jobRoleName: c.jobRoleName, contactEmail, assetBaseUrl: deps.assetBaseUrl };
+    if (key === 'SHORTLISTED') {
+      const a = c.attempt;
+      const assessment: AssessmentSummary | undefined = a
+        ? { startedAt: a.startedAt, submittedAt: a.submittedAt, submitType: a.submitType, answeredCount: a.answeredCount, questionCount: a.questionCount, score: a.score }
+        : undefined;
+      return buildShortlistEmail({ ...base, nextRound, assessment }, template);
+    }
     if (key === 'REJECTED') return buildRejectionEmail(base, template);
     const a = c.attempt;
     return buildSubmissionEmail(
@@ -336,10 +363,17 @@ const OUTCOME_TEMPLATES = new Set<EmailTemplateKey>(['SHORTLISTED', 'REJECTED'])
  * Delivers one dispatch. A row that is not QUEUED (already sent, or failed
  * earlier) is left alone, so a duplicate or stale job is a no-op. An outcome
  * email (Shortlisted / Not selected) whose candidate result has changed since it
- * was queued (re-decided, reopened, reset) is marked FAILED instead of sent. A
- * failed send is rethrown so the queue retries it; only the final attempt marks the row FAILED.
+ * was queued (re-decided, reopened, reset) is marked FAILED instead of sent.
+ * Outcome emails copy the CC list from Integrations, read at send time (minus
+ * the candidate's own address). A failed send is rethrown so the queue retries
+ * it; only the final attempt marks the row FAILED.
  */
-export function createDispatchProcessor(deps: { repo: DispatchRepository; sendEmail: (p: SendEmailParams) => Promise<void> }) {
+export function createDispatchProcessor(deps: {
+  repo: DispatchRepository;
+  sendEmail: (p: SendEmailParams) => Promise<void>;
+  /** CC addresses for outcome emails (Integrations → Email). */
+  outcomeCc?: () => Promise<string[]>;
+}) {
   return async function process(dispatchId: string, opts: { finalAttempt: boolean }): Promise<DispatchOutcome> {
     const d = await deps.repo.findForSend(dispatchId);
     if (!d || d.status !== 'QUEUED') return 'SKIPPED';
@@ -348,8 +382,10 @@ export function createDispatchProcessor(deps: { repo: DispatchRepository; sendEm
       logger.info('email dispatch superseded', { dispatchId: d.id, template: d.template });
       return 'SKIPPED';
     }
+    const to = d.toEmail.toLowerCase();
+    const cc = OUTCOME_TEMPLATES.has(d.template) && deps.outcomeCc ? (await deps.outcomeCc()).filter((a) => a.toLowerCase() !== to) : [];
     try {
-      await deps.sendEmail({ to: d.toEmail, subject: d.subject, html: d.html, text: d.text });
+      await deps.sendEmail({ to: d.toEmail, subject: d.subject, html: d.html, text: d.text, ...(cc.length ? { cc } : {}) });
     } catch (err) {
       const message = (err instanceof Error ? err.message : 'Send failed').slice(0, MAX_ERROR_LENGTH);
       await deps.repo.recordFailure(d.id, message, opts.finalAttempt);

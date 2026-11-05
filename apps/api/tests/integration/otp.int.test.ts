@@ -12,7 +12,7 @@ const deps: OtpDeps = {
   allowStatic: true,
   getConfigs: async () => ({
     smsCfg: { enabled: false, baseUrl: 'x', authToken: '', userName: '', apiKey: '', otpTemplate: '{otp}' },
-    emailCfg: { enabled: false, baseUrl: 'x', sendMailToken: '', fromAddress: '', fromName: '', replyTo: '' },
+    emailCfg: { enabled: false, baseUrl: 'x', sendMailToken: '', fromAddress: '', fromName: '', replyTo: '', ccAddresses: '' },
   }),
   deliver: async () => [],
 };

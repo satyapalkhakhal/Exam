@@ -75,6 +75,7 @@ export function createIntegrationsService(deps: IntegrationsDeps) {
     fromAddress: c.fromAddress,
     fromName: c.fromName,
     replyTo: c.replyTo,
+    ccAddresses: c.ccAddresses,
   });
 
   async function get(): Promise<IntegrationsView & { candidatesWithoutMobile: number }> {
@@ -117,6 +118,7 @@ export function createIntegrationsService(deps: IntegrationsDeps) {
       fromAddress: input.fromAddress,
       fromName: input.fromName,
       replyTo: input.replyTo,
+      ccAddresses: input.ccAddresses ?? '',
     };
     await deps.config.setConfig(EMAIL_KEY, { ...next }, adminId);
     await deps.audit({

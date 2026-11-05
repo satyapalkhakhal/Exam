@@ -39,6 +39,33 @@ export function isSafeProviderUrl(value: string): boolean {
 
 const providerUrl = text(500).refine(isSafeProviderUrl, 'Base URL must be an https URL on a public host');
 
+/** Most CC addresses the outcome emails may copy. */
+export const MAX_EMAIL_CC = 10;
+
+/** Splits a comma-separated address list (also accepts ; and new lines), trimmed, blanks and duplicates dropped. */
+export function parseEmailList(value: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of value.split(/[,;\n]/)) {
+    const a = raw.trim();
+    if (a && !seen.has(a.toLowerCase())) {
+      seen.add(a.toLowerCase());
+      out.push(a);
+    }
+  }
+  return out;
+}
+
+/** The first entry that is not a valid email, or null when every entry is fine. */
+export function invalidEmailInList(value: string): string | null {
+  return parseEmailList(value).find((a) => a.length > 320 || !z.string().email().safeParse(a).success) ?? null;
+}
+
+const emailList = text(4000)
+  .refine((v) => invalidEmailInList(v) === null, (v) => ({ message: `Not a valid email: ${invalidEmailInList(v)}` }))
+  .refine((v) => parseEmailList(v).length <= MAX_EMAIL_CC, `At most ${MAX_EMAIL_CC} addresses`)
+  .transform((v) => parseEmailList(v).join(', '));
+
 export const SmsConfigInputSchema = z.object({
   enabled: z.boolean(),
   baseUrl: providerUrl,
@@ -55,6 +82,8 @@ export const EmailConfigInputSchema = z.object({
   fromAddress: text(320).refine((v) => v === '' || z.string().email().safeParse(v).success, 'Invalid email'),
   fromName: text(200),
   replyTo: text(320).refine((v) => v === '' || z.string().email().safeParse(v).success, 'Invalid email'),
+  /** Copied on every Shortlisted and Rejected email, comma-separated. */
+  ccAddresses: emailList.default(''),
 });
 
 export const SmsTestInputSchema = z.object({ mobile: z.string().trim().regex(/^\d{10}$/, 'Enter a 10-digit mobile number') });
@@ -84,6 +113,7 @@ export interface MaskedEmailConfig {
   fromAddress: string;
   fromName: string;
   replyTo: string;
+  ccAddresses: string;
 }
 
 export interface IntegrationsView {

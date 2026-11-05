@@ -210,3 +210,15 @@ test('GET reports how many candidates have no mobile (they can only get email OT
   const view = await service.get();
   assert.equal(view.candidatesWithoutMobile, 7);
 });
+
+test('email CC list: normalised, de-duplicated, invalid or too many rejected', () => {
+  const ok = { enabled: true, baseUrl: 'https://api.zatpatmail.com', fromAddress: '', fromName: '', replyTo: '' };
+  const parsed = EmailConfigInputSchema.parse({ ...ok, ccAddresses: ' hr@x.test ; lead@x.test,\nHR@x.test , ' });
+  assert.equal(parsed.ccAddresses, 'hr@x.test, lead@x.test');
+  assert.equal(EmailConfigInputSchema.parse(ok).ccAddresses, '');
+  const bad = EmailConfigInputSchema.safeParse({ ...ok, ccAddresses: 'hr@x.test, not-an-email' });
+  assert.equal(bad.success, false);
+  assert.match(JSON.stringify(bad.error?.issues), /Not a valid email: not-an-email/);
+  const many = Array.from({ length: 11 }, (_, i) => `u${i}@x.test`).join(',');
+  assert.equal(EmailConfigInputSchema.safeParse({ ...ok, ccAddresses: many }).success, false);
+});

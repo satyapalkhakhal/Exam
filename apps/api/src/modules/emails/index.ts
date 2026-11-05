@@ -3,6 +3,8 @@
 // repository, with audit, messaging and the BullMQ queue wired in.
 
 import crypto from 'node:crypto';
+import { parseEmailList } from '@exam/shared';
+import { env } from '../../infrastructure/config/env.js';
 import { enqueueEmails } from '../../infrastructure/queue/email.queue.js';
 import { audit } from '../audit/index.js';
 import { getEmailConfig, isChannelReady, sendEmail } from '../messaging/index.js';
@@ -24,6 +26,11 @@ export const emails = createEmailsService({
   sendEmail,
   enqueue: enqueueEmails,
   newBatchId: () => crypto.randomUUID(),
+  assetBaseUrl: env.PUBLIC_WEB_URL,
 });
 
-export const emailDispatchProcessor = createDispatchProcessor({ repo: emailsRepository, sendEmail });
+export const emailDispatchProcessor = createDispatchProcessor({
+  repo: emailsRepository,
+  sendEmail,
+  outcomeCc: async () => parseEmailList((await getEmailConfig()).ccAddresses),
+});

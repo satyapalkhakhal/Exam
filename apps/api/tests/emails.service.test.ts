@@ -17,11 +17,19 @@ import { MessagingError } from '../src/modules/messaging/messaging.errors.js';
 import { isChannelReady, type EmailConfig } from '../src/modules/messaging/messaging.config.js';
 import { AppError } from '../src/shared/errors.js';
 
-const READY: EmailConfig = { enabled: true, baseUrl: 'https://m.test', sendMailToken: 't', fromAddress: 'a@b.test', fromName: 'X', replyTo: '' };
+const READY: EmailConfig = { enabled: true, baseUrl: 'https://m.test', sendMailToken: 't', fromAddress: 'a@b.test', fromName: 'X', replyTo: '', ccAddresses: '' };
 const ADMIN = '00000000-0000-4000-8000-0000000000aa';
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
-const submitted = { status: 'SUBMITTED', submittedAt: new Date('2026-11-03T08:35:00Z'), submitType: 'MANUAL' as const, answeredCount: 2, questionCount: 3 };
+const submitted = {
+  status: 'SUBMITTED',
+  startedAt: new Date('2026-11-03T07:40:00Z'),
+  submittedAt: new Date('2026-11-03T08:35:00Z'),
+  submitType: 'MANUAL' as const,
+  answeredCount: 2,
+  questionCount: 3,
+  score: null as { total: number; max: number; percentage: number } | null,
+};
 const cand = (n: number, over: Partial<EmailCandidate> = {}): EmailCandidate => ({
   id: id(n),
   candidateCode: `ARC-000${n}`,
@@ -283,9 +291,10 @@ test('if the queue is down the dispatches are failed, not left QUEUED, and the e
 
 // ---- worker -------------------------------------------------------------------------
 
-function processorSetup(row: Partial<QueuedDispatch> | null, sendError?: Error) {
+function processorSetup(row: Partial<QueuedDispatch> | null, sendError?: Error, outcomeCc?: () => Promise<string[]>) {
   const state = { status: row?.status ?? 'QUEUED', attempts: 0, error: null as string | null };
   const sent: string[] = [];
+  const ccs: (string[] | undefined)[] = [];
   const repo: DispatchRepository = {
     async findForSend() {
       return row
@@ -309,10 +318,31 @@ function processorSetup(row: Partial<QueuedDispatch> | null, sendError?: Error) 
     sendEmail: async (p) => {
       if (sendError) throw sendError;
       sent.push(p.to);
+      ccs.push(p.cc);
     },
+    outcomeCc,
   });
-  return { process, state, sent };
+  return { process, state, sent, ccs };
 }
+
+test('worker copies the CC list on outcome emails, minus the candidate, and never on the submission email', async () => {
+  const cc = async () => ['hr@x.test', 'C@X.test', 'lead@x.test'];
+  const shortlisted = processorSetup({ template: 'SHORTLISTED', candidateResult: 'SHORTLISTED' }, undefined, cc);
+  await shortlisted.process('d1', { finalAttempt: false });
+  assert.deepEqual(shortlisted.ccs, [['hr@x.test', 'lead@x.test']]);
+
+  const rejected = processorSetup({ template: 'REJECTED', candidateResult: 'REJECTED' }, undefined, cc);
+  await rejected.process('d1', { finalAttempt: false });
+  assert.deepEqual(rejected.ccs, [['hr@x.test', 'lead@x.test']]);
+
+  const submission = processorSetup({}, undefined, cc);
+  await submission.process('d1', { finalAttempt: false });
+  assert.deepEqual(submission.ccs, [undefined]);
+
+  const empty = processorSetup({ template: 'REJECTED', candidateResult: 'REJECTED' }, undefined, async () => []);
+  await empty.process('d1', { finalAttempt: false });
+  assert.deepEqual(empty.ccs, [undefined]);
+});
 
 test('worker sends a QUEUED dispatch and marks it SENT', async () => {
   const { process, state, sent } = processorSetup({});

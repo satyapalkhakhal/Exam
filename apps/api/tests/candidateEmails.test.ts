@@ -58,12 +58,84 @@ test('shortlist email with full next-round details', () => {
   assert.match(e.text, /Please confirm by: 7 Nov 2026, 6:00 pm IST/);
 });
 
-test('shortlist email with no details falls back gracefully', () => {
+test('shortlist email with no details tells the candidate we will be in touch', () => {
   const e = buildShortlistEmail(base);
   assert.equal(e.subject, 'Congratulations! You have been shortlisted for the next round — Backend Engineer');
-  assert.match(e.text, /Next round: Details to follow/);
-  assert.match(e.text, /we will send them to you shortly/);
+  for (const part of [e.html, e.text]) {
+    assert.match(part, /Our team will contact you soon/);
+    assert.match(part, /date, time and format of the next round/);
+  }
+  assert.doesNotMatch(e.text, /Please confirm your availability/);
   assert.doesNotMatch(e.html, /<a href="http(?!s:\/\/)|<ul/);
+});
+
+const assessment = {
+  startedAt: new Date('2026-11-03T07:42:30Z'),
+  submittedAt: new Date('2026-11-03T08:35:00Z'),
+  submitType: 'MANUAL' as const,
+  answeredCount: 8,
+  questionCount: 10,
+  score: { total: 34.5, max: 50, percentage: 69 },
+};
+
+test('shortlist email: assessment card with score, submission details and time taken', () => {
+  const e = buildShortlistEmail({ ...base, assessment });
+  assert.match(e.html, /Your assessment/);
+  assert.match(e.html, />34\.5<span[^>]*> \/ 50</);
+  assert.match(e.html, />69%</);
+  assert.match(e.html, /width="69%"/);
+  for (const part of [e.html, e.text]) {
+    assert.match(part, /3 Nov 2026, 2:05 pm IST/);
+    assert.match(part, /8 of 10/);
+    assert.match(part, /52 min 30 s/);
+    assert.match(part, /Submitted by you/);
+  }
+  assert.match(e.text, /Score: 34\.5 \/ 50 \(69%\)/);
+});
+
+test('shortlist email: no score before marking is complete', () => {
+  const e = buildShortlistEmail({ ...base, assessment: { ...assessment, score: null } });
+  assert.doesNotMatch(e.html, />Score</);
+  assert.doesNotMatch(e.text, /Score:/);
+  assert.match(e.html, /8 of 10/);
+});
+
+test('shortlist placeholders: score, maxScore and percentage', () => {
+  const t = { subject: 's', body: 'You scored {score} of {maxScore} ({percentage}%).' };
+  assert.match(buildShortlistEmail({ ...base, assessment }, t).text, /You scored 34\.5 of 50 \(69%\)\./);
+  assert.match(buildShortlistEmail({ ...base, assessment: { ...assessment, score: null } }, t).text, /You scored  of  \(%\)\./);
+});
+
+test('shortlist email with a scheduled round shows the schedule and the confirm line, not "contact you soon"', () => {
+  const e = buildShortlistEmail({
+    ...base,
+    nextRound: { name: 'Technical interview', scheduledAt: new Date('2026-11-10T05:30:00Z'), confirmBy: new Date('2026-11-07T12:30:00Z') },
+  });
+  assert.doesNotMatch(e.text, /contact you soon/);
+  assert.match(e.text, /Please confirm your availability by writing to hrd@arihantcapital\.com before 7 Nov 2026, 6:00 pm IST\./);
+});
+
+test('ArihantPlus strip: on the outcome emails only, with store links and the risk line', () => {
+  const s = buildShortlistEmail(base);
+  const r = buildRejectionEmail(base);
+  for (const e of [s, r]) {
+    assert.match(e.html, /Algo Trading/);
+    assert.match(e.html, /play\.google\.com\/store\/apps\/details\?id=com\.msf\.acml/);
+    assert.match(e.html, /apps\.apple\.com\/in\/app\/arihant-plus\/id1643484698/);
+    assert.match(e.text, /subject to market risks/);
+  }
+  const sub = buildSubmissionEmail(submission);
+  assert.doesNotMatch(sub.html, /Algo Trading|play\.google\.com/);
+  // No registration line: the numbers it carried were not Arihant's real ones.
+  assert.doesNotMatch(sub.html + sub.text, /SEBI Registration|INZ0|ARN-/);
+});
+
+test('logo and app icon load from assetBaseUrl; without it no images are added', () => {
+  const withBase = buildShortlistEmail({ ...base, assetBaseUrl: 'https://exam.example.com/' });
+  assert.match(withBase.html, /src="https:\/\/exam\.example\.com\/email\/arihant-capital-logo\.png"/);
+  assert.match(withBase.html, /src="https:\/\/exam\.example\.com\/email\/arihantplus-icon\.jpg"/);
+  assert.doesNotMatch(buildShortlistEmail(base).html, /<img/);
+  assert.doesNotMatch(buildShortlistEmail({ ...base, assetBaseUrl: 'javascript:alert(1)' }).html, /<img/);
 });
 
 test('shortlist email drops a non-https link', () => {

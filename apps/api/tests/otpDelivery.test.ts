@@ -5,7 +5,7 @@ import { decideOtpMode } from '../src/modules/otp/otp.service.js';
 import type { SmsConfig, EmailConfig } from '../src/modules/messaging/messaging.config.js';
 
 const smsCfg: SmsConfig = { enabled: true, baseUrl: 'https://g.test/s', authToken: 'a', userName: 'u', apiKey: 'k', otpTemplate: 'Code {otp} ok' };
-const emailCfg: EmailConfig = { enabled: true, baseUrl: 'https://m.test', sendMailToken: 't', fromAddress: 'a@b.c', fromName: 'A', replyTo: '' };
+const emailCfg: EmailConfig = { enabled: true, baseUrl: 'https://m.test', sendMailToken: 't', fromAddress: 'a@b.c', fromName: 'A', replyTo: '', ccAddresses: '' };
 const recipient = { email: 'x@y.com', mobile: '9876543210' };
 
 test('decideOtpMode table', () => {

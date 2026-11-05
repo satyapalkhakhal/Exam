@@ -22,6 +22,7 @@ export interface MaskedEmailConfig {
   fromAddress: string;
   fromName: string;
   replyTo: string;
+  ccAddresses: string;
 }
 
 export interface IntegrationsResponse {

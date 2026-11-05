@@ -20,6 +20,8 @@ export interface EmailConfig {
   fromAddress: string;
   fromName: string;
   replyTo: string;
+  /** Comma-separated; copied on the Shortlisted and Rejected emails. */
+  ccAddresses: string;
 }
 
 export const SMS_KEY = 'sms.arihant';
@@ -41,6 +43,7 @@ export const EMAIL_DEFAULTS: EmailConfig = {
   fromAddress: '',
   fromName: 'Arihant Capital Recruitment',
   replyTo: '',
+  ccAddresses: '',
 };
 
 // A blank stored value falls back to the default for fields that must never be

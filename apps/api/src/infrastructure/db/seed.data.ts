@@ -37,6 +37,7 @@ export const seedData = {
         fromAddress: '',
         fromName: 'Arihant Capital Recruitment',
         replyTo: '',
+        ccAddresses: '',
       },
     },
   ],

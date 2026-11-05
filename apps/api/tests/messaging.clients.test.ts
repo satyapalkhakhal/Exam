@@ -22,6 +22,7 @@ const email: EmailConfig = {
   fromAddress: 'noreply@example.com',
   fromName: 'Arihant',
   replyTo: '',
+  ccAddresses: '',
 };
 
 interface Captured {
@@ -83,6 +84,17 @@ test('email auth header uses C-enczapikey for bare and prefixed tokens', async (
     assert.equal((c.options.headers as Record<string, string>).Authorization, 'C-enczapikey tok');
     mock.restoreAll();
   }
+});
+
+test('email payload: cc only when given', async () => {
+  const c = stubHttps(200, '{"request_id":"r1"}');
+  await sendEmail({ to: 'a@b.com', subject: 's', html: '<p>x</p>', text: 'x', cc: ['hr@x.test', 'lead@x.test'] }, email);
+  assert.deepEqual(JSON.parse(c.body).cc, [{ email_address: { address: 'hr@x.test' } }, { email_address: { address: 'lead@x.test' } }]);
+  mock.restoreAll();
+  const d = stubHttps(200, '{"request_id":"r1"}');
+  await sendEmail({ to: 'a@b.com', subject: 's', html: '<p>x</p>', text: 'x' }, email);
+  assert.equal('cc' in JSON.parse(d.body), false);
+  mock.restoreAll();
 });
 
 test('email payload: /v1.1/email, tracking off, from/to/subject', async () => {

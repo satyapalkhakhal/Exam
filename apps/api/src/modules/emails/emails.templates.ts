@@ -32,6 +32,9 @@ const PLACEHOLDER_DESCRIPTIONS: Record<string, string> = {
   roundName: 'Name of the next round (or "next round")',
   scheduledAt: 'Date and time of the next round (IST)',
   confirmBy: 'Confirmation deadline (IST)',
+  score: 'Marks scored (empty until marking is complete)',
+  maxScore: 'Maximum marks (empty until marking is complete)',
+  percentage: 'Score as a percentage, without the % sign (empty until marking is complete)',
 };
 
 export const placeholderDocs = (key: EmailTemplateKey): { token: string; description: string }[] =>

@@ -45,7 +45,7 @@ export const emailsRepository: EmailsRepository & DispatchRepository = {
         attempts: {
           where: { status: { not: 'RESET' } },
           take: 1,
-          select: { id: true, status: true, submittedAt: true, submitType: true },
+          select: { id: true, status: true, startedAt: true, submittedAt: true, submitType: true, totalMarks: true, maxMarks: true, percentage: true },
         },
       },
     });
@@ -62,7 +62,18 @@ export const emailsRepository: EmailsRepository & DispatchRepository = {
         result: r.result,
         jobRoleName: r.jobRole.name,
         attempt: a
-          ? { status: a.status, submittedAt: a.submittedAt, submitType: a.submitType, ...(counts.get(a.id) ?? { answeredCount: 0, questionCount: 0 }) }
+          ? {
+              status: a.status,
+              startedAt: a.startedAt,
+              submittedAt: a.submittedAt,
+              submitType: a.submitType,
+              ...(counts.get(a.id) ?? { answeredCount: 0, questionCount: 0 }),
+              // totalMarks is set when the evaluator completes marking and cleared on reopen.
+              score:
+                a.totalMarks !== null
+                  ? { total: Number(a.totalMarks), max: Number(a.maxMarks), percentage: a.percentage !== null ? Number(a.percentage) : 0 }
+                  : null,
+            }
           : null,
       };
     });

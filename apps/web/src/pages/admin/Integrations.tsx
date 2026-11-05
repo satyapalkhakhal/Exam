@@ -8,6 +8,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { AlertTriangle } from 'lucide-react';
+import { MAX_EMAIL_CC, invalidEmailInList, parseEmailList } from '@exam/shared';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -28,9 +29,14 @@ const smsSchema = z.object({
   enabled: z.boolean(), baseUrl: url, userName: z.string(), authToken: z.string(), apiKey: z.string(),
   otpTemplate: z.string().refine((v) => v.includes('{otp}'), 'Template must contain {otp}'),
 });
+const ccList = z.string().superRefine((v, ctx) => {
+  const bad = invalidEmailInList(v);
+  if (bad) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Not a valid email: ${bad}` });
+  else if (parseEmailList(v).length > MAX_EMAIL_CC) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `At most ${MAX_EMAIL_CC} addresses` });
+});
 const emailSchema = z.object({
   enabled: z.boolean(), baseUrl: url, sendMailToken: z.string(),
-  fromAddress: optEmail, fromName: z.string(), replyTo: optEmail,
+  fromAddress: optEmail, fromName: z.string(), replyTo: optEmail, ccAddresses: ccList,
 });
 
 function SecretField({ id, label, saved, value, onChange }: {
@@ -163,8 +169,12 @@ function EmailCard({ saved }: { saved: MaskedEmailConfig }) {
   const [testing, setTesting] = useState(false);
   const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm<z.infer<typeof emailSchema>>({
     resolver: zodResolver(emailSchema),
-    defaultValues: { enabled: saved.enabled, baseUrl: saved.baseUrl, sendMailToken: '', fromAddress: saved.fromAddress, fromName: saved.fromName, replyTo: saved.replyTo },
+    defaultValues: {
+      enabled: saved.enabled, baseUrl: saved.baseUrl, sendMailToken: '', fromAddress: saved.fromAddress,
+      fromName: saved.fromName, replyTo: saved.replyTo, ccAddresses: saved.ccAddresses ?? '',
+    },
   });
+  const ccCount = parseEmailList(watch('ccAddresses') ?? '').length;
   return (
     <>
     <form noValidate onSubmit={handleSubmit((v) => save.mutate(buildIntegrationPatch(v, { ...saved })))}>
@@ -185,6 +195,21 @@ function EmailCard({ saved }: { saved: MaskedEmailConfig }) {
         <div className="space-y-1.5">
           <Label htmlFor="email-replyTo">Reply-to</Label>
           <Input id="email-replyTo" type="email" error={errors.replyTo?.message} {...register('replyTo')} />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="email-cc">CC on result emails</Label>
+          <Textarea
+            id="email-cc"
+            rows={2}
+            placeholder="talent@arihantcapital.com, hr.lead@arihantcapital.com"
+            aria-describedby="email-cc-help"
+            {...register('ccAddresses')}
+          />
+          <p id="email-cc-help" className="text-xs text-muted-foreground">
+            Comma-separated, up to {MAX_EMAIL_CC}. Every Shortlisted and Rejected email is copied to these addresses, and candidates can see them.
+            {ccCount > 0 && ` ${ccCount} address${ccCount === 1 ? '' : 'es'}.`}
+          </p>
+          {errors.ccAddresses && <p className="text-xs text-destructive">{errors.ccAddresses.message}</p>}
         </div>
         <SaveBar pending={save.isPending} error={save.isError ? save.error.message : null} saved={save.isSuccess} />
       </CardShell>

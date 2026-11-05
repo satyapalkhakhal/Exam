@@ -11,7 +11,7 @@ const staticDeps: OtpDeps = {
   allowStatic: true,
   getConfigs: async () => ({
     smsCfg: { enabled: false, baseUrl: 'x', authToken: '', userName: '', apiKey: '', otpTemplate: 't {otp}' },
-    emailCfg: { enabled: false, baseUrl: 'x', sendMailToken: '', fromAddress: '', fromName: '', replyTo: '' },
+    emailCfg: { enabled: false, baseUrl: 'x', sendMailToken: '', fromAddress: '', fromName: '', replyTo: '', ccAddresses: '' },
   }),
   deliver: async () => { throw new Error('must not send in static mode'); },
 };
@@ -72,7 +72,7 @@ test('send mode stores a random hashed code and passes it to deliver', async () 
   let sentCode = '';
   const deps: OtpDeps = {
     allowStatic: true,
-    getConfigs: async () => ({ ...(await staticDeps.getConfigs()), emailCfg: { enabled: true, baseUrl: 'x', sendMailToken: 't', fromAddress: 'a@b.c', fromName: '', replyTo: '' } }),
+    getConfigs: async () => ({ ...(await staticDeps.getConfigs()), emailCfg: { enabled: true, baseUrl: 'x', sendMailToken: 't', fromAddress: 'a@b.c', fromName: '', replyTo: '', ccAddresses: '' } }),
     deliver: async (code) => { sentCode = code; return ['email']; },
   };
   const r = await issueOtp({ ...P, recipient }, deps);
