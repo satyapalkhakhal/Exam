@@ -11,6 +11,7 @@ import { prisma } from '../../src/infrastructure/db/prisma.js';
 import { getRedis } from '../../src/infrastructure/redis/redis.js';
 import { getSessionsValidAfter } from '../../src/modules/adminAuth/index.js';
 import { createApp } from '../../src/app.js';
+import { createApplication, createCandidate, createCandidates } from './helpers.js';
 
 const SA = { email: 'super@cands.test', password: 'super-pass-123' };
 const EV = { email: 'eval@cands.test', password: 'eval-pass-123' };
@@ -154,6 +155,7 @@ test('detail returns profile, extra, history and zero flags', async () => {
   assert.equal(d.body.data.attempt, null);
   assert.deepEqual(d.body.data.flags, { integrity: { pasteAttempts: 0, bulkInsert: 0, tabHidden: 0, blur: 0, ipChanges: 0 }, location: [] });
   assert.equal(d.body.data.activity.total, 0);
+  assert.equal(d.body.data.candidate.result, null);
 });
 
 test('edit lower-cases email; a duplicate email is 409; role change allowed only before start', async () => {
@@ -193,7 +195,8 @@ test('reset-attempt needs a 10+ char reason, marks the attempt RESET, and a new 
       data: { candidateId: c.id, status: 'SUBMITTED', startedAt: now, endsAt: now, submittedAt: now, activeSessionId: 's', startIp: '1.1.1.1', userAgent: 'ua', maxMarks: 10 },
     });
   await mk();
-  await prisma.candidate.update({ where: { id: c.id }, data: { status: 'SUBMITTED' } });
+  const admin = await prisma.adminUser.findFirstOrThrow({ where: { email: SA.email } });
+  await prisma.candidate.update({ where: { id: c.id }, data: { status: 'EVALUATED', result: 'REJECTED', resultAt: now, resultById: admin.id } });
 
   assert.equal((await sa.post(`/api/admin/candidates/${c.id}/reset-attempt`).send({ reason: 'short' })).status, 400);
   const r = await sa.post(`/api/admin/candidates/${c.id}/reset-attempt`).send({ reason: 'Power cut during the exam' });
@@ -203,6 +206,16 @@ test('reset-attempt needs a 10+ char reason, marks the attempt RESET, and a new 
   const hist = await prisma.candidateStatusHistory.findMany({ where: { candidateId: c.id } });
   assert.equal(hist.length, 1);
   assert.equal(hist[0]?.comment, 'Power cut during the exam');
+  // a reset also clears HR's result
+  const cleared = await prisma.candidate.findUniqueOrThrow({ where: { id: c.id } });
+  assert.deepEqual({ result: cleared.result, at: cleared.resultAt, by: cleared.resultById }, { result: null, at: null, by: null });
+  assert.deepEqual({ from: hist[0]?.fromStatus, fromResult: hist[0]?.fromResult, toResult: hist[0]?.toResult }, { from: 'EVALUATED', fromResult: 'REJECTED', toResult: null });
+  const d = await sa.get(`/api/admin/candidates/${c.id}`);
+  assert.equal(d.body.data.candidate.result, null);
+  assert.deepEqual(
+    d.body.data.history.map((x: { fromResult: string | null; toResult: string | null }) => [x.fromResult, x.toResult]),
+    [['REJECTED', null]],
+  );
   assert.equal((await prisma.adminAuditLog.count({ where: { action: 'CANDIDATE_ATTEMPT_RESET', entityId: c.id } })), 1);
 
   await mk();
@@ -457,7 +470,7 @@ test('detail lists the same person\'s other applications; a mobile edit changes 
   const d = await sa.get(`/api/admin/candidates/${a!.id}`);
   assert.equal(d.status, 200);
   assert.deepEqual(d.body.data.otherApplications, [
-    { id: b!.id, candidateCode: b!.candidateCode, jobRole: { id: b!.jobRoleId, name: b!.jobRole.name }, status: 'NOT_STARTED' },
+    { id: b!.id, candidateCode: b!.candidateCode, jobRole: { id: b!.jobRoleId, name: b!.jobRole.name }, status: 'NOT_STARTED', result: null },
   ]);
 
   const e = await sa.patch(`/api/admin/candidates/${a!.id}`).send({ mobile: '9822222222' });
@@ -489,4 +502,183 @@ test('disabling an application revokes the sessions of its account', async () =>
   const [a] = await prisma.candidate.findMany({ where: { email: 'multi@iitg.ac.in' } });
   assert.equal((await sa.patch(`/api/admin/candidates/${a!.id}/eligibility`).send({ eligible: false })).status, 200);
   assert.notEqual(await getSessionsValidAfter('candidate', a!.accountId), null);
+});
+
+// ---- list: result, min filters, exam stats, attempt sorts, matching ids (2026-11-05) ----
+
+type ListItem = {
+  id: string;
+  candidateCode: string;
+  result: string | null;
+  exam: { startedAt: string; submittedAt: string | null; answeredCount: number; questionCount: number; totalMarks: number | null; maxMarks: number; percentage: number | null } | null;
+  otherApplications: { jobRoleName: string; status: string; result: string | null }[];
+};
+
+let listFixture: Promise<{ roleId: string; ids: Record<string, string> }> | null = null;
+
+/** Six candidates in their own job profile; A..F described inline. */
+function fixture() {
+  listFixture ??= (async () => {
+    const role = await prisma.jobRole.create({ data: { name: 'List Role', examSetting: { create: {} } } });
+    const qs = await Promise.all(
+      [1, 2].map((n) => prisma.question.create({ data: { jobRoleId: role.id, text: `L${n}`, normalizedTextHash: `list-${n}`, maxMarks: 10 } })),
+    );
+    const ids: Record<string, string> = {};
+    const t0 = new Date('2026-11-04T05:00:00Z').getTime();
+    const mk = async (
+      key: string,
+      c: { x: number | null; xii: number | null; cpi: number | null; status: 'NOT_STARTED' | 'IN_PROGRESS' | 'SUBMITTED' | 'EVALUATED'; result?: 'SHORTLISTED' | 'REJECTED' },
+      a?: { minutes: number | null; answered: number; marks?: number; reset?: boolean },
+    ) => {
+      const cand = await createCandidate({
+        candidateCode: `LST-${key}`,
+        fullName: `List ${key}`,
+        email: `list-${key.toLowerCase()}@iitg.ac.in`,
+        jobRoleId: role.id,
+        xPercentage: c.x,
+        xiiPercentage: c.xii,
+        majorCpi: c.cpi,
+        status: c.status,
+        result: c.result ?? null,
+      });
+      ids[key] = cand.id;
+      if (!a) return;
+      const evaluated = a.marks !== undefined && !a.reset;
+      await prisma.examAttempt.create({
+        data: {
+          candidateId: cand.id,
+          status: a.reset ? 'RESET' : a.minutes === null ? 'IN_PROGRESS' : 'SUBMITTED',
+          startedAt: new Date(t0),
+          endsAt: new Date(t0 + 60 * 60_000),
+          submittedAt: a.minutes === null ? null : new Date(t0 + a.minutes * 60_000),
+          activeSessionId: 's',
+          startIp: '1.1.1.1',
+          userAgent: 'ua',
+          maxMarks: 20,
+          totalMarks: a.marks ?? null,
+          percentage: a.marks === undefined ? null : a.marks * 5,
+          questions: {
+            create: qs.map((q, i) => ({
+              questionId: q.id,
+              order: i + 1,
+              textSnapshot: q.text,
+              maxMarksSnapshot: 10,
+              answer: { create: { text: i < a.answered ? 'some words here' : '', wordCount: i < a.answered ? 3 : 0 } },
+            })),
+          },
+          ...(evaluated ? { evaluation: { create: { status: 'SUBMITTED', submittedAt: new Date() } } } : {}),
+        },
+      });
+    };
+    await mk('A', { x: 90, xii: 85, cpi: 8, status: 'EVALUATED', result: 'SHORTLISTED' }, { minutes: 30, answered: 2, marks: 16 }); // 80 %
+    await mk('B', { x: 70, xii: 95, cpi: 7, status: 'EVALUATED', result: 'REJECTED' }, { minutes: 10, answered: 1, marks: 10 }); // 50 %
+    await mk('C', { x: null, xii: 60, cpi: null, status: 'SUBMITTED' }, { minutes: 20, answered: 2 }); // not evaluated
+    await mk('D', { x: 80, xii: 80, cpi: 9, status: 'NOT_STARTED' });
+    await mk('E', { x: 85, xii: null, cpi: 8.5, status: 'NOT_STARTED' }, { minutes: 5, answered: 2, marks: 18, reset: true }); // reset 90 %
+    await mk('F', { x: 60, xii: 70, cpi: 6, status: 'IN_PROGRESS' }, { minutes: null, answered: 1 });
+    return { roleId: role.id, ids };
+  })();
+  return listFixture;
+}
+
+async function listCodes(query: string): Promise<string[]> {
+  const { roleId: lr } = await fixture();
+  const res = await sa.get(`/api/admin/candidates?jobRoleId=${lr}&pageSize=100&${query}`);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  return (res.body.data.items as ListItem[]).map((i) => i.candidateCode.replace('LST-', ''));
+}
+
+test('result filter: SHORTLISTED, REJECTED, NONE', async () => {
+  assert.deepEqual(await listCodes('result=SHORTLISTED'), ['A']);
+  assert.deepEqual(await listCodes('result=REJECTED'), ['B']);
+  assert.deepEqual((await listCodes('result=NONE&sort=fullName&dir=asc')), ['C', 'D', 'E', 'F']);
+  assert.equal((await sa.get('/api/admin/candidates?result=MAYBE')).status, 400);
+});
+
+test('min filters combine; cpiMin=0 excludes null CPI', async () => {
+  const asc = 'sort=fullName&dir=asc';
+  assert.deepEqual(await listCodes(`xMin=80&${asc}`), ['A', 'D', 'E']);
+  assert.deepEqual(await listCodes(`cpiMin=0&${asc}`), ['A', 'B', 'D', 'E', 'F']);
+  assert.deepEqual(await listCodes(`xiiMin=90&${asc}`), ['B']);
+  assert.deepEqual(await listCodes(`xMin=80&cpiMin=8.5&${asc}`), ['D', 'E']);
+  assert.equal((await sa.get('/api/admin/candidates?cpiMin=11')).status, 400);
+});
+
+test('marksPctMin ignores reset attempts and unevaluated ones', async () => {
+  assert.deepEqual(await listCodes('marksPctMin=60'), ['A']);
+  assert.deepEqual(await listCodes('marksPctMin=0&sort=fullName&dir=asc'), ['A', 'B']);
+});
+
+test('sort=marks desc: highest % first, unevaluated last; asc also puts empty last; ties by id', async () => {
+  const { ids } = await fixture();
+  const rest = ['C', 'D', 'E', 'F'].sort((a, b) => (ids[a]! < ids[b]! ? -1 : 1));
+  assert.deepEqual(await listCodes('sort=marks&dir=desc'), ['A', 'B', ...rest]);
+  assert.deepEqual(await listCodes('sort=marks&dir=asc'), ['B', 'A', ...rest]);
+});
+
+test('sort=timeTaken asc: shortest first, unsubmitted last; pagination is stable across pages', async () => {
+  const { roleId: lr, ids } = await fixture();
+  const rest = ['D', 'E', 'F'].sort((a, b) => (ids[a]! < ids[b]! ? -1 : 1));
+  const all = await listCodes('sort=timeTaken&dir=asc');
+  assert.deepEqual(all, ['B', 'C', 'A', ...rest]);
+  assert.deepEqual(await listCodes('sort=timeTaken&dir=desc'), ['A', 'C', 'B', ...rest]);
+  const paged: string[] = [];
+  for (const page of [1, 2, 3]) {
+    const res = await sa.get(`/api/admin/candidates?jobRoleId=${lr}&sort=timeTaken&dir=asc&pageSize=2&page=${page}`);
+    assert.equal(res.body.data.total, 6);
+    paged.push(...(res.body.data.items as ListItem[]).map((i) => i.candidateCode.replace('LST-', '')));
+  }
+  assert.deepEqual(paged, all);
+});
+
+test('list item exam stats: answered/question counts, marks null until evaluation submitted', async () => {
+  const { roleId: lr } = await fixture();
+  const res = await sa.get(`/api/admin/candidates?jobRoleId=${lr}&pageSize=100`);
+  const by = new Map((res.body.data.items as ListItem[]).map((i) => [i.candidateCode.replace('LST-', ''), i]));
+  assert.deepEqual(by.get('A')!.exam, {
+    startedAt: '2026-11-04T05:00:00.000Z',
+    submittedAt: '2026-11-04T05:30:00.000Z',
+    answeredCount: 2,
+    questionCount: 2,
+    totalMarks: 16,
+    maxMarks: 20,
+    percentage: 80,
+  });
+  assert.equal(by.get('A')!.result, 'SHORTLISTED');
+  assert.deepEqual({ ...by.get('C')!.exam, startedAt: undefined, submittedAt: undefined }, { startedAt: undefined, submittedAt: undefined, answeredCount: 2, questionCount: 2, totalMarks: null, maxMarks: 20, percentage: null });
+  assert.equal(by.get('D')!.exam, null);
+  assert.equal(by.get('E')!.exam, null, 'a reset attempt is not the current one');
+  assert.equal(by.get('F')!.exam!.submittedAt, null);
+  assert.equal(by.get('F')!.exam!.answeredCount, 1);
+});
+
+test('otherApplications: both applications of one person on the same page list each other with result', async () => {
+  const { roleId: lr } = await fixture();
+  const p = await createCandidate({ candidateCode: 'LST-P1', fullName: 'List Twin', email: 'list-twin@iitg.ac.in', jobRoleId: lr, status: 'EVALUATED', result: 'REJECTED' });
+  await createApplication(p.accountId, { candidateCode: 'LST-P2', fullName: 'List Twin', jobRoleId: role2Id });
+  const res = await sa.get('/api/admin/candidates?search=List%20Twin&pageSize=100');
+  const by = new Map((res.body.data.items as ListItem[]).map((i) => [i.candidateCode, i]));
+  assert.equal(by.size, 2);
+  assert.deepEqual(by.get('LST-P1')!.otherApplications, [{ jobRoleName: 'C Role Two', status: 'NOT_STARTED', result: null }]);
+  assert.deepEqual(by.get('LST-P2')!.otherApplications, [{ jobRoleName: 'List Role', status: 'EVALUATED', result: 'REJECTED' }]);
+  await prisma.candidate.deleteMany({ where: { accountId: p.accountId } });
+  await prisma.candidateAccount.delete({ where: { id: p.accountId } });
+});
+
+test('GET /ids returns all matching ids (with jobRoleIdById) across pages; >1000 → 400; evaluator → 403', async () => {
+  const { roleId: lr, ids } = await fixture();
+  const res = await sa.get(`/api/admin/candidates/ids?jobRoleId=${lr}&cpiMin=0&pageSize=2`);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.data.total, 5);
+  assert.deepEqual([...res.body.data.ids].sort(), ['A', 'B', 'D', 'E', 'F'].map((k) => ids[k]!).sort());
+  assert.ok(res.body.data.ids.every((id: string) => res.body.data.jobRoleIdById[id] === lr));
+  assert.equal((await ev.get(`/api/admin/candidates/ids?jobRoleId=${lr}`)).status, 403);
+
+  const bulkRole = await prisma.jobRole.create({ data: { name: 'List Bulk Role' } });
+  await createCandidates(
+    Array.from({ length: 1001 }, (_, i) => ({ candidateCode: `LSTB-${i}`, fullName: `Bulk ${i}`, email: `lstb-${i}@iitg.ac.in`, jobRoleId: bulkRole.id })),
+  );
+  const big = await sa.get(`/api/admin/candidates/ids?jobRoleId=${bulkRole.id}`);
+  assert.equal(big.status, 400);
+  assert.match(big.body.error.message, /More than 1000 candidates match/);
 });

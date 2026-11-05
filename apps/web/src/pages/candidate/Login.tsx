@@ -7,6 +7,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { Link, Navigate, useNavigate } from 'react-router';
+import { ArihantPlusBanner } from '@/components/auth/ArihantPlusBanner';
 import { AuthPageShell, ServerErrorNotice } from '@/components/auth/AuthPageShell';
 import { OtpForm } from '@/components/auth/OtpForm';
 import { Button } from '@/components/ui/button';
@@ -76,7 +77,7 @@ export default function CandidateLogin() {
 
   if (identifier) {
     return (
-      <AuthPageShell title="Enter your code" subtitle="If you're registered, a code has been sent.">
+      <AuthPageShell title="Enter your code" subtitle="If you're registered, a code has been sent." brand="plus" aside={<ArihantPlusBanner />}>
         <OtpForm onSubmit={submitCode} onResend={resend} submitting={verify.isPending} error={otpError} />
         {/* The response is the same whether or not a code went out (no account probing), so
             a delivery failure reaches the candidate only through this line; HR sees it in the log. */}
@@ -86,7 +87,7 @@ export default function CandidateLogin() {
   }
 
   return (
-    <AuthPageShell title="Candidate sign in" subtitle="Arihant Capital — Recruitment Assessment">
+    <AuthPageShell title="Candidate sign in" subtitle="Arihant Plus — Recruitment Assessment" brand="plus" aside={<ArihantPlusBanner />}>
       <form className="space-y-4" onSubmit={handleSubmit(submitId)} noValidate>
         {request.isError && <ServerErrorNotice message={message(request.error)} />}
         <div className="space-y-1.5">

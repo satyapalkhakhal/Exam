@@ -19,6 +19,7 @@ import { useDebounced } from '@/lib/useDebounced';
 const TEMPLATE_LABEL: Record<EmailTemplateKey, string> = {
   SUBMISSION_RECEIVED: 'Submission received',
   SHORTLISTED: 'Shortlisted for next round',
+  REJECTED: 'Not selected',
 };
 
 export function SendEmailDialog({

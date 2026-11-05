@@ -1,14 +1,15 @@
 // modules/results/results.repository.ts
 // Prisma reads for the leaderboard, dashboard and exports, and the decision
-// write (status + history + audit in one transaction, guarded so a decision can
-// only follow an evaluation).
+// write (result + history + audit in one transaction, guarded so a decision can
+// only follow an evaluation). The decision lives in candidates.result; the
+// status keeps exam progress.
 
 import { prisma } from '../../infrastructure/db/prisma.js';
 import type { Prisma } from '../../generated/prisma/client.js';
+import type { CandidateDecisionBulkResultDto, CandidateResult } from '@exam/shared';
 import { writeAudit, type AuditRecord } from '../audit/index.js';
 
 const SUBMITTED_STATUSES = ['SUBMITTED', 'AUTO_SUBMITTED'] as const;
-export const DECIDABLE_STATUSES = ['EVALUATED', 'SHORTLISTED', 'REJECTED'] as const;
 export type CandidateStatusValue = 'NOT_STARTED' | 'IN_PROGRESS' | 'SUBMITTED' | 'AUTO_SUBMITTED' | 'EVALUATED' | 'SHORTLISTED' | 'REJECTED';
 
 const candidateSelect = {
@@ -24,6 +25,7 @@ const candidateSelect = {
   programme: true,
   discipline: true,
   status: true,
+  result: true,
   jobRoleId: true,
   jobRole: { select: { name: true } },
 } as const;
@@ -61,8 +63,8 @@ export const resultsRepository = {
   },
 
   async statusCounts() {
-    const rows = await prisma.candidate.groupBy({ by: ['jobRoleId', 'status'], _count: { _all: true } });
-    return rows.map((r) => ({ jobRoleId: r.jobRoleId, status: r.status as CandidateStatusValue, count: r._count._all }));
+    const rows = await prisma.candidate.groupBy({ by: ['jobRoleId', 'status', 'result'], _count: { _all: true } });
+    return rows.map((r) => ({ jobRoleId: r.jobRoleId, status: r.status as CandidateStatusValue, result: r.result, count: r._count._all }));
   },
 
   /** Evaluated candidates of a role, best first, ties by earlier submit. */
@@ -72,7 +74,7 @@ export const resultsRepository = {
         status: { in: [...SUBMITTED_STATUSES] },
         evaluation: { is: { status: 'SUBMITTED' } },
         totalMarks: { not: null },
-        candidate: { jobRoleId, status: { in: [...DECIDABLE_STATUSES] } },
+        candidate: { jobRoleId, status: 'EVALUATED' },
       },
       orderBy: rankOrder,
       select: scoredAttemptSelect,
@@ -104,21 +106,48 @@ export const resultsRepository = {
   },
 
   /**
-   * Sets the decision when the candidate is in a decidable status and not
-   * already at it. Returns the previous status, or why it was refused.
+   * Sets the result on every EVALUATED candidate whose result differs, in one
+   * transaction with the rows locked in id order (as other bulk writes do). One
+   * history row (status unchanged, result from/to) and one audit row each.
    */
-  decide(candidateId: string, decision: 'SHORTLISTED' | 'REJECTED', byAdminId: string, comment: string | null, audit: (from: CandidateStatusValue) => AuditRecord) {
-    return prisma.$transaction(async (tx) => {
-      const c = await tx.candidate.findUnique({ where: { id: candidateId }, select: { status: true } });
-      if (!c) return { refused: 'NOT_FOUND' as const };
-      const from = c.status as CandidateStatusValue;
-      if (!(DECIDABLE_STATUSES as readonly string[]).includes(from) || from === decision) return { refused: 'STATUS' as const, from };
-      const { count } = await tx.candidate.updateMany({ where: { id: candidateId, status: c.status }, data: { status: decision } });
-      if (count !== 1) return { refused: 'STATUS' as const, from };
-      await tx.candidateStatusHistory.create({ data: { candidateId, fromStatus: from, toStatus: decision, byAdminId, comment } });
-      await writeAudit(tx, audit(from));
-      return { from };
-    });
+  decideMany(
+    ids: string[],
+    decision: CandidateResult,
+    byAdminId: string,
+    comment: string | null,
+    audit: (candidateId: string, from: CandidateResult | null) => AuditRecord,
+  ): Promise<{ decided: string[]; skipped: CandidateDecisionBulkResultDto['skipped'] }> {
+    return prisma.$transaction(
+      async (tx) => {
+        const rows = await tx.$queryRaw<{ id: string; status: CandidateStatusValue; result: CandidateResult | null; candidate_code: string; full_name: string }[]>`
+          SELECT id::text, status::text AS status, result::text AS result, candidate_code, full_name
+          FROM candidates WHERE id = ANY(${ids}::uuid[]) ORDER BY id FOR UPDATE`;
+        const byId = new Map(rows.map((r) => [r.id, r]));
+        const decided: string[] = [];
+        const skipped: CandidateDecisionBulkResultDto['skipped'] = [];
+        const now = new Date();
+        for (const id of ids) {
+          const c = byId.get(id);
+          if (!c) {
+            skipped.push({ candidateId: id, candidateCode: null, fullName: null, reason: 'NOT_FOUND' });
+            continue;
+          }
+          const reason = c.status !== 'EVALUATED' ? 'NOT_EVALUATED' : c.result === decision ? 'ALREADY_DECIDED' : null;
+          if (reason) {
+            skipped.push({ candidateId: id, candidateCode: c.candidate_code, fullName: c.full_name, reason });
+            continue;
+          }
+          await tx.candidate.update({ where: { id }, data: { result: decision, resultAt: now, resultById: byAdminId } });
+          await tx.candidateStatusHistory.create({
+            data: { candidateId: id, fromStatus: c.status, toStatus: c.status, fromResult: c.result, toResult: decision, byAdminId, comment },
+          });
+          await writeAudit(tx, audit(id, c.result));
+          decided.push(id);
+        }
+        return { decided, skipped };
+      },
+      { timeout: 60_000 },
+    );
   },
 };
 

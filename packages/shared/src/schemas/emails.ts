@@ -7,7 +7,7 @@
 
 import { z } from 'zod';
 
-export const EMAIL_TEMPLATE_KEYS = ['SUBMISSION_RECEIVED', 'SHORTLISTED'] as const;
+export const EMAIL_TEMPLATE_KEYS = ['SUBMISSION_RECEIVED', 'SHORTLISTED', 'REJECTED'] as const;
 export const EmailTemplateKeySchema = z.enum(EMAIL_TEMPLATE_KEYS);
 export type EmailTemplateKey = z.infer<typeof EmailTemplateKeySchema>;
 
@@ -17,6 +17,7 @@ export const COMMON_EMAIL_PLACEHOLDERS = ['firstName', 'fullName', 'role', 'cand
 export const EMAIL_TEMPLATE_PLACEHOLDERS: Record<EmailTemplateKey, readonly string[]> = {
   SUBMISSION_RECEIVED: [...COMMON_EMAIL_PLACEHOLDERS, 'submittedAt', 'answeredCount', 'questionCount'],
   SHORTLISTED: [...COMMON_EMAIL_PLACEHOLDERS, 'roundName', 'scheduledAt', 'confirmBy'],
+  REJECTED: [...COMMON_EMAIL_PLACEHOLDERS],
 };
 
 export const EMAIL_SUBJECT_MAX = 200;
@@ -97,7 +98,7 @@ export interface EmailRenderedDto {
   text: string;
 }
 
-export type EmailSkipReason = 'NOT_FOUND' | 'INELIGIBLE' | 'NOT_SUBMITTED' | 'NOT_SHORTLISTED' | 'ALREADY_SENT';
+export type EmailSkipReason = 'NOT_FOUND' | 'INELIGIBLE' | 'NOT_SUBMITTED' | 'NOT_SHORTLISTED' | 'NOT_REJECTED' | 'ALREADY_SENT';
 
 export interface EmailSendResultDto {
   batchId: string;

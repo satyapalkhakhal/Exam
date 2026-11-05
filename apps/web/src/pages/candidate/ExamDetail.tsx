@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router';
 import { ArrowLeft, MapPinOff } from 'lucide-react';
+import { ArihantPlusStrip } from '@/components/auth/ArihantPlusBanner';
 import { CandidateSignOut } from '@/components/layout/CandidateSignOut';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -301,6 +302,9 @@ export default function CandidateExamDetail() {
             {reason}
           </p>
         )}
+
+        {/* Below the Start button, so it never competes with starting the exam. */}
+        <ArihantPlusStrip className="!mt-10" />
       </main>
     </div>
   );

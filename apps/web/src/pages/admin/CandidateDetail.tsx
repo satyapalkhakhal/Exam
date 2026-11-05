@@ -1,6 +1,6 @@
 // src/pages/admin/CandidateDetail.tsx
 // Why: Super Admin's per-candidate view (design §6.2, §7.2a): editable profile, login and
-// start locations, activity, integrity/location flags and status history, plus the
+// start locations, activity, integrity/location flags, status and result history, plus the
 // eligibility, location-exempt and reset-attempt actions. Location is approximate and
 // spoofable, so the disclaimer is always shown next to it.
 
@@ -23,6 +23,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { SendEmailDialog } from '@/components/admin/SendEmailDialog';
+import { ResultBadge } from '@/components/admin/ResultBadge';
 import { EmailDispatchTable } from '@/components/admin/EmailDispatchTable';
 import { useRoles } from '@/api/admin/roles';
 import {
@@ -36,6 +37,8 @@ import {
   type IntegrityCounts,
 } from '@/api/admin/candidates';
 import { formatIst } from '@/lib/istTime';
+import { templateForResult } from '@/lib/emailTemplates';
+import { historyChangeText } from '@/lib/historyChange';
 import { statusText } from './Candidates';
 
 /** Activity metadata is arbitrary JSON; never hand an object to React as a child. */
@@ -239,6 +242,7 @@ export default function CandidateDetail() {
           <h1 className="text-xl font-semibold text-foreground">{c.fullName}</h1>
           <p className="text-sm text-muted-foreground">
             <span className="font-mono">{c.candidateCode}</span> · {c.jobRoleName} · <Badge variant="outline">{statusText(c.status)}</Badge>
+            {c.result && <> <ResultBadge result={c.result} /></>}
             {attempt && <> · attempt {statusText(attempt.status)}</>}
           </p>
         </div>
@@ -264,7 +268,7 @@ export default function CandidateDetail() {
                 <Link to={`/admin/candidates/${o.id}`} className="text-primary hover:underline">
                   <span className="font-mono">{o.candidateCode}</span> · {o.jobRole.name}
                 </Link>{' '}
-                <Badge variant="outline">{statusText(o.status)}</Badge>
+                <Badge variant="outline">{statusText(o.status)}</Badge> <ResultBadge result={o.result ?? null} />
               </li>
             ))}
           </ul>
@@ -364,7 +368,7 @@ export default function CandidateDetail() {
                 {history.map((h) => (
                   <TableRow key={h.id}>
                     <TableCell>{formatIst(h.createdAt)}</TableCell>
-                    <TableCell>{h.fromStatus ? `${statusText(h.fromStatus)} to ${statusText(h.toStatus)}` : statusText(h.toStatus)}</TableCell>
+                    <TableCell>{historyChangeText(h)}</TableCell>
                     <TableCell>{h.actorName ?? 'System'}</TableCell>
                     <TableCell>{h.reason ?? '-'}</TableCell>
                   </TableRow>
@@ -379,7 +383,7 @@ export default function CandidateDetail() {
       <SendEmailDialog
         open={emailOpen}
         candidateIds={[c.id]}
-        defaultTemplate={c.status === 'SHORTLISTED' ? 'SHORTLISTED' : 'SUBMISSION_RECEIVED'}
+        defaultTemplate={templateForResult(c.result)}
         onClose={() => setEmailOpen(false)}
       />
       <ReasonDialog

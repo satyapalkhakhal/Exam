@@ -39,6 +39,13 @@ enum AdminRole {
 enum EmailTemplateKey {
   SUBMISSION_RECEIVED
   SHORTLISTED
+  REJECTED
+}
+
+// HR's outcome for an application, kept apart from its exam progress (status).
+enum CandidateResult {
+  SHORTLISTED
+  REJECTED
 }
 
 enum EmailDispatchStatus {
@@ -114,6 +121,7 @@ model AdminUser {
   systemConfigsUpdated SystemConfig[]
   auditLogs            AdminAuditLog[]
   emailDispatches      EmailDispatch[]
+  candidateResults     Candidate[]              @relation("CandidateResultBy")
 
   @@map("admin_users")
 }
@@ -229,6 +237,9 @@ model Candidate {
   eligible       Boolean         @default(true)
   locationExempt Boolean         @default(false) @map("location_exempt")
   status         CandidateStatus @default(NOT_STARTED)
+  result         CandidateResult?
+  resultAt       DateTime?       @map("result_at") @db.Timestamptz(6)
+  resultById     String?         @map("result_by_id") @db.Uuid
   importBatchId  String?         @map("import_batch_id") @db.Uuid
   createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -236,6 +247,7 @@ model Candidate {
   account      CandidateAccount         @relation(fields: [accountId], references: [id], onDelete: Restrict)
   jobRole      JobRole                  @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
   importBatch  ImportBatch?             @relation(fields: [importBatchId], references: [id], onDelete: Restrict)
+  resultBy     AdminUser?               @relation("CandidateResultBy", fields: [resultById], references: [id], onDelete: Restrict)
   attempts     ExamAttempt[]
   activityLogs ActivityLog[]
   loginLogs    CandidateLoginLog[]
@@ -244,6 +256,8 @@ model Candidate {
 
   @@unique([accountId, jobRoleId])
   @@index([jobRoleId, status])
+  @@index([jobRoleId, result])
+  @@index([resultById])
   @@index([importBatchId])
   @@index([rollNumber])
   @@index([email])
@@ -416,6 +430,8 @@ model CandidateStatusHistory {
   candidateId String           @map("candidate_id") @db.Uuid
   fromStatus  CandidateStatus? @map("from_status")
   toStatus    CandidateStatus  @map("to_status")
+  fromResult  CandidateResult? @map("from_result")
+  toResult    CandidateResult? @map("to_result")
   byAdminId   String?          @map("by_admin_id") @db.Uuid
   comment     String?
   createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)

@@ -8,17 +8,8 @@ import type { EmailDispatchListQuery } from '@exam/shared';
 import { prisma } from '../../infrastructure/db/prisma.js';
 import type { Prisma } from '../../generated/prisma/client.js';
 import { writeAudit } from '../audit/index.js';
+import { attemptCounts } from '../exam/attemptCounts.js';
 import type { DispatchRepository, EmailsRepository } from './emails.service.js';
-
-async function attemptCounts(attemptIds: string[]): Promise<Map<string, { questionCount: number; answeredCount: number }>> {
-  if (attemptIds.length === 0) return new Map();
-  const counts = await prisma.$queryRaw<{ attempt_id: string; total: bigint; answered: bigint }[]>`
-    SELECT q.attempt_id::text AS attempt_id, COUNT(*) AS total, COUNT(*) FILTER (WHERE a.word_count > 0) AS answered
-    FROM attempt_questions q LEFT JOIN answers a ON a.attempt_question_id = q.id
-    WHERE q.attempt_id = ANY(${attemptIds}::uuid[])
-    GROUP BY q.attempt_id`;
-  return new Map(counts.map((c) => [c.attempt_id, { questionCount: Number(c.total), answeredCount: Number(c.answered) }]));
-}
 
 export const emailsRepository: EmailsRepository & DispatchRepository = {
   async templateMeta(keys) {
@@ -49,6 +40,7 @@ export const emailsRepository: EmailsRepository & DispatchRepository = {
         email: true,
         eligible: true,
         status: true,
+        result: true,
         jobRole: { select: { name: true } },
         attempts: {
           where: { status: { not: 'RESET' } },
@@ -67,6 +59,7 @@ export const emailsRepository: EmailsRepository & DispatchRepository = {
         email: r.email,
         eligible: r.eligible,
         status: r.status,
+        result: r.result,
         jobRoleName: r.jobRole.name,
         attempt: a
           ? { status: a.status, submittedAt: a.submittedAt, submitType: a.submitType, ...(counts.get(a.id) ?? { answeredCount: 0, questionCount: 0 }) }
@@ -149,10 +142,13 @@ export const emailsRepository: EmailsRepository & DispatchRepository = {
   },
 
   async findForSend(id) {
-    return prisma.emailDispatch.findUnique({
+    const d = await prisma.emailDispatch.findUnique({
       where: { id },
-      select: { id: true, status: true, toEmail: true, subject: true, html: true, text: true },
+      select: { id: true, status: true, template: true, toEmail: true, subject: true, html: true, text: true, candidate: { select: { result: true } } },
     });
+    if (!d) return null;
+    const { candidate, ...rest } = d;
+    return { ...rest, candidateResult: candidate.result };
   },
 
   async markSent(id) {

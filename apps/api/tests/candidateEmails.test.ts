@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_EMAIL_TEMPLATES,
+  buildRejectionEmail,
   buildShortlistEmail,
   buildSubmissionEmail,
   escapeHtml,
@@ -123,4 +124,20 @@ test('default templates read well without optional next-round fields', () => {
   assert.doesNotMatch(buildShortlistEmail(base).text, /before \.|\{|\}/);
   assert.doesNotMatch(buildSubmissionEmail(submission).text, /\{|\}/);
   assert.match(DEFAULT_EMAIL_TEMPLATES.SHORTLISTED.body, /\{roundName\}/);
+});
+
+test('rejection email: default subject, details table without next-round rows, contact in text', () => {
+  const e = buildRejectionEmail({ ...base, contactEmail: 'hr@x.test' });
+  assert.equal(e.subject, 'Update on your application — Backend Engineer');
+  assert.match(e.html, /Dear Ajith,/);
+  assert.match(e.html, />Role</);
+  assert.match(e.html, /ARC-0042/);
+  assert.doesNotMatch(e.html, /Next round/);
+  assert.match(e.text, /hr@x\.test/);
+  assert.match(e.text, /will not be moving forward/);
+});
+
+test('rejection email escapes interpolated values', () => {
+  const e = buildRejectionEmail({ ...base, fullName: '<b>x</b>' });
+  assert.doesNotMatch(e.html, /<b>x<\/b>/);
 });

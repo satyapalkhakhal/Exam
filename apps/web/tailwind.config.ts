@@ -103,6 +103,10 @@ export default {
         shimmer: 'shimmer 1.5s infinite',
         'bell-shake': 'bell-shake 3s ease-in-out infinite',
       },
+      fontFamily: {
+        // ArihantPlus banner headings (candidate login). Loaded in index.html.
+        display: ['Outfit', 'Inter', 'system-ui', 'sans-serif'],
+      },
       fontSize: {
         '2xs': ['0.65rem', { lineHeight: '1rem' }],
         xs: ['0.75rem', { lineHeight: '1.125rem' }],

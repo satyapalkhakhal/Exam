@@ -29,6 +29,7 @@ import { maskEmail } from '../../shared/utils/piiMask.js';
 import {
   DEFAULT_EMAIL_TEMPLATES,
   DEFAULT_HR_CONTACT,
+  buildRejectionEmail,
   buildShortlistEmail,
   buildSubmissionEmail,
   unknownPlaceholders,
@@ -62,6 +63,8 @@ export interface EmailCandidate {
   email: string;
   eligible: boolean;
   status: string;
+  /** HR's outcome, kept apart from the exam status. */
+  result: 'SHORTLISTED' | 'REJECTED' | null;
   jobRoleName: string;
   /** The current (non-RESET) attempt, if any. */
   attempt: {
@@ -197,9 +200,9 @@ export function createEmailsService(deps: EmailsDeps) {
     assertKnownPlaceholders(key, template);
     const [cfg, role] = await Promise.all([deps.getEmailConfig(), repo.firstActiveRoleName()]);
     const base = { fullName: SAMPLE.fullName, candidateCode: SAMPLE.candidateCode, jobRoleName: role ?? SAMPLE.fallbackRole, contactEmail: contactOf(cfg) };
-    return key === 'SUBMISSION_RECEIVED'
-      ? buildSubmissionEmail({ ...base, submittedAt: new Date(), submitType: 'MANUAL', answeredCount: 2, questionCount: 3 }, template)
-      : buildShortlistEmail({ ...base, nextRound: toNextRound(input.nextRound) }, template);
+    if (key === 'SUBMISSION_RECEIVED') return buildSubmissionEmail({ ...base, submittedAt: new Date(), submitType: 'MANUAL', answeredCount: 2, questionCount: 3 }, template);
+    if (key === 'REJECTED') return buildRejectionEmail(base, template);
+    return buildShortlistEmail({ ...base, nextRound: toNextRound(input.nextRound) }, template);
   }
 
   async function sendTest(key: EmailTemplateKey, input: EmailPreviewInput, adminId: string): Promise<{ sentTo: string }> {
@@ -219,6 +222,7 @@ export function createEmailsService(deps: EmailsDeps) {
   function render(key: EmailTemplateKey, c: EmailCandidate, template: EmailTemplate, contactEmail: string, nextRound: NextRoundDetails | undefined): EmailContent {
     const base = { fullName: c.fullName, candidateCode: c.candidateCode, jobRoleName: c.jobRoleName, contactEmail };
     if (key === 'SHORTLISTED') return buildShortlistEmail({ ...base, nextRound }, template);
+    if (key === 'REJECTED') return buildRejectionEmail(base, template);
     const a = c.attempt;
     return buildSubmissionEmail(
       {
@@ -237,7 +241,8 @@ export function createEmailsService(deps: EmailsDeps) {
     // An anonymised candidate (purge-candidates) has no real address left.
     if (!c.eligible || c.email.toLowerCase().endsWith('@invalid')) return 'INELIGIBLE';
     if (key === 'SUBMISSION_RECEIVED' && !(c.attempt && (c.attempt.status === 'SUBMITTED' || c.attempt.status === 'AUTO_SUBMITTED'))) return 'NOT_SUBMITTED';
-    if (key === 'SHORTLISTED' && c.status !== 'SHORTLISTED') return 'NOT_SHORTLISTED';
+    if (key === 'SHORTLISTED' && c.result !== 'SHORTLISTED') return 'NOT_SHORTLISTED';
+    if (key === 'REJECTED' && c.result !== 'REJECTED') return 'NOT_REJECTED';
     return alreadySent ? 'ALREADY_SENT' : null;
   }
 
@@ -305,6 +310,9 @@ export type EmailsService = ReturnType<typeof createEmailsService>;
 export interface QueuedDispatch {
   id: string;
   status: EmailDispatchStatus;
+  template: EmailTemplateKey;
+  /** The candidate's result now, so an outcome email that no longer matches is not sent. */
+  candidateResult: 'SHORTLISTED' | 'REJECTED' | null;
   toEmail: string;
   subject: string;
   html: string;
@@ -321,15 +329,25 @@ export interface DispatchRepository {
 
 export type DispatchOutcome = 'SENT' | 'SKIPPED';
 
+const SUPERSEDED = 'Not sent: the result changed before the email went out';
+const OUTCOME_TEMPLATES = new Set<EmailTemplateKey>(['SHORTLISTED', 'REJECTED']);
+
 /**
  * Delivers one dispatch. A row that is not QUEUED (already sent, or failed
- * earlier) is left alone, so a duplicate or stale job is a no-op. A failed
- * send is rethrown so the queue retries it; only the final attempt marks the row FAILED.
+ * earlier) is left alone, so a duplicate or stale job is a no-op. An outcome
+ * email (Shortlisted / Not selected) whose candidate result has changed since it
+ * was queued (re-decided, reopened, reset) is marked FAILED instead of sent. A
+ * failed send is rethrown so the queue retries it; only the final attempt marks the row FAILED.
  */
 export function createDispatchProcessor(deps: { repo: DispatchRepository; sendEmail: (p: SendEmailParams) => Promise<void> }) {
   return async function process(dispatchId: string, opts: { finalAttempt: boolean }): Promise<DispatchOutcome> {
     const d = await deps.repo.findForSend(dispatchId);
     if (!d || d.status !== 'QUEUED') return 'SKIPPED';
+    if (OUTCOME_TEMPLATES.has(d.template) && d.candidateResult !== d.template) {
+      await deps.repo.recordFailure(d.id, SUPERSEDED, true);
+      logger.info('email dispatch superseded', { dispatchId: d.id, template: d.template });
+      return 'SKIPPED';
+    }
     try {
       await deps.sendEmail({ to: d.toEmail, subject: d.subject, html: d.html, text: d.text });
     } catch (err) {

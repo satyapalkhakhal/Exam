@@ -4,6 +4,8 @@
 // PII block is optional and the API adds it only for a Super Admin.
 
 import { z } from 'zod';
+import { CANDIDATE_BULK_MAX, type CandidateResult } from './candidates.js';
+import { NextRoundSchema, type EmailSendResultDto } from './emails.js';
 
 export const EVALUATION_STATES = ['PENDING', 'DRAFT', 'SUBMITTED'] as const;
 export type EvaluationState = (typeof EVALUATION_STATES)[number];
@@ -51,6 +53,36 @@ export const DecisionSchema = z.object({
   comment: z.string().trim().max(500).optional(),
 });
 export type DecisionInput = z.infer<typeof DecisionSchema>;
+
+/**
+ * Shortlist or reject several applications at once (Candidates page, and the
+ * Leaderboard with one id). With sendEmail the matching email is queued for the
+ * candidates whose result actually changed.
+ */
+export const CandidateDecisionBulkSchema = z.object({
+  candidateIds: z
+    .array(z.string().uuid())
+    .min(1, 'Select at least one candidate')
+    .max(CANDIDATE_BULK_MAX, `At most ${CANDIDATE_BULK_MAX} candidates at a time`)
+    .transform((ids) => [...new Set(ids)]),
+  decision: z.enum(DECISIONS),
+  comment: z.string().trim().max(500).optional(),
+  sendEmail: z.boolean(),
+  /** Used by SHORTLISTED emails only. */
+  nextRound: NextRoundSchema.optional(),
+});
+export type CandidateDecisionBulkInput = z.infer<typeof CandidateDecisionBulkSchema>;
+
+export type DecisionSkipReason = 'NOT_FOUND' | 'NOT_EVALUATED' | 'ALREADY_DECIDED';
+
+export interface CandidateDecisionBulkResultDto {
+  updated: number;
+  emailsQueued: number;
+  /** Set when the results were saved but the emails could not be queued. */
+  emailError: string | null;
+  skipped: { candidateId: string; candidateCode: string | null; fullName: string | null; reason: DecisionSkipReason }[];
+  emailSkipped: EmailSendResultDto['skipped'];
+}
 
 export const LeaderboardQuerySchema = z.object({ jobRoleId: uuid });
 export const ExportQuerySchema = z.object({ jobRoleId: uuid.optional() });
@@ -118,6 +150,7 @@ export interface LeaderboardRowDto extends CandidatePiiDto {
   rank: number;
   candidateCode: string;
   status: string;
+  result: CandidateResult | null;
   submittedAt: string | null;
   totalMarks: number;
   maxMarks: number;

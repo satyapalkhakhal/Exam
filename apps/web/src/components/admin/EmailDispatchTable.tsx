@@ -15,6 +15,7 @@ import { formatIst } from '@/lib/istTime';
 export const TEMPLATE_NAMES: Record<EmailTemplateKey, string> = {
   SUBMISSION_RECEIVED: 'Submission received',
   SHORTLISTED: 'Shortlisted',
+  REJECTED: 'Not selected',
 };
 const STATUS_TEXT: Record<EmailDispatchStatus, string> = { QUEUED: 'Queued', SENT: 'Sent', FAILED: 'Failed' };
 

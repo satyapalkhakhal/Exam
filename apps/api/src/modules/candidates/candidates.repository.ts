@@ -6,11 +6,12 @@
 // Lock order is account row, then candidate rows (as the exam start does), so
 // admin writes cannot deadlock with a start.
 
-import type { CandidateBulkJobRoleResultDto, CandidateListQuery } from '@exam/shared';
+import { CANDIDATE_BULK_MAX, type CandidateBulkJobRoleResultDto, type CandidateListQuery, type CandidateRowDto } from '@exam/shared';
 import { prisma } from '../../infrastructure/db/prisma.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { conflict } from '../../shared/errors.js';
 import { writeAudit } from '../audit/index.js';
+import { attemptCounts } from '../exam/attemptCounts.js';
 import type { CandidatesRepository } from './candidates.service.js';
 import type { ExistingAccount } from './candidateImport.parser.js';
 
@@ -23,6 +24,13 @@ function listWhere(q: CandidateListQuery): Prisma.CandidateWhereInput {
   return {
     ...(q.jobRoleId ? { jobRoleId: q.jobRoleId } : {}),
     ...(q.status ? { status: q.status } : {}),
+    ...(q.result ? { result: q.result === 'NONE' ? null : q.result } : {}),
+    // gte never matches NULL, so a set minimum also drops rows without a value.
+    ...(q.xMin !== undefined ? { xPercentage: { gte: q.xMin } } : {}),
+    ...(q.xiiMin !== undefined ? { xiiPercentage: { gte: q.xiiMin } } : {}),
+    ...(q.cpiMin !== undefined ? { majorCpi: { gte: q.cpiMin } } : {}),
+    // percentage is only set while the attempt's evaluation is submitted.
+    ...(q.marksPctMin !== undefined ? { attempts: { some: { status: { not: 'RESET' }, percentage: { gte: q.marksPctMin } } } } : {}),
     ...(q.search
       ? {
           OR: [
@@ -35,6 +43,33 @@ function listWhere(q: CandidateListQuery): Prisma.CandidateWhereInput {
         }
       : {}),
   };
+}
+
+const ATTEMPT_SORT = {
+  marks: Prisma.sql`a.percentage`,
+  timeTaken: Prisma.sql`(a.submitted_at - a.started_at)`,
+} as const;
+
+/**
+ * Sorts by a value of the current (non-RESET) attempt, which Prisma cannot order
+ * by: the matching ids come from the normal where, then one SQL query orders and
+ * pages them (empty values last either way, ties by id). There is at most one
+ * non-RESET attempt per candidate (partial unique index).
+ */
+async function listByAttempt(q: CandidateListQuery, where: Prisma.CandidateWhereInput) {
+  const matching = (await prisma.candidate.findMany({ where, select: { id: true } })).map((r) => r.id);
+  if (matching.length === 0) return { rows: [], total: 0 };
+  const expr = ATTEMPT_SORT[q.sort as keyof typeof ATTEMPT_SORT];
+  const dir = q.dir === 'asc' ? Prisma.sql`ASC` : Prisma.sql`DESC`;
+  const page = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT c.id::text AS id FROM candidates c
+    LEFT JOIN exam_attempts a ON a.candidate_id = c.id AND a.status <> 'RESET'
+    WHERE c.id = ANY(${matching}::uuid[])
+    ORDER BY ${expr} ${dir} NULLS LAST, c.id ASC
+    LIMIT ${q.pageSize} OFFSET ${(q.page - 1) * q.pageSize}`;
+  const rows = await prisma.candidate.findMany({ where: { id: { in: page.map((p) => p.id) } }, include });
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return { rows: page.flatMap((p) => byId.get(p.id) ?? []), total: matching.length };
 }
 
 export const candidatesRepository: CandidatesRepository = {
@@ -173,6 +208,7 @@ export const candidatesRepository: CandidatesRepository = {
 
   async list(q, ids) {
     const where: Prisma.CandidateWhereInput = ids ? { AND: [listWhere(q), { id: ids }] } : listWhere(q);
+    if (q.sort === 'timeTaken' || q.sort === 'marks') return listByAttempt(q, where);
     const orderBy: Prisma.CandidateOrderByWithRelationInput[] = [
       { [q.sort]: { sort: q.dir, nulls: 'last' } } as Prisma.CandidateOrderByWithRelationInput,
       { id: 'asc' },
@@ -183,6 +219,47 @@ export const candidatesRepository: CandidatesRepository = {
       prisma.candidate.count({ where }),
     ]);
     return { rows, total };
+  },
+
+  async listExtras(rows) {
+    if (rows.length === 0) return { exams: new Map(), others: new Map() };
+    const ids = rows.map((r) => r.id);
+    const [attempts, siblings] = await Promise.all([
+      prisma.examAttempt.findMany({
+        where: { candidateId: { in: ids }, status: { not: 'RESET' } },
+        select: {
+          id: true, candidateId: true, startedAt: true, submittedAt: true, totalMarks: true, maxMarks: true, percentage: true,
+          evaluation: { select: { status: true } },
+        },
+      }),
+      prisma.candidate.findMany({
+        where: { accountId: { in: [...new Set(rows.map((r) => r.accountId))] } },
+        orderBy: [{ jobRole: { name: 'asc' } }, { id: 'asc' }],
+        select: { id: true, accountId: true, status: true, result: true, jobRole: { select: { name: true } } },
+      }),
+    ]);
+    const counts = await attemptCounts(attempts.map((a) => a.id));
+    const exams = new Map(
+      attempts.map((a) => [
+        a.candidateId,
+        { ...a, evaluated: a.evaluation?.status === 'SUBMITTED', ...(counts.get(a.id) ?? { answeredCount: 0, questionCount: 0 }) },
+      ]),
+    );
+    const others = new Map<string, { id: string; jobRoleName: string; status: CandidateRowDto['status']; result: CandidateRowDto['result'] }[]>();
+    for (const c of siblings) {
+      const list = others.get(c.accountId) ?? [];
+      list.push({ id: c.id, jobRoleName: c.jobRole.name, status: c.status, result: c.result });
+      others.set(c.accountId, list);
+    }
+    return { exams, others };
+  },
+
+  async matchingIds(q, ids) {
+    const where: Prisma.CandidateWhereInput = ids ? { AND: [listWhere(q), { id: ids }] } : listWhere(q);
+    const total = await prisma.candidate.count({ where });
+    if (total > CANDIDATE_BULK_MAX) return { total, rows: [] };
+    const rows = await prisma.candidate.findMany({ where, select: { id: true, jobRoleId: true }, orderBy: { id: 'asc' } });
+    return { total, rows };
   },
 
   async detail(id, skip, take) {
@@ -204,7 +281,7 @@ export const candidatesRepository: CandidatesRepository = {
       prisma.candidate.findMany({
         where: { accountId: candidate.accountId, id: { not: id } },
         orderBy: { jobRole: { name: 'asc' } },
-        select: { id: true, candidateCode: true, status: true, jobRole: { select: { id: true, name: true } } },
+        select: { id: true, candidateCode: true, status: true, result: true, jobRole: { select: { id: true, name: true } } },
       }),
     ]);
     return { candidate, loginLogs, attempt, otherApplications, activity: { rows, total }, history };
@@ -350,11 +427,12 @@ export const candidatesRepository: CandidatesRepository = {
       await tx.$queryRaw`SELECT id FROM candidates WHERE id = ${id}::uuid FOR UPDATE`;
       const attempt = await tx.examAttempt.findFirst({ where: { candidateId: id, status: { not: 'RESET' } }, select: { id: true } });
       if (!attempt) return false;
-      const candidate = await tx.candidate.findUniqueOrThrow({ where: { id }, select: { status: true } });
+      const candidate = await tx.candidate.findUniqueOrThrow({ where: { id }, select: { status: true, result: true } });
       await tx.examAttempt.update({ where: { id: attempt.id }, data: { status: 'RESET' } });
-      await tx.candidate.update({ where: { id }, data: { status: 'NOT_STARTED' } });
+      // Back to not started, so HR's result (if any) no longer applies.
+      await tx.candidate.update({ where: { id }, data: { status: 'NOT_STARTED', result: null, resultAt: null, resultById: null } });
       await tx.candidateStatusHistory.create({
-        data: { candidateId: id, fromStatus: candidate.status, toStatus: 'NOT_STARTED', byAdminId: adminId, comment: reason },
+        data: { candidateId: id, fromStatus: candidate.status, toStatus: 'NOT_STARTED', fromResult: candidate.result, toResult: null, byAdminId: adminId, comment: reason },
       });
       await writeAudit(tx, audit);
       return true;

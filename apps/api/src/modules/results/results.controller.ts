@@ -33,6 +33,7 @@ async function stream(res: Response, kind: 'results' | 'activity', data: { roleN
 export function createResultsController(service: ResultsService) {
   return {
     decide: wrap(async (req, res) => ok(res, await service.decide((req.params as { id: string }).id, req.body, actorOf(req)))),
+    decideMany: wrap(async (req, res) => ok(res, await service.decideMany(req.body, actorOf(req)))),
     leaderboard: wrap(async (req, res) => ok(res, await service.leaderboard((req.query as { jobRoleId: string }).jobRoleId))),
     dashboard: wrap(async (_req, res) => ok(res, await service.dashboard())),
     resultsExport: wrap(async (req, res) => stream(res, 'results', await service.resultsExport((req.query as { jobRoleId?: string }).jobRoleId))),

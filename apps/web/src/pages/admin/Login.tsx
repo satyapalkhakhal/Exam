@@ -7,6 +7,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { Navigate, useNavigate } from 'react-router';
+import { ArihantPlusBanner } from '@/components/auth/ArihantPlusBanner';
 import { AuthPageShell, ServerErrorNotice } from '@/components/auth/AuthPageShell';
 import { OtpForm } from '@/components/auth/OtpForm';
 import { Button } from '@/components/ui/button';
@@ -80,14 +81,14 @@ export default function Login() {
 
   if (challengeId) {
     return (
-      <AuthPageShell title="Enter your code" subtitle="We sent a 6-digit code to your registered contact.">
+      <AuthPageShell title="Enter your code" subtitle="We sent a 6-digit code to your registered contact." brand="plus" aside={<ArihantPlusBanner />}>
         <OtpForm onSubmit={submitCode} onResend={resend} submitting={verify.isPending} error={otpError} />
       </AuthPageShell>
     );
   }
 
   return (
-    <AuthPageShell title="Admin sign in" subtitle="Arihant Capital — Recruitment Assessment">
+    <AuthPageShell title="Admin sign in" subtitle="Arihant Plus — Recruitment Assessment" brand="plus" aside={<ArihantPlusBanner />}>
       <form className="space-y-4" onSubmit={handleSubmit(submitCreds)} noValidate>
         {login.isError && <ServerErrorNotice message={loginErrorMessage(login.error)} />}
         <div className="space-y-1.5">

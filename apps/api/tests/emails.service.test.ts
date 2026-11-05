@@ -29,6 +29,7 @@ const cand = (n: number, over: Partial<EmailCandidate> = {}): EmailCandidate => 
   email: `p${n}@x.test`,
   eligible: true,
   status: 'SUBMITTED',
+  result: null,
   jobRoleName: 'Backend Engineer',
   attempt: submitted,
   ...over,
@@ -104,7 +105,7 @@ const send = (over: Partial<EmailSendInput> & Pick<EmailSendInput, 'candidateIds
 test('templates list as defaults until saved, then as custom with who saved them', async () => {
   const { service } = setup();
   const before = (await service.listTemplates()).templates;
-  assert.deepEqual(before.map((t) => t.key), ['SUBMISSION_RECEIVED', 'SHORTLISTED']);
+  assert.deepEqual(before.map((t) => t.key), ['SUBMISSION_RECEIVED', 'SHORTLISTED', 'REJECTED']);
   assert.ok(before.every((t) => t.isDefault && t.updatedAt === null));
   assert.equal(before[0]!.subject, DEFAULT_EMAIL_TEMPLATES.SUBMISSION_RECEIVED.subject);
   assert.ok(before[0]!.placeholders.some((p) => p.token === '{submittedAt}'));
@@ -218,8 +219,8 @@ test('auto-submitted attempts count as submitted', async () => {
   assert.equal((await service.send(send({ candidateIds: [id(1)] }), ADMIN)).queued, 1);
 });
 
-test('shortlisted template requires SHORTLISTED status and uses the next-round details', async () => {
-  const { service, created } = setup({ candidates: [cand(1, { status: 'SHORTLISTED' }), cand(2, { status: 'EVALUATED' })] });
+test('shortlisted template requires a SHORTLISTED result and uses the next-round details', async () => {
+  const { service, created } = setup({ candidates: [cand(1, { status: 'EVALUATED', result: 'SHORTLISTED' }), cand(2, { status: 'EVALUATED' })] });
   const r = await service.send(
     { template: 'SHORTLISTED', candidateIds: [id(1), id(2)], nextRound: { name: 'HR round', link: 'https://meet.test/x', confirmBy: '2026-11-07T12:30:00.000Z' } },
     ADMIN,
@@ -229,6 +230,31 @@ test('shortlisted template requires SHORTLISTED status and uses the next-round d
   assert.match(created[0]!.subject, /shortlisted for the HR round/);
   assert.match(created[0]!.html, /href="https:\/\/meet\.test\/x"/);
   assert.match(created[0]!.text, /Please confirm by: 7 Nov 2026, 6:00 pm IST/);
+});
+
+test('SHORTLISTED template checks result not status', async () => {
+  const { service } = setup({ candidates: [cand(1, { status: 'EVALUATED', result: 'SHORTLISTED' }), cand(2, { status: 'SHORTLISTED', result: null })] });
+  const r = await service.send({ template: 'SHORTLISTED', candidateIds: [id(1), id(2)] }, ADMIN);
+  assert.equal(r.queued, 1);
+  assert.deepEqual(r.skipped.map((s) => [s.candidateId, s.reason]), [[id(2), 'NOT_SHORTLISTED']]);
+});
+
+test('REJECTED template skips non-rejected as NOT_REJECTED and renders the not-selected email', async () => {
+  const { service, created } = setup({
+    candidates: [cand(1, { status: 'EVALUATED', result: 'REJECTED' }), cand(2, { status: 'EVALUATED', result: 'SHORTLISTED' }), cand(3, { status: 'EVALUATED' })],
+  });
+  const r = await service.send({ template: 'REJECTED', candidateIds: [id(1), id(2), id(3)] }, ADMIN);
+  assert.equal(r.queued, 1);
+  assert.deepEqual(r.skipped.map((s) => [s.candidateId, s.reason]), [[id(2), 'NOT_REJECTED'], [id(3), 'NOT_REJECTED']]);
+  assert.equal(created[0]!.template, 'REJECTED');
+  assert.equal(created[0]!.subject, 'Update on your application — Backend Engineer');
+});
+
+test('REJECTED preview renders with sample data', async () => {
+  const { service } = setup();
+  const p = await service.renderPreview('REJECTED', {});
+  assert.equal(p.subject, 'Update on your application — Quant Analyst');
+  assert.match(p.html, /Dear Ajith,/);
 });
 
 test('resend queues candidates who already have a QUEUED or SENT email', async () => {
@@ -262,7 +288,9 @@ function processorSetup(row: Partial<QueuedDispatch> | null, sendError?: Error) 
   const sent: string[] = [];
   const repo: DispatchRepository = {
     async findForSend() {
-      return row ? { id: 'd1', status: state.status as QueuedDispatch['status'], toEmail: 'c@x.test', subject: 's', html: '<p>h</p>', text: 't', ...row } : null;
+      return row
+        ? { id: 'd1', status: state.status as QueuedDispatch['status'], template: 'SUBMISSION_RECEIVED', candidateResult: null, toEmail: 'c@x.test', subject: 's', html: '<p>h</p>', text: 't', ...row }
+        : null;
     },
     async markSent() {
       if (state.status !== 'QUEUED') return false;
@@ -291,6 +319,27 @@ test('worker sends a QUEUED dispatch and marks it SENT', async () => {
   assert.equal(await process('d1', { finalAttempt: false }), 'SENT');
   assert.deepEqual(sent, ['c@x.test']);
   assert.equal(state.status, 'SENT');
+});
+
+test('worker drops an outcome email whose result changed before sending, marking it FAILED', async () => {
+  for (const [template, candidateResult] of [
+    ['SHORTLISTED', 'REJECTED'],
+    ['SHORTLISTED', null],
+    ['REJECTED', 'SHORTLISTED'],
+    ['REJECTED', null],
+  ] as const) {
+    const { process, state, sent } = processorSetup({ template, candidateResult });
+    assert.equal(await process('d1', { finalAttempt: false }), 'SKIPPED');
+    assert.equal(sent.length, 0);
+    assert.equal(state.status, 'FAILED');
+    assert.equal(state.error, 'Not sent: the result changed before the email went out');
+  }
+});
+
+test('worker still sends an outcome email whose result is unchanged', async () => {
+  const { process, sent } = processorSetup({ template: 'REJECTED', candidateResult: 'REJECTED' });
+  assert.equal(await process('d1', { finalAttempt: false }), 'SENT');
+  assert.deepEqual(sent, ['c@x.test']);
 });
 
 test('worker is a no-op unless the dispatch is QUEUED (or exists)', async () => {

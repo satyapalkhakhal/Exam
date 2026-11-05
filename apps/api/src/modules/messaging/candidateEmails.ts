@@ -152,6 +152,16 @@ export const DEFAULT_EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = 
       'Congratulations once again, and we look forward to speaking with you.',
     ].join('\n\n'),
   },
+  REJECTED: {
+    subject: 'Update on your application — {role}',
+    body: [
+      'Dear {firstName},',
+      'Thank you for your interest in the {role} role at Arihant Capital and for the time you put into the written assessment.',
+      'After careful review, we will not be moving forward with your application at this time. This decision was not easy, given the strength of the applications we received.',
+      'We will keep your details on file and may contact you about future openings that match your profile.',
+      'We wish you every success.',
+    ].join('\n\n'),
+  },
 };
 
 interface CommonParams {
@@ -298,5 +308,26 @@ export function buildShortlistEmail(p: ShortlistEmailParams, template: EmailTemp
     '',
     textFooter(contact),
   ].join('\n');
+  return { subject, html, text };
+}
+
+// ---- 3. Not selected --------------------------------------------------------------
+
+export function buildRejectionEmail(p: CommonParams, template: EmailTemplate = DEFAULT_EMAIL_TEMPLATES.REJECTED): EmailContent {
+  const contact = p.contactEmail ?? DEFAULT_HR_CONTACT;
+  const values = commonValues(p, contact);
+  const subject = oneLine(fillPlaceholders(template.subject, values));
+  const paras = bodyParagraphs(fillPlaceholders(template.body, values));
+  const rows: Row[] = [
+    ['Role', p.jobRoleName],
+    ['Candidate code', p.candidateCode],
+  ];
+  const html = layout({
+    preheader: `An update on your application for the ${p.jobRoleName} role.`,
+    heading: 'Update on your application',
+    contact,
+    bodyHtml: templateParagraphsHtml(paras) + detailsTableHtml(rows) + paragraphsHtml([`Best wishes,<br>${SIGN_OFF_TEAM}`]),
+  });
+  const text = [...paras.flatMap((x) => [x, '']), detailsText(rows), '', `Best wishes,\n${SIGN_OFF_TEAM}`, '', textFooter(contact)].join('\n');
   return { subject, html, text };
 }

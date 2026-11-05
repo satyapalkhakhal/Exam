@@ -5,7 +5,7 @@
 
 import { Router } from 'express';
 import { z } from 'zod';
-import { DecisionSchema, ExportQuerySchema, LeaderboardQuerySchema } from '@exam/shared';
+import { CandidateDecisionBulkSchema, DecisionSchema, ExportQuerySchema, LeaderboardQuerySchema } from '@exam/shared';
 import { authorize } from '../../shared/middleware/authorize.js';
 import { validate } from '../../shared/middleware/validate.js';
 import { createResultsController } from './results.controller.js';
@@ -19,6 +19,7 @@ export function createResultsRouter(service: ResultsService): Router {
   const superAdmin = authorize('SUPER_ADMIN');
   r.get('/dashboard', authorize('SUPER_ADMIN', 'EVALUATOR'), c.dashboard);
   r.get('/leaderboard', superAdmin, validate({ query: LeaderboardQuerySchema }), c.leaderboard);
+  r.post('/candidates/bulk/result', superAdmin, validate({ body: CandidateDecisionBulkSchema }), c.decideMany);
   r.post('/candidates/:id/decision', superAdmin, validate({ params: IdParamsSchema, body: DecisionSchema }), c.decide);
   r.get('/exports/results.xlsx', superAdmin, validate({ query: ExportQuerySchema }), c.resultsExport);
   r.get('/exports/activity.xlsx', superAdmin, validate({ query: ExportQuerySchema }), c.activityExport);

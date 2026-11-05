@@ -16,9 +16,12 @@ import type {
   CandidateBulkJobRoleResultDto,
   CandidateDetailDto,
   CandidateDetailQuery,
+  CandidateExamStatsDto,
   CandidateFlagsDto,
   CandidateImportRow,
+  CandidateListItemDto,
   CandidateListQuery,
+  CandidateMatchingIdsDto,
   CandidateRowDto,
   CandidateCreateInput,
   CandidateUpdateInput,
@@ -27,6 +30,7 @@ import type {
   ImportResultDto,
   Paginated,
 } from '@exam/shared';
+import { CANDIDATE_BULK_MAX } from '@exam/shared';
 import { AppError, badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { sha256 } from '../../shared/utils/hash.js';
 import { readSheet } from '../../shared/utils/spreadsheet.js';
@@ -71,10 +75,30 @@ export interface CandidateRow {
   jobRoleId: string;
   jobRole: { name: string };
   status: CandidateRowDto['status'];
+  result: CandidateRowDto['result'];
   eligible: boolean;
   locationExempt: boolean;
   extra: unknown;
   createdAt: Date;
+}
+
+export interface ListExamRow {
+  startedAt: Date;
+  submittedAt: Date | null;
+  totalMarks: Num;
+  maxMarks: Num;
+  percentage: Num;
+  /** The evaluation is SUBMITTED: only then are marks shown. */
+  evaluated: boolean;
+  answeredCount: number;
+  questionCount: number;
+}
+
+export interface ListSiblingRow {
+  id: string;
+  jobRoleName: string;
+  status: CandidateRowDto['status'];
+  result: CandidateRowDto['result'];
 }
 
 export interface CandidateDetailRows {
@@ -84,9 +108,12 @@ export interface CandidateDetailRows {
     accuracyM: number | null; ip: string; browser: string; os: string; deviceType: string;
   }[];
   attempt: { id: string; status: string; startedAt: Date; submittedAt: Date | null } | null;
-  otherApplications: { id: string; candidateCode: string; status: string; jobRole: { id: string; name: string } }[];
+  otherApplications: { id: string; candidateCode: string; status: string; result: CandidateRowDto['result']; jobRole: { id: string; name: string } }[];
   activity: { rows: { id: string; eventType: string; createdAt: Date; metadata: unknown }[]; total: number };
-  history: { id: string; fromStatus: string | null; toStatus: string; comment: string | null; createdAt: Date; byAdmin: { name: string } | null }[];
+  history: {
+    id: string; fromStatus: string | null; toStatus: string; fromResult: CandidateRowDto['result']; toResult: CandidateRowDto['result'];
+    comment: string | null; createdAt: Date; byAdmin: { name: string } | null;
+  }[];
 }
 
 export interface ImportCommit {
@@ -119,6 +146,10 @@ export interface CandidatesRepository {
   possiblyFlaggedIds(query: CandidateListQuery): Promise<string[]>;
   /** `ids` further restricts the rows (the flagged filter, resolved by the service). */
   list(query: CandidateListQuery, ids?: { in: string[] } | { notIn: string[] }): Promise<{ rows: CandidateRow[]; total: number }>;
+  /** Current attempt stats per candidate id, and every application per account id (the caller drops the row itself). */
+  listExtras(rows: { id: string; accountId: string }[]): Promise<{ exams: Map<string, ListExamRow>; others: Map<string, ListSiblingRow[]> }>;
+  /** Ids matching the filters; rows is empty when total exceeds CANDIDATE_BULK_MAX. */
+  matchingIds(query: CandidateListQuery, ids?: { in: string[] } | { notIn: string[] }): Promise<{ total: number; rows: { id: string; jobRoleId: string }[] }>;
   detail(id: string, activitySkip: number, activityTake: number): Promise<CandidateDetailRows | null>;
   findById(id: string): Promise<CandidateRow | null>;
   /** Email and mobile changes go to the account (and every application's copy). Throws CONFLICT on a clash with another account or an already-held role. */
@@ -169,11 +200,25 @@ export const toRowDto = (r: CandidateRow): CandidateRowDto => ({
   jobRoleId: r.jobRoleId,
   jobRoleName: r.jobRole.name,
   status: r.status,
+  result: r.result,
   eligible: r.eligible,
   locationExempt: r.locationExempt,
   flagCount: 0,
   createdAt: r.createdAt.toISOString(),
 });
+
+const toExamStats = (a: ListExamRow | undefined): CandidateExamStatsDto | null =>
+  a
+    ? {
+        startedAt: a.startedAt.toISOString(),
+        submittedAt: a.submittedAt?.toISOString() ?? null,
+        answeredCount: a.answeredCount,
+        questionCount: a.questionCount,
+        totalMarks: a.evaluated ? num(a.totalMarks) : null,
+        maxMarks: num(a.maxMarks) ?? 0,
+        percentage: a.evaluated ? num(a.percentage) : null,
+      }
+    : null;
 
 export interface CandidatesDeps {
   redis: () => Redis;
@@ -187,22 +232,37 @@ export interface CandidatesDeps {
 }
 
 export function createCandidatesService(repo: CandidatesRepository, deps: CandidatesDeps) {
-  async function list(query: CandidateListQuery): Promise<Paginated<CandidateRowDto>> {
-    let ids: { in: string[] } | { notIn: string[] } | undefined;
-    if (query.flagged !== undefined) {
-      const candidates = await repo.possiblyFlaggedIds(query);
-      const scores = await deps.flagCounts(candidates);
-      const flagged = candidates.filter((id) => (scores.get(id) ?? 0) > 0);
-      ids = query.flagged ? { in: flagged } : { notIn: flagged };
-    }
-    const { rows, total } = await repo.list(query, ids);
-    const scores = await deps.flagCounts(rows.map((r) => r.id));
+  async function flaggedRestriction(query: CandidateListQuery): Promise<{ in: string[] } | { notIn: string[] } | undefined> {
+    if (query.flagged === undefined) return undefined;
+    const candidates = await repo.possiblyFlaggedIds(query);
+    const scores = await deps.flagCounts(candidates);
+    const flagged = candidates.filter((id) => (scores.get(id) ?? 0) > 0);
+    return query.flagged ? { in: flagged } : { notIn: flagged };
+  }
+
+  async function list(query: CandidateListQuery): Promise<Paginated<CandidateListItemDto>> {
+    const { rows, total } = await repo.list(query, await flaggedRestriction(query));
+    const [scores, extras] = await Promise.all([deps.flagCounts(rows.map((r) => r.id)), repo.listExtras(rows)]);
     return {
-      items: rows.map((r) => ({ ...toRowDto(r), flagCount: scores.get(r.id) ?? 0 })),
+      items: rows.map((r) => ({
+        ...toRowDto(r),
+        flagCount: scores.get(r.id) ?? 0,
+        exam: toExamStats(extras.exams.get(r.id)),
+        otherApplications: (extras.others.get(r.accountId) ?? [])
+          .filter((o) => o.id !== r.id)
+          .map((o) => ({ jobRoleName: o.jobRoleName, status: o.status, result: o.result })),
+      })),
       total,
       page: query.page,
       pageSize: query.pageSize,
     };
+  }
+
+  /** Every matching id, for "select all matching" on the list. */
+  async function matchingIds(query: CandidateListQuery): Promise<CandidateMatchingIdsDto> {
+    const { total, rows } = await repo.matchingIds(query, await flaggedRestriction(query));
+    if (total > CANDIDATE_BULK_MAX) throw badRequest(`More than ${CANDIDATE_BULK_MAX} candidates match. Narrow the filters.`);
+    return { ids: rows.map((r) => r.id), total, jobRoleIdById: Object.fromEntries(rows.map((r) => [r.id, r.jobRoleId])) };
   }
 
   async function detail(id: string, query: CandidateDetailQuery): Promise<CandidateDetailDto> {
@@ -224,7 +284,7 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
         os: l.os,
         deviceType: l.deviceType,
       })),
-      otherApplications: d.otherApplications.map((o) => ({ id: o.id, candidateCode: o.candidateCode, jobRole: o.jobRole, status: o.status })),
+      otherApplications: d.otherApplications.map((o) => ({ id: o.id, candidateCode: o.candidateCode, jobRole: o.jobRole, status: o.status, result: o.result })),
       attempt: d.attempt
         ? {
             id: d.attempt.id,
@@ -244,6 +304,8 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
         id: h.id,
         fromStatus: h.fromStatus,
         toStatus: h.toStatus,
+        fromResult: h.fromResult,
+        toResult: h.toResult,
         reason: h.comment,
         actorName: h.byAdmin?.name ?? null,
         createdAt: h.createdAt.toISOString(),
@@ -439,7 +501,7 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
     return { imported, skipped: cached.total - imported - updated, ...(updates.length > 0 ? { updated } : {}) };
   }
 
-  return { list, detail, create, update, bulkSetJobRole, setEligibility, setLocationExempt, resetAttempt, previewImport, confirmImport };
+  return { list, matchingIds, detail, create, update, bulkSetJobRole, setEligibility, setLocationExempt, resetAttempt, previewImport, confirmImport };
 }
 
 export type CandidatesService = ReturnType<typeof createCandidatesService>;

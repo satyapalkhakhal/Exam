@@ -56,9 +56,9 @@ before(async () => {
   );
   superId = admins[0]!.id;
   const role = await prisma.jobRole.create({ data: { name: 'Mail Role', examSetting: { create: {} } } });
-  const mk = (n: number, status: 'SUBMITTED' | 'SHORTLISTED' | 'NOT_STARTED') =>
-    createCandidate({ candidateCode: `MAIL-000${n}`, fullName: `Mail Person ${n}`, email: `mail${n}@cands.test`, jobRoleId: role.id, status });
-  const [a, b, c] = await Promise.all([mk(1, 'SUBMITTED'), mk(2, 'SHORTLISTED'), mk(3, 'NOT_STARTED')]);
+  const mk = (n: number, status: 'SUBMITTED' | 'EVALUATED' | 'NOT_STARTED', result: 'SHORTLISTED' | null = null) =>
+    createCandidate({ candidateCode: `MAIL-000${n}`, fullName: `Mail Person ${n}`, email: `mail${n}@cands.test`, jobRoleId: role.id, status, result });
+  const [a, b, c] = await Promise.all([mk(1, 'SUBMITTED'), mk(2, 'EVALUATED', 'SHORTLISTED'), mk(3, 'NOT_STARTED')]);
   submittedId = a.id;
   shortlistedId = b.id;
   pendingId = c.id;
@@ -84,6 +84,8 @@ before(async () => {
 });
 
 after(async () => {
+  // Later test files sign in with the static OTP, which only works while no channel is configured.
+  await prisma.systemConfig.deleteMany({ where: { key: EMAIL_KEY } });
   await closeEmailQueue();
   await prisma.$disconnect();
   await getRedis().quit();
@@ -99,6 +101,7 @@ test('templates: defaults, save, unknown placeholder rejected, reset', async () 
   const list = await sa.get('/api/admin/email-templates');
   assert.equal(list.status, 200, JSON.stringify(list.body));
   assert.ok(list.body.data.templates.every((t: { isDefault: boolean }) => t.isDefault));
+  assert.deepEqual(list.body.data.templates.map((t: { key: string }) => t.key), ['SUBMISSION_RECEIVED', 'SHORTLISTED', 'REJECTED']);
 
   const bad = await sa.put('/api/admin/email-templates/SUBMISSION_RECEIVED').send({ subject: 'Hi', body: 'Hello {nope}' });
   assert.equal(bad.status, 400);
@@ -174,7 +177,7 @@ test('send queues dispatches and jobs, skips with reasons, blocks repeats until 
   assert.equal(list.body.data.items[0].sentByName, 'M Super');
 });
 
-test('shortlisted emails go only to SHORTLISTED candidates', async () => {
+test('shortlisted emails go only to candidates whose result is SHORTLISTED', async () => {
   const res = await sa.post('/api/admin/emails/send').send({
     template: 'SHORTLISTED',
     candidateIds: [submittedId, shortlistedId],

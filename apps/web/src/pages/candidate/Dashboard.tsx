@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { MapPinOff } from 'lucide-react';
 import type { CandidateExamDto } from '@exam/shared';
+import { ArihantPlusStrip } from '@/components/auth/ArihantPlusBanner';
 import { CandidateSignOut } from '@/components/layout/CandidateSignOut';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -160,6 +161,8 @@ export default function CandidateDashboard() {
             </Section>
           </>
         )}
+
+        <ArihantPlusStrip className="!mt-10" />
       </main>
     </div>
   );

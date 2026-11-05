@@ -12,7 +12,7 @@
 
 import { prisma } from '../../infrastructure/db/prisma.js';
 import type { Prisma } from '../../generated/prisma/client.js';
-import type { SubmissionListQuery } from '@exam/shared';
+import type { CandidateResult, SubmissionListQuery } from '@exam/shared';
 import { writeAudit, type AuditRecord } from '../audit/index.js';
 import { TIMELINE_EVENT_TYPES } from './evaluation.mapper.js';
 
@@ -147,16 +147,21 @@ function txMethods(tx: Tx) {
       to: CandidateStatusValue,
       byAdminId: string,
       comment: string | null,
-    ): Promise<{ from: CandidateStatusValue } | null> {
-      const rows = await tx.$queryRaw<{ status: CandidateStatusValue }[]>`
-        SELECT status::text AS status FROM candidates WHERE id = ${candidateId}::uuid FOR UPDATE`;
+      opts: { clearResult?: boolean } = {},
+    ): Promise<{ from: CandidateStatusValue; fromResult: CandidateResult | null } | null> {
+      const rows = await tx.$queryRaw<{ status: CandidateStatusValue; result: CandidateResult | null }[]>`
+        SELECT status::text AS status, result::text AS result FROM candidates WHERE id = ${candidateId}::uuid FOR UPDATE`;
       const from = rows[0]?.status;
       if (!from) return null;
+      const fromResult = rows[0]!.result;
       const live = await tx.examAttempt.count({ where: { id: attemptId, status: { in: [...SUBMITTED_STATUSES] } } });
       if (live === 0) return null;
-      await tx.candidate.update({ where: { id: candidateId }, data: { status: to } });
-      await tx.candidateStatusHistory.create({ data: { candidateId, fromStatus: from, toStatus: to, byAdminId, comment } });
-      return { from };
+      const clear = opts.clearResult === true;
+      await tx.candidate.update({ where: { id: candidateId }, data: clear ? { status: to, result: null, resultAt: null, resultById: null } : { status: to } });
+      await tx.candidateStatusHistory.create({
+        data: { candidateId, fromStatus: from, toStatus: to, fromResult, toResult: clear ? null : fromResult, byAdminId, comment },
+      });
+      return { from, fromResult };
     },
     audit: (entry: AuditRecord) => writeAudit(tx, entry),
   };

@@ -5,16 +5,15 @@
 
 import { z } from 'zod';
 
-const CANDIDATE_STATUSES = [
-  'NOT_STARTED',
-  'IN_PROGRESS',
-  'SUBMITTED',
-  'AUTO_SUBMITTED',
-  'EVALUATED',
-  'SHORTLISTED',
-  'REJECTED',
-] as const;
+/** Exam progress, the only statuses written since results moved to their own column. */
+export const CANDIDATE_PROGRESS_STATUSES = ['NOT_STARTED', 'IN_PROGRESS', 'SUBMITTED', 'AUTO_SUBMITTED', 'EVALUATED'] as const;
+/** Every DB value: SHORTLISTED / REJECTED survive only on old history rows. */
+const CANDIDATE_STATUSES = [...CANDIDATE_PROGRESS_STATUSES, 'SHORTLISTED', 'REJECTED'] as const;
 export type CandidateStatus = (typeof CANDIDATE_STATUSES)[number];
+
+/** HR's outcome for an application, kept apart from its exam progress (status). */
+export const CANDIDATE_RESULTS = ['SHORTLISTED', 'REJECTED'] as const;
+export type CandidateResult = (typeof CANDIDATE_RESULTS)[number];
 
 /** Strips a +91 / 91 / 0 prefix and separators; null unless 10 digits starting 6-9. */
 export function normalizeMobile(raw: string): string | null {
@@ -111,12 +110,22 @@ export const CandidateResetSchema = z.object({ reason: z.string().trim().min(10)
 
 const bool = z.enum(['true', 'false']).transform((v) => v === 'true');
 
-export const CANDIDATE_SORT_KEYS = ['fullName', 'majorCpi', 'xPercentage', 'xiiPercentage', 'createdAt'] as const;
+export const CANDIDATE_SORT_KEYS = ['fullName', 'majorCpi', 'xPercentage', 'xiiPercentage', 'createdAt', 'timeTaken', 'marks'] as const;
+/** Result filter: NONE = no decision yet. */
+export const CANDIDATE_RESULT_FILTERS = ['SHORTLISTED', 'REJECTED', 'NONE'] as const;
+const pctMin = z.coerce.number().min(0).max(100).optional();
 export const CandidateListQuerySchema = z.object({
   search: z.string().trim().max(100).optional(),
   jobRoleId: z.string().uuid().optional(),
-  status: z.enum(CANDIDATE_STATUSES).optional(),
+  status: z.enum(CANDIDATE_PROGRESS_STATUSES).optional(),
+  result: z.enum(CANDIDATE_RESULT_FILTERS).optional(),
   flagged: bool.optional(),
+  /** Minimums: a row with no value in that column is excluded once a minimum is set. */
+  xMin: pctMin,
+  xiiMin: pctMin,
+  cpiMin: z.coerce.number().min(0).max(10).optional(),
+  /** Exam marks as a percentage of max marks; only evaluated attempts have one. */
+  marksPctMin: pctMin,
   sort: z.enum(CANDIDATE_SORT_KEYS).default('createdAt'),
   dir: z.enum(['asc', 'desc']).default('desc'),
   page: z.coerce.number().int().min(1).default(1),
@@ -144,10 +153,35 @@ export interface CandidateRowDto {
   jobRoleId: string;
   jobRoleName: string;
   status: CandidateStatus;
+  result: CandidateResult | null;
   eligible: boolean;
   locationExempt: boolean;
   flagCount: number;
   createdAt: string;
+}
+
+/** The current (non-reset) attempt of a list row. Marks stay null until its evaluation is submitted. */
+export interface CandidateExamStatsDto {
+  startedAt: string;
+  submittedAt: string | null;
+  answeredCount: number;
+  questionCount: number;
+  totalMarks: number | null;
+  maxMarks: number;
+  percentage: number | null;
+}
+
+export interface CandidateListItemDto extends CandidateRowDto {
+  exam: CandidateExamStatsDto | null;
+  /** The same person's other applications (other job profiles). */
+  otherApplications: { jobRoleName: string; status: CandidateStatus; result: CandidateResult | null }[];
+}
+
+/** Every candidate matching the list filters (for "select all matching"), capped at CANDIDATE_BULK_MAX. */
+export interface CandidateMatchingIdsDto {
+  ids: string[];
+  total: number;
+  jobRoleIdById: Record<string, string>;
 }
 
 export interface CandidateLoginLogDto {
@@ -181,8 +215,12 @@ export interface CandidateDetailDto {
   activity: { items: { id: string; type: string; createdAt: string; detail: unknown }[]; total: number; page: number; pageSize: number };
   flags: CandidateFlagsDto;
   /** The same person's other applications (same account), excluding this one. */
-  otherApplications: { id: string; candidateCode: string; jobRole: { id: string; name: string }; status: string }[];
-  history: { id: string; fromStatus: string | null; toStatus: string; reason: string | null; actorName: string | null; createdAt: string }[];
+  otherApplications: { id: string; candidateCode: string; jobRole: { id: string; name: string }; status: string; result: CandidateResult | null }[];
+  /** A row whose fromResult differs from toResult is a result change (decision, or cleared by a reopen/reset). */
+  history: {
+    id: string; fromStatus: string | null; toStatus: string; fromResult: CandidateResult | null; toResult: CandidateResult | null;
+    reason: string | null; actorName: string | null; createdAt: string;
+  }[];
 }
 
 export interface CandidateImportRow {

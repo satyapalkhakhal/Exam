@@ -6,8 +6,8 @@
 // validated here (0…max, steps of 0.5) whatever the client checked. Submit
 // needs every question marked, computes the totals and moves the candidate to
 // EVALUATED with history and an audit row, all in one transaction. Only a
-// Super Admin can reopen a submitted evaluation, which voids any decision and
-// returns the candidate to their submitted status. Blind marking is applied in
+// Super Admin can reopen a submitted evaluation, which clears any shortlist /
+// reject result and returns the candidate to their submitted status. Blind marking is applied in
 // the mapper, by the viewer's role.
 
 import {
@@ -156,14 +156,14 @@ export function createEvaluationService(deps: EvaluationDeps) {
       if (!attempt) throw notFound('Submission not found');
       if (!(await tx.reopen(attemptId))) throw conflict('Only a submitted evaluation can be reopened');
       const to = attempt.status === 'AUTO_SUBMITTED' ? 'AUTO_SUBMITTED' : 'SUBMITTED';
-      const moved = await tx.transitionCandidate(attempt.candidateId, attemptId, to, actor.id, reason);
+      const moved = await tx.transitionCandidate(attempt.candidateId, attemptId, to, actor.id, reason, { clearResult: true });
       if (!moved) throw conflict('This attempt has been reset.');
       await tx.audit({
         adminId: actor.id,
         action: 'EVALUATION_REOPENED',
         entity: ENTITY,
         entityId: attemptId,
-        metadata: { reason, fromStatus: moved.from, toStatus: to },
+        metadata: { reason, fromStatus: moved.from, toStatus: to, clearedResult: moved.fromResult },
         ip: actor.ip,
       });
       return { evaluationStatus: 'DRAFT' as const, candidateStatus: to };

@@ -6,8 +6,18 @@
 // XLSX exports. Marks, totals and comments are exported only once an
 // evaluation is submitted; a draft or reopened one is work in progress.
 
-import type { DashboardRoleDto, DecisionInput, LeaderboardRowDto } from '@exam/shared';
+import type {
+  CandidateDecisionBulkInput,
+  CandidateDecisionBulkResultDto,
+  CandidateResult,
+  DashboardRoleDto,
+  DecisionInput,
+  EmailSendInput,
+  EmailSendResultDto,
+  LeaderboardRowDto,
+} from '@exam/shared';
 import { conflict, notFound } from '../../shared/errors.js';
+import { logger } from '../../infrastructure/logger/logger.js';
 import type { CandidateFlags } from '../exam/index.js';
 import { flagBreakdown, flagScore } from '../exam/index.js';
 import { num, toCandidatePii } from '../evaluation/index.js';
@@ -17,7 +27,14 @@ import type { CandidateStatusValue, LiveAttemptRow, ResultsRepository, ScoredAtt
 export interface ResultsDeps {
   repo: ResultsRepository;
   getFlagsBatch: (candidateIds: string[]) => Promise<Map<string, CandidateFlags>>;
+  /** True when the email integration can send (checked before any result changes). */
+  emailReady: () => Promise<boolean>;
+  /** The emails module's queued send (emails.send). */
+  sendEmails: (input: EmailSendInput, adminId: string) => Promise<EmailSendResultDto>;
 }
+
+const EMAIL_NOT_CONFIGURED = 'Email is not set up. Configure it in Integrations.';
+const EMAIL_QUEUE_FAILED = 'Results saved, but the emails could not be queued. Use Send email to retry.';
 
 export interface Actor {
   id: string;
@@ -49,25 +66,49 @@ const minutes = (a: Date, b: Date | null): number | null => (b ? Math.round((b.g
 export function createResultsService(deps: ResultsDeps) {
   const { repo } = deps;
 
-  async function decide(candidateId: string, input: DecisionInput, actor: Actor): Promise<{ candidateId: string; status: string }> {
+  const decisionAudit = (actor: Actor, to: CandidateResult, comment: string | null, batch: boolean) => (candidateId: string, from: CandidateResult | null) => ({
+    adminId: actor.id,
+    action: 'CANDIDATE_DECISION',
+    entity: 'candidate',
+    entityId: candidateId,
+    metadata: { from, to, comment, batch },
+    ip: actor.ip,
+  });
+
+  /** Leaderboard's single decision, no email: the old 404/409 replies are kept. */
+  async function decide(candidateId: string, input: DecisionInput, actor: Actor): Promise<{ candidateId: string; result: CandidateResult }> {
     const comment = input.comment ? input.comment : null;
-    const r = await repo.decide(candidateId, input.decision, actor.id, comment, (from) => ({
-      adminId: actor.id,
-      action: 'CANDIDATE_DECISION',
-      entity: 'candidate',
-      entityId: candidateId,
-      metadata: { from, to: input.decision, comment },
-      ip: actor.ip,
-    }));
-    if ('refused' in r) {
-      if (r.refused === 'NOT_FOUND') throw notFound('Candidate not found');
-      throw conflict(
-        r.from === input.decision
-          ? `The candidate is already ${input.decision.toLowerCase()}`
-          : 'A decision can only be made after the evaluation is submitted',
+    const r = await repo.decideMany([candidateId], input.decision, actor.id, comment, decisionAudit(actor, input.decision, comment, false));
+    const skip = r.skipped[0];
+    if (skip?.reason === 'NOT_FOUND') throw notFound('Candidate not found');
+    if (skip?.reason === 'ALREADY_DECIDED') throw conflict(`The candidate is already ${input.decision.toLowerCase()}`);
+    if (skip) throw conflict('A decision can only be made after the evaluation is submitted');
+    return { candidateId, result: input.decision };
+  }
+
+  /**
+   * Bulk shortlist/reject. Results commit first; then (sendEmail) the matching
+   * email is queued for the candidates whose result changed, as a deliberate
+   * re-send. A queue failure after the commit keeps the results and is reported.
+   */
+  async function decideMany(input: CandidateDecisionBulkInput, actor: Actor): Promise<CandidateDecisionBulkResultDto> {
+    if (input.sendEmail && !(await deps.emailReady())) throw conflict(EMAIL_NOT_CONFIGURED, 'EMAIL_NOT_CONFIGURED');
+    const comment = input.comment ? input.comment : null;
+    const { decided, skipped } = await repo.decideMany(input.candidateIds, input.decision, actor.id, comment, decisionAudit(actor, input.decision, comment, true));
+    const result: CandidateDecisionBulkResultDto = { updated: decided.length, emailsQueued: 0, emailError: null, skipped, emailSkipped: [] };
+    if (!input.sendEmail || decided.length === 0) return result;
+    try {
+      const sent = await deps.sendEmails(
+        { template: input.decision, candidateIds: decided, nextRound: input.decision === 'SHORTLISTED' ? input.nextRound : undefined, resend: true },
+        actor.id,
       );
+      result.emailsQueued = sent.queued;
+      result.emailSkipped = sent.skipped;
+    } catch (err) {
+      logger.error('Decision emails could not be queued', { count: decided.length, error: err instanceof Error ? err.message : 'unknown' });
+      result.emailError = EMAIL_QUEUE_FAILED;
     }
-    return { candidateId, status: input.decision };
+    return result;
   }
 
   async function leaderboard(jobRoleId: string): Promise<{ items: LeaderboardRowDto[] }> {
@@ -79,6 +120,7 @@ export function createResultsService(deps: ResultsDeps) {
         candidateCode: r.candidate.candidateCode,
         ...toCandidatePii(r.candidate),
         status: r.candidate.status,
+        result: r.candidate.result,
         submittedAt: r.submittedAt?.toISOString() ?? null,
         totalMarks: num(r.totalMarks) ?? 0,
         maxMarks: num(r.maxMarks) ?? 0,
@@ -110,7 +152,9 @@ export function createResultsService(deps: ResultsDeps) {
         for (const c of counts) {
           if (c.jobRoleId !== role.id) continue;
           dto.imported += c.count;
-          (dto[STATUS_KEYS[c.status]] as number) += c.count;
+          // A decided candidate counts under its result, not under "evaluated" (awaiting a decision).
+          if (c.result) (dto[STATUS_KEYS[c.result]] as number) += c.count;
+          else (dto[STATUS_KEYS[c.status]] as number) += c.count;
         }
         dto.pendingEvaluation = dto.submitted + dto.autoSubmitted;
         return dto;
@@ -143,6 +187,7 @@ export function createResultsService(deps: ResultsDeps) {
         { header: 'Programme' },
         { header: 'Discipline', width: 24 },
         { header: 'Status' },
+        { header: 'Result' },
         { header: 'Evaluation' },
         { header: 'Submitted at', width: 20 },
         { header: 'Submit type' },
@@ -174,6 +219,7 @@ export function createResultsService(deps: ResultsDeps) {
           c.programme,
           c.discipline,
           c.status,
+          c.result ?? '',
           r.evaluation?.status ?? 'PENDING',
           r.submittedAt,
           r.submitType,
@@ -266,7 +312,7 @@ export function createResultsService(deps: ResultsDeps) {
     return { roleName: jobRoleId ? roles[0]!.name : null, sheets: sheets.length > 0 ? sheets : [sheet('Activity', [])] };
   }
 
-  return { decide, leaderboard, dashboard, resultsExport, activityExport };
+  return { decide, decideMany, leaderboard, dashboard, resultsExport, activityExport };
 }
 
 export type ResultsService = ReturnType<typeof createResultsService>;

@@ -277,7 +277,7 @@ export default function Marking() {
         open={reopening}
         onOpenChange={setReopening}
         title="Reopen evaluation"
-        description="The evaluation goes back to draft and the candidate returns to their previous status. This is logged."
+        description="The evaluation goes back to draft and the candidate returns to their previous status. If this candidate was shortlisted or rejected, that result is cleared. Emails already sent are not recalled. This is logged."
         label="Reason"
         required
         confirmLabel="Reopen"

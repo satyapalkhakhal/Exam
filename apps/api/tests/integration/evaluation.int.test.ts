@@ -16,6 +16,10 @@ import { prisma } from '../../src/infrastructure/db/prisma.js';
 import { getRedis } from '../../src/infrastructure/redis/redis.js';
 import { createCandidate } from './helpers.js';
 import { createApp } from '../../src/app.js';
+import { closeEmailQueue, emailJobId, getEmailQueue } from '../../src/infrastructure/queue/email.queue.js';
+import { EMAIL_KEY } from '../../src/modules/messaging/index.js';
+import { systemConfig } from '../../src/modules/systemConfig/index.js';
+import { createDispatchProcessor, emailsRepository } from '../../src/modules/emails/index.js';
 
 const RUN = crypto.randomBytes(4).toString('hex');
 const PASS = 'eval-int-pass-123';
@@ -143,6 +147,8 @@ before(async () => {
 });
 
 after(async () => {
+  await prisma.systemConfig.deleteMany({ where: { key: EMAIL_KEY } });
+  await closeEmailQueue();
   await prisma.$disconnect();
   await getRedis().quit();
 });
@@ -304,13 +310,16 @@ test('an Evaluator calling decision, reopen, leaderboard or exports is 403', asy
   assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } })).status, 'EVALUATED');
 });
 
-test('SA decision: shortlist from EVALUATED with history; refused from a non-evaluated status', async () => {
+test('SA decision: shortlist from EVALUATED sets result, keeps status, with history; refused from a non-evaluated status', async () => {
   const d = await agents.sa.post(`/api/admin/candidates/${candidateId}/decision`).send({ decision: 'SHORTLISTED', comment: 'Strong' });
   assert.equal(d.status, 200, JSON.stringify(d.body));
-  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } })).status, 'SHORTLISTED');
-  const h = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId, toStatus: 'SHORTLISTED' } });
-  assert.equal(h.fromStatus, 'EVALUATED');
+  const row = await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } });
+  assert.deepEqual({ status: row.status, result: row.result, by: row.resultById }, { status: 'EVALUATED', result: 'SHORTLISTED', by: adminIds.sa });
+  assert.ok(row.resultAt);
+  const h = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId, toResult: 'SHORTLISTED' } });
+  assert.deepEqual({ fromStatus: h.fromStatus, toStatus: h.toStatus, fromResult: h.fromResult }, { fromStatus: 'EVALUATED', toStatus: 'EVALUATED', fromResult: null });
   assert.equal(h.comment, 'Strong');
+  assert.equal((await agents.sa.post(`/api/admin/candidates/${candidateId}/decision`).send({ decision: 'SHORTLISTED' })).status, 409);
   assert.equal(await prisma.adminAuditLog.count({ where: { action: 'CANDIDATE_DECISION', entityId: candidateId } }), 1);
 
   const pending = await prisma.candidate.findUniqueOrThrow({ where: { candidateCode: `EV-${RUN}-pending` } });
@@ -321,7 +330,8 @@ test('SA decision: shortlist from EVALUATED with history; refused from a non-eva
 test('leaderboard: evaluated only, by total desc then submittedAt asc, with rank, PII and per-question marks', async () => {
   const res = await agents.sa.get(`/api/admin/leaderboard?jobRoleId=${boardRoleId}`);
   assert.equal(res.status, 200, JSON.stringify(res.body));
-  const items = res.body.data.items as { rank: number; candidateId: string; fullName: string; totalMarks: number; percentage: number; questionMarks: unknown[] }[];
+  const items = res.body.data.items as { rank: number; candidateId: string; fullName: string; totalMarks: number; percentage: number; questionMarks: unknown[]; result: string | null }[];
+  assert.ok(items.every((i) => i.result === null));
   assert.deepEqual(items.map((i) => i.candidateId), [board.top!.candidateId, board.early!.candidateId, board.late!.candidateId]);
   assert.deepEqual(items.map((i) => i.rank), [1, 2, 3]);
   assert.equal(items[0]!.totalMarks, 9);
@@ -335,8 +345,16 @@ test('SA reopen: evaluation back to DRAFT, candidate back to the submitted statu
   assert.equal((await prisma.attemptEvaluation.findUniqueOrThrow({ where: { attemptId } })).status, 'DRAFT');
   assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } })).status, 'SUBMITTED');
   const h = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId, toStatus: 'SUBMITTED' } });
-  assert.equal(h.fromStatus, 'SHORTLISTED');
+  assert.equal(h.fromStatus, 'EVALUATED');
   assert.equal(h.comment, 'Recheck Q2');
+  // reopen clears the result (it was SHORTLISTED by the decision test)
+  const after = await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } });
+  assert.deepEqual({ result: after.result, at: after.resultAt, by: after.resultById }, { result: null, at: null, by: null });
+  assert.deepEqual({ fromResult: h.fromResult, toResult: h.toResult }, { fromResult: 'SHORTLISTED', toResult: null });
+  const reopenAudit = await prisma.adminAuditLog.findFirstOrThrow({ where: { action: 'EVALUATION_REOPENED', entityId: attemptId } });
+  assert.equal((reopenAudit.metadata as { clearedResult: string | null }).clearedResult, 'SHORTLISTED');
+  const late = await agents.sa.post('/api/admin/candidates/bulk/result').send({ candidateIds: [candidateId], decision: 'REJECTED', sendEmail: false });
+  assert.deepEqual(late.body.data.skipped.map((x: { reason: string }) => x.reason), ['NOT_EVALUATED']);
   assert.equal(await prisma.adminAuditLog.count({ where: { action: 'EVALUATION_REOPENED', entityId: attemptId } }), 1);
   const view = await agents.sa.get(`/api/admin/submissions/${attemptId}`);
   assert.equal(view.body.data.evaluationStatus, 'DRAFT');
@@ -455,7 +473,7 @@ test('I9: the holder re-POSTing the lock extends it, so a long session keeps it'
   await agents.a.delete(`/api/admin/submissions/${s.attemptId}/lock`);
 });
 
-test('T11#2: a reopen racing a decision records the decided status as "from", not a stale read', async () => {
+test('T11#2: a reopen racing a decision records the decided result as "from", not a stale read', async () => {
   const s = await freshSubmission('race');
   assert.equal((await agents.sa.post(`/api/admin/submissions/${s.attemptId}/lock`)).status, 200);
   const sub = await agents.sa.put(`/api/admin/submissions/${s.attemptId}/evaluation`).send({ items: [{ attemptQuestionId: s.aqIds[0]!, marks: 6 }], submit: true });
@@ -466,8 +484,10 @@ test('T11#2: a reopen racing a decision records the decided status as "from", no
   const isLocked = new Promise<void>((r) => (locked = r));
   const decision = prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM candidates WHERE id = ${s.candidateId}::uuid FOR UPDATE`;
-    await tx.candidate.update({ where: { id: s.candidateId }, data: { status: 'SHORTLISTED' } });
-    await tx.candidateStatusHistory.create({ data: { candidateId: s.candidateId, fromStatus: 'EVALUATED', toStatus: 'SHORTLISTED', byAdminId: adminIds.sa } });
+    await tx.candidate.update({ where: { id: s.candidateId }, data: { result: 'SHORTLISTED' } });
+    await tx.candidateStatusHistory.create({
+      data: { candidateId: s.candidateId, fromStatus: 'EVALUATED', toStatus: 'EVALUATED', toResult: 'SHORTLISTED', byAdminId: adminIds.sa },
+    });
     locked();
     await new Promise((r) => setTimeout(r, 500));
   });
@@ -476,9 +496,10 @@ test('T11#2: a reopen racing a decision records the decided status as "from", no
   const [res] = await Promise.all([reopen, decision]);
   assert.equal(res.status, 200, JSON.stringify(res.body));
   const h = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId: s.candidateId, comment: 'race' } });
-  assert.equal(h.fromStatus, 'SHORTLISTED');
+  assert.equal(h.fromResult, 'SHORTLISTED');
   const audit = await prisma.adminAuditLog.findFirstOrThrow({ where: { action: 'EVALUATION_REOPENED', entityId: s.attemptId } });
-  assert.equal((audit.metadata as { fromStatus: string }).fromStatus, 'SHORTLISTED');
+  assert.equal((audit.metadata as { clearedResult: string }).clearedResult, 'SHORTLISTED');
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: s.candidateId } })).result, null);
 });
 
 test('T11#2: submitting marks for an attempt that was reset meanwhile is refused and leaves the candidate alone', async () => {
@@ -501,4 +522,103 @@ test('submissions search: a Super Admin also finds by roll number and email; an 
   assert.ok(saMail.body.data.items.some((r: { candidateCode: string }) => r.candidateCode === `EV-${RUN}-m`), 'SA finds by email');
   const ev = await agents.a.get(`/api/admin/submissions?search=${encodeURIComponent(roll)}`);
   assert.equal(ev.body.data.items.length, 0, 'evaluator search stays code-only (blind marking)');
+});
+
+// ---- bulk shortlist / reject (2026-11-05) ------------------------------------
+
+/** A submitted attempt that has been evaluated (6/10), candidate EVALUATED. */
+async function evaluatedSubmission(key: string, jobRoleId: string, qId: string) {
+  const s = await submittedCandidate(key, jobRoleId, [{ id: qId, text: 'Bulk Q', max: 10 }], new Date(Date.now() - 60_000));
+  await prisma.questionEvaluation.create({ data: { attemptQuestionId: s.aqIds[0]!, marks: 6, evaluatorId: adminIds.sa } });
+  await prisma.attemptEvaluation.create({ data: { attemptId: s.attemptId, status: 'SUBMITTED', evaluatorId: adminIds.sa, submittedAt: new Date() } });
+  await prisma.examAttempt.update({ where: { id: s.attemptId }, data: { totalMarks: 6, percentage: 60 } });
+  await prisma.candidate.update({ where: { id: s.candidateId }, data: { status: 'EVALUATED' } });
+  return s;
+}
+
+const READY_EMAIL = { enabled: true, baseUrl: 'https://mail.example.test', sendMailToken: 'tok', fromAddress: 'noreply@example.test', fromName: 'X', replyTo: '' };
+
+test('bulk result: shortlists evaluated, skips others, queues emails for the decided only', async () => {
+  const role = await prisma.jobRole.create({ data: { name: `Eval Bulk ${RUN}`, examSetting: { create: {} } } });
+  const q = await prisma.question.create({ data: { jobRoleId: role.id, text: 'Bulk Q', normalizedTextHash: `bulk-${RUN}`, maxMarks: 10 } });
+  const one = await evaluatedSubmission('bulk1', role.id, q.id);
+  const two = await evaluatedSubmission('bulk2', role.id, q.id);
+  const already = await evaluatedSubmission('bulk3', role.id, q.id);
+  await prisma.candidate.update({ where: { id: already.candidateId }, data: { result: 'SHORTLISTED' } });
+  const notEvaluated = await submittedCandidate('bulk4', role.id, [{ id: q.id, text: 'Bulk Q', max: 10 }], new Date());
+  await prisma.candidate.update({ where: { id: two.candidateId }, data: { eligible: false } });
+
+  const off = await agents.sa.post('/api/admin/candidates/bulk/result').send({ candidateIds: [one.candidateId], decision: 'SHORTLISTED', sendEmail: true });
+  assert.equal(off.status, 409);
+  assert.equal(off.body.error.code, 'EMAIL_NOT_CONFIGURED');
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: one.candidateId } })).result, null);
+
+  await systemConfig.setConfig(EMAIL_KEY, READY_EMAIL, adminIds.sa);
+  try {
+    const res = await agents.sa.post('/api/admin/candidates/bulk/result').send({
+      candidateIds: [one.candidateId, two.candidateId, already.candidateId, notEvaluated.candidateId, crypto.randomUUID()],
+      decision: 'SHORTLISTED',
+      sendEmail: true,
+      comment: 'Top batch',
+      nextRound: { name: 'HR round' },
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const d = res.body.data;
+    assert.equal(d.updated, 2);
+    assert.equal(d.emailsQueued, 1);
+    assert.equal(d.emailError, null);
+    assert.deepEqual(d.skipped.map((x: { reason: string }) => x.reason), ['ALREADY_DECIDED', 'NOT_EVALUATED', 'NOT_FOUND']);
+    assert.deepEqual(d.emailSkipped.map((x: { candidateId: string; reason: string }) => [x.candidateId, x.reason]), [[two.candidateId, 'INELIGIBLE']]);
+
+    const rows = await prisma.candidate.findMany({ where: { id: { in: [one.candidateId, two.candidateId] } } });
+    assert.ok(rows.every((r) => r.result === 'SHORTLISTED' && r.status === 'EVALUATED'));
+    const dispatches = await prisma.emailDispatch.findMany({ where: { candidateId: { in: [one.candidateId, two.candidateId, already.candidateId] } } });
+    assert.deepEqual(dispatches.map((x) => [x.candidateId, x.template]), [[one.candidateId, 'SHORTLISTED']]);
+    assert.match(dispatches[0]!.subject, /HR round/);
+    assert.ok(await getEmailQueue().getJob(emailJobId(dispatches[0]!.id)));
+    assert.equal(await prisma.adminAuditLog.count({ where: { action: 'CANDIDATE_DECISION', entityId: { in: [one.candidateId, two.candidateId] } } }), 2);
+
+    // Switching to rejected sends the other email even though one was already sent.
+    const flip = await agents.sa.post('/api/admin/candidates/bulk/result').send({ candidateIds: [one.candidateId], decision: 'REJECTED', sendEmail: true });
+    assert.equal(flip.body.data.updated, 1);
+    assert.equal(flip.body.data.emailsQueued, 1);
+    const rejected = await prisma.emailDispatch.findFirstOrThrow({ where: { candidateId: one.candidateId, template: 'REJECTED' } });
+    assert.match(rejected.subject, /Update on your application/);
+    const h = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId: one.candidateId, toResult: 'REJECTED' } });
+    assert.equal(h.fromResult, 'SHORTLISTED');
+
+    // The earlier Shortlisted email is still queued: the worker must drop it, and send the Rejected one.
+    const sentTo: string[] = [];
+    const worker = createDispatchProcessor({ repo: emailsRepository, sendEmail: async (p) => void sentTo.push(p.subject) });
+    assert.equal(await worker(dispatches[0]!.id, { finalAttempt: false }), 'SKIPPED');
+    const dropped = await prisma.emailDispatch.findUniqueOrThrow({ where: { id: dispatches[0]!.id } });
+    assert.deepEqual({ status: dropped.status, error: dropped.error }, { status: 'FAILED', error: 'Not sent: the result changed before the email went out' });
+    assert.equal(await worker(rejected.id, { finalAttempt: false }), 'SENT');
+    assert.equal(sentTo.length, 1);
+
+    // Dashboard: decided candidates count under their result, not under evaluated.
+    const dash = await agents.sa.get('/api/admin/dashboard');
+    const mine = dash.body.data.roles.find((r: { jobRoleId: string }) => r.jobRoleId === role.id);
+    assert.deepEqual({ evaluated: mine.evaluated, shortlisted: mine.shortlisted, rejected: mine.rejected, submitted: mine.submitted }, { evaluated: 0, shortlisted: 2, rejected: 1, submitted: 1 });
+  } finally {
+    await prisma.systemConfig.deleteMany({ where: { key: EMAIL_KEY } });
+  }
+});
+
+test('bulk result: an Evaluator is 403; without email nothing is queued', async () => {
+  assert.equal((await agents.a.post('/api/admin/candidates/bulk/result').send({ candidateIds: [candidateId], decision: 'REJECTED', sendEmail: false })).status, 403);
+  const role = await prisma.jobRole.create({ data: { name: `Eval Bulk2 ${RUN}`, examSetting: { create: {} } } });
+  const q = await prisma.question.create({ data: { jobRoleId: role.id, text: 'Bulk Q', normalizedTextHash: `bulk2-${RUN}`, maxMarks: 10 } });
+  const s = await evaluatedSubmission('bulk5', role.id, q.id);
+  const res = await agents.sa.post('/api/admin/candidates/bulk/result').send({ candidateIds: [s.candidateId], decision: 'REJECTED', sendEmail: false });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.deepEqual({ updated: res.body.data.updated, emailsQueued: res.body.data.emailsQueued }, { updated: 1, emailsQueued: 0 });
+  assert.equal(await prisma.emailDispatch.count({ where: { candidateId: s.candidateId } }), 0);
+});
+
+test('results.xlsx has a Result column', async () => {
+  const res = await binary(agents.sa.get(`/api/admin/exports/results.xlsx?jobRoleId=${boardRoleId}`));
+  const ws = (await workbook(res)).worksheets[0]!;
+  const header = (ws.getRow(1).values as unknown[]).slice(1);
+  assert.equal(header[header.indexOf('Status') + 1], 'Result');
 });

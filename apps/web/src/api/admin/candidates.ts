@@ -6,19 +6,15 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { apiFetch } from '@/lib/api';
 import type { ImportPreview, ImportResult } from '@/lib/importState';
 import type { Paged } from './users';
+import type { CandidateExamStatsDto, CandidateMatchingIdsDto } from '@exam/shared';
+import { candidateQuery, type CandidateFilters } from '@/lib/candidateQuery';
 
-export const CANDIDATE_STATUSES = [
-  'NOT_STARTED',
-  'IN_PROGRESS',
-  'SUBMITTED',
-  'AUTO_SUBMITTED',
-  'EVALUATED',
-  'SHORTLISTED',
-  'REJECTED',
-] as const;
-export type CandidateStatus = (typeof CANDIDATE_STATUSES)[number];
+/** Exam progress only; shortlist / reject live in `result`. */
+export const CANDIDATE_STATUSES = ['NOT_STARTED', 'IN_PROGRESS', 'SUBMITTED', 'AUTO_SUBMITTED', 'EVALUATED'] as const;
+export type CandidateStatus = (typeof CANDIDATE_STATUSES)[number] | 'SHORTLISTED' | 'REJECTED';
+export type CandidateResult = 'SHORTLISTED' | 'REJECTED';
 
-export type CandidateSort = 'fullName' | 'majorCpi' | 'xPercentage' | 'xiiPercentage' | 'createdAt';
+export type { CandidateFilters, CandidateSort } from '@/lib/candidateQuery';
 
 export interface CandidateRow {
   id: string;
@@ -35,10 +31,17 @@ export interface CandidateRow {
   jobRoleId: string;
   jobRoleName: string;
   status: CandidateStatus;
+  result: CandidateResult | null;
   eligible: boolean;
   locationExempt: boolean;
   flagCount: number;
   createdAt: string;
+}
+
+/** A list row: the candidate plus their current attempt and other applications. */
+export interface CandidateListItem extends CandidateRow {
+  exam: CandidateExamStatsDto | null;
+  otherApplications: { jobRoleName: string; status: CandidateStatus; result: CandidateResult | null }[];
 }
 
 export interface CandidateDetailProfile extends CandidateRow {
@@ -89,6 +92,8 @@ export interface HistoryRow {
   id: string;
   fromStatus: string | null;
   toStatus: string;
+  fromResult: CandidateResult | null;
+  toResult: CandidateResult | null;
   reason: string | null;
   actorName: string | null;
   createdAt: string;
@@ -102,16 +107,7 @@ export interface CandidateDetailDto {
   flags: CandidateFlags | null;
   history: HistoryRow[];
   /** The same person's applications under other job roles (docs/multi-exam.md). Optional until the API ships. */
-  otherApplications?: { id: string; candidateCode: string; jobRole: { id: string; name: string }; status: string }[];
-}
-
-export interface CandidateFilters {
-  search: string;
-  jobRoleId: string;
-  status: string;
-  flagged: '' | 'true' | 'false';
-  sort: CandidateSort;
-  dir: 'asc' | 'desc';
+  otherApplications?: { id: string; candidateCode: string; jobRole: { id: string; name: string }; status: string; result: CandidateResult | null }[];
 }
 
 export interface CandidateEdit {
@@ -130,16 +126,17 @@ export interface CandidateEdit {
 export const CANDIDATE_TEMPLATE_URL = '/api/admin/candidates/template.csv';
 
 export function useCandidates(f: CandidateFilters, page: number, pageSize: number) {
-  const q = new URLSearchParams({ sort: f.sort, dir: f.dir, page: String(page), pageSize: String(pageSize) });
-  if (f.search) q.set('search', f.search);
-  if (f.jobRoleId) q.set('jobRoleId', f.jobRoleId);
-  if (f.status) q.set('status', f.status);
-  if (f.flagged) q.set('flagged', f.flagged);
+  const q = candidateQuery(f, page, pageSize);
   return useQuery({
     queryKey: ['admin', 'candidates', 'list', q.toString()],
-    queryFn: () => apiFetch<Paged<CandidateRow>>('admin', `/candidates?${q.toString()}`),
+    queryFn: () => apiFetch<Paged<CandidateListItem>>('admin', `/candidates?${q.toString()}`),
     placeholderData: keepPreviousData,
   });
+}
+
+/** Every candidate matching the filters (for "select all matching"); the API refuses more than 1000. */
+export function fetchMatchingCandidateIds(f: CandidateFilters): Promise<CandidateMatchingIdsDto> {
+  return apiFetch<CandidateMatchingIdsDto>('admin', `/candidates/ids?${candidateQuery(f).toString()}`);
 }
 
 export function useCandidate(id: string, activityPage: number) {

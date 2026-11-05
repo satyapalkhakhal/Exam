@@ -3,6 +3,7 @@
 // the dashboard banner and the disabled Start button keep asking.
 
 import { useNavigate } from 'react-router';
+import { ArihantPlusBanner } from '@/components/auth/ArihantPlusBanner';
 import { AuthPageShell } from '@/components/auth/AuthPageShell';
 import { LocationGate } from '@/components/location/LocationGate';
 
@@ -10,7 +11,7 @@ export default function Location() {
   const navigate = useNavigate();
   const go = () => navigate('/dashboard', { replace: true });
   return (
-    <AuthPageShell title="Share your location" subtitle="Required before you can start your exam.">
+    <AuthPageShell title="Share your location" subtitle="Required before you can start your exam." brand="plus" aside={<ArihantPlusBanner />}>
       <LocationGate onContinue={go} onSkip={go} />
     </AuthPageShell>
   );

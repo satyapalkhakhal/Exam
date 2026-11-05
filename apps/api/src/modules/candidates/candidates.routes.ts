@@ -30,6 +30,7 @@ export function createCandidatesRouter(service: CandidatesService): Router {
   r.get('/', validate({ query: CandidateListQuerySchema }), c.list);
   r.post('/', validate({ body: CandidateCreateSchema }), c.create);
   r.get('/template.csv', c.template);
+  r.get('/ids', validate({ query: CandidateListQuerySchema }), c.matchingIds);
   r.post('/import/preview', adminUploadLimiter, uploadSpreadsheet('file'), validate({ body: CandidateImportPreviewBodySchema }), c.preview);
   r.post('/import/confirm', validate({ body: ImportConfirmSchema }), c.confirm);
   r.get('/:id', validate({ params: IdParamsSchema, query: CandidateDetailQuerySchema }), c.detail);

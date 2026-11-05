@@ -4,7 +4,7 @@
 // inline warning for unknown {tokens} (the API rejects them on save), the IST form ->
 // NextRound payload mapping, and plain-words skip reasons.
 
-import type { EmailSkipReason, NextRoundInput } from '@exam/shared';
+import type { CandidateResult, DecisionSkipReason, EmailSkipReason, EmailTemplateKey, NextRoundInput } from '@exam/shared';
 import { istInputToIso } from './istTime.js';
 
 /** "firstName" or "{firstName}" -> "{firstName}". */
@@ -77,9 +77,31 @@ export const SKIP_REASON_LABEL: Record<EmailSkipReason, string> = {
   INELIGIBLE: 'Marked not eligible',
   NOT_SUBMITTED: 'Has not submitted the exam',
   NOT_SHORTLISTED: 'Is not shortlisted',
+  NOT_REJECTED: 'Is not rejected',
   ALREADY_SENT: 'Already received this email',
 };
 
 export function skipReasonLabel(reason: EmailSkipReason): string {
   return SKIP_REASON_LABEL[reason] ?? reason;
+}
+
+const DECISION_SKIP_LABEL: Record<DecisionSkipReason, string> = {
+  NOT_FOUND: 'Not found',
+  NOT_EVALUATED: 'Not evaluated yet',
+  ALREADY_DECIDED: 'Already has this result',
+};
+
+/** Why a candidate's result was not changed by a shortlist / reject. */
+export function decisionSkipLabel(reason: DecisionSkipReason): string {
+  return DECISION_SKIP_LABEL[reason] ?? reason;
+}
+
+/** The email that fits a candidate's result, preselected in "Send email". */
+export function templateForResult(result: CandidateResult | null): EmailTemplateKey {
+  return result ?? 'SUBMISSION_RECEIVED';
+}
+
+/** "Shortlist 12 candidates". The dialog passes the count it submitted, since the page clears its selection on success. */
+export function decisionTitle(decision: CandidateResult, count: number): string {
+  return `${decision === 'SHORTLISTED' ? 'Shortlist' : 'Reject'} ${count} candidate${count === 1 ? '' : 's'}`;
 }

@@ -1,7 +1,7 @@
 // src/pages/admin/Leaderboard.tsx
 // Why: Super Admin's per-role ranking (design §8): one tab per job role, shortlist/reject
-// with an optional comment, and the two XLSX exports as plain GET links (the browser
-// downloads them with the session cookie).
+// through the shared decision dialog (which also sends the email), and the two XLSX
+// exports as plain GET links (the browser downloads them with the session cookie).
 
 import { useState } from 'react';
 import { Link } from 'react-router';
@@ -10,12 +10,13 @@ import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { SendEmailDialog } from '@/components/admin/SendEmailDialog';
-import { ReasonDialog } from '@/components/admin/ReasonDialog';
+import { DecisionDialog } from '@/components/admin/DecisionDialog';
+import { ResultBadge } from '@/components/admin/ResultBadge';
 import { TableHeaderFilter, TableHeaderFilterText } from '@/components/ui/table-header-filter';
 import { matchesCandidateSearch } from '@/lib/candidateSearch';
 import { useRoles } from '@/api/admin/roles';
-import { activityExportUrl, resultsExportUrl, useDecision, useLeaderboard, type Decision, type LeaderboardRow } from '@/api/admin/results';
-import { statusText } from '@/pages/admin/Candidates';
+import { activityExportUrl, resultsExportUrl, useLeaderboard, type Decision, type LeaderboardRow } from '@/api/admin/results';
+import { templateForResult } from '@/lib/emailTemplates';
 import { totalFlags, flagTitle } from '@/pages/admin/Submissions';
 
 export default function Leaderboard() {
@@ -23,7 +24,6 @@ export default function Leaderboard() {
   const [picked, setPicked] = useState('');
   const jobRoleId = picked || roles.data?.[0]?.id || '';
   const board = useLeaderboard(jobRoleId);
-  const decide = useDecision();
   const [target, setTarget] = useState<{ row: LeaderboardRow; decision: Decision } | null>(null);
   const [emailRow, setEmailRow] = useState<LeaderboardRow | null>(null);
   const [search, setSearch] = useState('');
@@ -65,7 +65,7 @@ export default function Leaderboard() {
               <TableHead>Total</TableHead>
               <TableHead>%</TableHead>
               <TableHead>Flags</TableHead>
-              <TableHead>Status</TableHead>
+              <TableHead>Result</TableHead>
               <TableHead>Decision</TableHead>
             </TableRow>
           </TableHeader>
@@ -86,11 +86,11 @@ export default function Leaderboard() {
                 <TableCell>{r.totalMarks} / {r.maxMarks}</TableCell>
                 <TableCell>{r.percentage}</TableCell>
                 <TableCell title={flagTitle(r.flagCounts)}>{totalFlags(r.flagCounts) > 0 ? <Badge variant="default">{totalFlags(r.flagCounts)}</Badge> : '-'}</TableCell>
-                <TableCell><Badge variant="outline">{statusText(r.status)}</Badge></TableCell>
+                <TableCell><ResultBadge result={r.result} /></TableCell>
                 <TableCell>
                   <div className="flex gap-1.5">
-                    <Button size="sm" variant="outline" disabled={r.status === 'SHORTLISTED'} onClick={() => setTarget({ row: r, decision: 'SHORTLISTED' })}>Shortlist</Button>
-                    <Button size="sm" variant="outline" disabled={r.status === 'REJECTED'} onClick={() => setTarget({ row: r, decision: 'REJECTED' })}>Reject</Button>
+                    <Button size="sm" variant="outline" disabled={r.result === 'SHORTLISTED'} onClick={() => setTarget({ row: r, decision: 'SHORTLISTED' })}>Shortlist</Button>
+                    <Button size="sm" variant="outline" disabled={r.result === 'REJECTED'} onClick={() => setTarget({ row: r, decision: 'REJECTED' })}>Reject</Button>
                     <Button size="sm" variant="outline" onClick={() => setEmailRow(r)}>Email</Button>
                   </div>
                 </TableCell>
@@ -102,27 +102,14 @@ export default function Leaderboard() {
       <SendEmailDialog
         open={emailRow !== null}
         candidateIds={emailRow ? [emailRow.candidateId] : []}
-        defaultTemplate={emailRow?.status === 'SHORTLISTED' ? 'SHORTLISTED' : 'SUBMISSION_RECEIVED'}
+        defaultTemplate={templateForResult(emailRow?.result ?? null)}
         onClose={() => setEmailRow(null)}
       />
-      <ReasonDialog
+      <DecisionDialog
         open={target !== null}
-        onOpenChange={(o) => {
-          if (!o) {
-            setTarget(null);
-            decide.reset();
-          }
-        }}
-        title={target?.decision === 'SHORTLISTED' ? `Shortlist ${target.row.fullName}` : `Reject ${target?.row.fullName ?? ''}`}
-        description="The decision is recorded in the candidate's status history."
-        label="Comment (optional)"
-        required={false}
-        confirmLabel={target?.decision === 'SHORTLISTED' ? 'Shortlist' : 'Reject'}
-        isPending={decide.isPending}
-        error={decide.error?.message}
-        onSubmit={(comment) =>
-          target && decide.mutate({ candidateId: target.row.candidateId, decision: target.decision, comment: comment || undefined }, { onSuccess: () => setTarget(null) })
-        }
+        decision={target?.decision ?? 'SHORTLISTED'}
+        candidateIds={target ? [target.row.candidateId] : []}
+        onClose={() => setTarget(null)}
       />
     </div>
   );
