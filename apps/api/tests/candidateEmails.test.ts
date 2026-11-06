@@ -130,9 +130,9 @@ test('ArihantPlus strip: on the outcome emails only, with store links and the ri
   assert.doesNotMatch(sub.html + sub.text, /SEBI Registration|INZ0|ARN-/);
 });
 
-test('logo and app icon load from assetBaseUrl; without it no images are added', () => {
+test('header has no logo image; the ArihantPlus logo loads from assetBaseUrl, and without it no images are added', () => {
   const withBase = buildShortlistEmail({ ...base, assetBaseUrl: 'https://exam.example.com/' });
-  assert.match(withBase.html, /src="https:\/\/exam\.example\.com\/email\/arihant-capital-logo\.png"/);
+  assert.doesNotMatch(withBase.html, /arihant-capital-logo/);
   assert.match(withBase.html, /src="https:\/\/exam\.example\.com\/email\/arihantplus-logo\.png"/);
   assert.doesNotMatch(buildShortlistEmail(base).html, /<img/);
   assert.doesNotMatch(buildShortlistEmail({ ...base, assetBaseUrl: 'javascript:alert(1)' }).html, /<img/);

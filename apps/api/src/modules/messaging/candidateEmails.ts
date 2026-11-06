@@ -17,7 +17,7 @@
 //
 // Look (approved mockup 2026-11-05): Arihant Capital header with a purple-to-green
 // rule, purple headings and buttons, and on the two outcome emails a horizontal
-// ArihantPlus strip as the last row. Images (both logos) load from
+// ArihantPlus strip as the last row. The header is text only; the strip's ArihantPlus logo loads from
 // `assetBaseUrl` (the exam site's public URL); without it they are left out and
 // the text still reads correctly.
 
@@ -230,10 +230,6 @@ function layout(opts: {
   pill?: string;
   plusStrip?: boolean;
 }): string {
-  const logo = assetUrl(opts.assetBaseUrl, '/email/arihant-capital-logo.png');
-  const logoCell = logo
-    ? `<td width="46" style="padding-right:12px"><img src="${escapeHtml(logo)}" width="34" height="32" alt="Arihant Capital" style="display:block;border:0"></td>`
-    : '';
   const pill = opts.pill
     ? `<span style="display:inline-block;font-size:11px;font-weight:bold;letter-spacing:.8px;text-transform:uppercase;color:${C.okInk};background:${C.okBg};border-radius:999px;padding:4px 10px;margin-bottom:12px">${escapeHtml(opts.pill)}</span>`
     : '';
@@ -243,9 +239,8 @@ function layout(opts: {
     `<div style="display:none;max-height:0;overflow:hidden">${escapeHtml(opts.preheader)}</div>` +
     `<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background:${C.page};padding:24px 12px;font-family:${FONT}"><tr><td align="center">` +
     `<table role="presentation" cellpadding="0" cellspacing="0" width="600" style="max-width:600px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid ${C.line};font-family:${FONT}">` +
-    // header
+    // header: text only (no logo image until there is a public URL for one)
     '<tr><td style="padding:20px 28px"><table role="presentation" cellpadding="0" cellspacing="0" width="100%"><tr>' +
-    logoCell +
     `<td style="font-size:17px;font-weight:bold;color:${C.ink}">${BRAND}<div style="font-size:12px;font-weight:normal;color:${C.muted};margin-top:2px">Talent Acquisition</div></td>` +
     '</tr></table></td></tr>' +
     `<tr><td style="height:4px;line-height:4px;font-size:0;background:${C.purple};background-image:linear-gradient(90deg,${C.purple},${C.green})">&nbsp;</td></tr>` +
