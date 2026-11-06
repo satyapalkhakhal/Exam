@@ -7,6 +7,7 @@ import { validate } from '../../shared/middleware/validate.js';
 import { createIntegrationsController } from './integrations.controller.js';
 import type { IntegrationsService } from './integrations.service.js';
 import {
+  AiConfigInputSchema,
   EmailConfigInputSchema,
   EmailTestInputSchema,
   SmsConfigInputSchema,
@@ -19,7 +20,9 @@ export function createIntegrationsRouter(service: IntegrationsService): Router {
   r.get('/', c.get);
   r.put('/sms', validate({ body: SmsConfigInputSchema }), c.updateSms);
   r.put('/email', validate({ body: EmailConfigInputSchema }), c.updateEmail);
+  r.put('/ai', validate({ body: AiConfigInputSchema }), c.updateAi);
   r.post('/sms/test', validate({ body: SmsTestInputSchema }), c.testSms);
   r.post('/email/test', validate({ body: EmailTestInputSchema }), c.testEmail);
+  r.post('/ai/test', c.testAi);
   return r;
 }

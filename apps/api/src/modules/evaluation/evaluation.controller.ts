@@ -30,6 +30,7 @@ export function createEvaluationController(service: EvaluationService) {
       res.status(204).end();
     }),
     save: wrap(async (req, res) => ok(res, await service.save(attemptIdOf(req), req.body, actorOf(req)))),
+    acceptAi: wrap(async (req, res) => ok(res, await service.acceptAi(req.body, actorOf(req)))),
     reopen: wrap(async (req, res) =>
       ok(res, await service.reopen(attemptIdOf(req), (req.body as { reason: string }).reason, actorOf(req))),
     ),

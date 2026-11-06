@@ -99,6 +99,24 @@ enum EvaluationStatus {
   SUBMITTED
 }
 
+enum AiRunStatus {
+  RUNNING
+  DONE
+  CANCELLED
+}
+
+enum AiScoreStatus {
+  QUEUED
+  DONE
+  FAILED
+}
+
+enum AiConfidence {
+  LOW
+  MEDIUM
+  HIGH
+}
+
 model AdminUser {
   id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email            String    @unique
@@ -122,6 +140,7 @@ model AdminUser {
   auditLogs            AdminAuditLog[]
   emailDispatches      EmailDispatch[]
   candidateResults     Candidate[]              @relation("CandidateResultBy")
+  aiRuns               AiEvaluationRun[]
 
   @@map("admin_users")
 }
@@ -138,6 +157,7 @@ model JobRole {
   questions     Question[]
   candidates    Candidate[]
   importBatches ImportBatch[]
+  aiRuns        AiEvaluationRun[]
 
   @@map("job_roles")
 }
@@ -151,6 +171,11 @@ model ExamSetting {
   instructions    String    @default("")
   isOpen          Boolean   @default(false) @map("is_open")
   questionsLocked Boolean   @default(false) @map("questions_locked")
+  // Composite-score weights (docs/ai-evaluation.md); the four add up to 100.
+  weightExam      Int       @default(70) @map("weight_exam")
+  weightX         Int       @default(10) @map("weight_x")
+  weightXii       Int       @default(10) @map("weight_xii")
+  weightCpi       Int       @default(10) @map("weight_cpi")
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -220,29 +245,29 @@ model CandidateAccount {
 
 // One application = (account x job role): code, status, marks, flags, history.
 model Candidate {
-  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  accountId      String          @map("account_id") @db.Uuid
-  candidateCode  String          @unique @map("candidate_code")
-  fullName       String          @map("full_name")
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId      String           @map("account_id") @db.Uuid
+  candidateCode  String           @unique @map("candidate_code")
+  fullName       String           @map("full_name")
   email          String
   mobile         String?
-  rollNumber     String?         @map("roll_number")
-  xPercentage    Decimal?        @map("x_percentage") @db.Decimal(5, 2)
-  xiiPercentage  Decimal?        @map("xii_percentage") @db.Decimal(5, 2)
-  majorCpi       Decimal?        @map("major_cpi") @db.Decimal(5, 2)
+  rollNumber     String?          @map("roll_number")
+  xPercentage    Decimal?         @map("x_percentage") @db.Decimal(5, 2)
+  xiiPercentage  Decimal?         @map("xii_percentage") @db.Decimal(5, 2)
+  majorCpi       Decimal?         @map("major_cpi") @db.Decimal(5, 2)
   discipline     String?
   programme      String?
-  extra          Json            @default("{}")
-  jobRoleId      String          @map("job_role_id") @db.Uuid
-  eligible       Boolean         @default(true)
-  locationExempt Boolean         @default(false) @map("location_exempt")
-  status         CandidateStatus @default(NOT_STARTED)
+  extra          Json             @default("{}")
+  jobRoleId      String           @map("job_role_id") @db.Uuid
+  eligible       Boolean          @default(true)
+  locationExempt Boolean          @default(false) @map("location_exempt")
+  status         CandidateStatus  @default(NOT_STARTED)
   result         CandidateResult?
-  resultAt       DateTime?       @map("result_at") @db.Timestamptz(6)
-  resultById     String?         @map("result_by_id") @db.Uuid
-  importBatchId  String?         @map("import_batch_id") @db.Uuid
-  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  resultAt       DateTime?        @map("result_at") @db.Timestamptz(6)
+  resultById     String?          @map("result_by_id") @db.Uuid
+  importBatchId  String?          @map("import_batch_id") @db.Uuid
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   account      CandidateAccount         @relation(fields: [accountId], references: [id], onDelete: Restrict)
   jobRole      JobRole                  @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
@@ -305,6 +330,7 @@ model AttemptQuestion {
   question   Question            @relation(fields: [questionId], references: [id], onDelete: Restrict)
   answer     Answer?
   evaluation QuestionEvaluation?
+  aiScores   AiQuestionScore[]
 
   @@unique([attemptId, questionId])
   @@index([attemptId, order])
@@ -394,13 +420,17 @@ model QuestionEvaluation {
   marks             Decimal? @db.Decimal(6, 1)
   comment           String?
   evaluatorId       String   @map("evaluator_id") @db.Uuid
+  // Set by bulk accept: the AI score this mark was taken from unchanged.
+  aiScoreId         String?  @map("ai_score_id") @db.Uuid
   createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  attemptQuestion AttemptQuestion @relation(fields: [attemptQuestionId], references: [id], onDelete: Restrict)
-  evaluator       AdminUser       @relation(fields: [evaluatorId], references: [id], onDelete: Restrict)
+  attemptQuestion AttemptQuestion  @relation(fields: [attemptQuestionId], references: [id], onDelete: Restrict)
+  evaluator       AdminUser        @relation(fields: [evaluatorId], references: [id], onDelete: Restrict)
+  aiScore         AiQuestionScore? @relation(fields: [aiScoreId], references: [id], onDelete: Restrict)
 
   @@index([evaluatorId])
+  @@index([aiScoreId])
   @@map("question_evaluations")
 }
 
@@ -505,4 +535,63 @@ model AdminAuditLog {
   @@index([entity, entityId])
   @@index([createdAt])
   @@map("admin_audit_logs")
+}
+
+// One AI grading batch (docs/ai-evaluation.md). Counters and token totals are
+// bumped by the worker; the run is DONE when done + failed = total.
+model AiEvaluationRun {
+  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  jobRoleId     String?     @map("job_role_id") @db.Uuid
+  model         String
+  promptVersion String      @map("prompt_version")
+  status        AiRunStatus @default(RUNNING)
+  total         Int         @default(0)
+  done          Int         @default(0)
+  failed        Int         @default(0)
+  inputTokens   Int         @default(0) @map("input_tokens")
+  outputTokens  Int         @default(0) @map("output_tokens")
+  createdById   String      @map("created_by_id") @db.Uuid
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  finishedAt    DateTime?   @map("finished_at") @db.Timestamptz(6)
+
+  jobRole   JobRole?          @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  createdBy AdminUser         @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  scores    AiQuestionScore[]
+
+  @@index([jobRoleId, createdAt])
+  @@index([status])
+  @@index([createdById])
+  @@map("ai_evaluation_runs")
+}
+
+// One AI suggestion for one attempt question. The latest DONE row per attempt
+// question is "the AI score"; older rows are kept as history. The rationale
+// text is blanked by the purge script.
+model AiQuestionScore {
+  id                String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId             String        @map("run_id") @db.Uuid
+  attemptQuestionId String        @map("attempt_question_id") @db.Uuid
+  status            AiScoreStatus @default(QUEUED)
+  marks             Decimal?      @db.Decimal(6, 1)
+  maxMarks          Decimal       @map("max_marks") @db.Decimal(6, 1)
+  rationale         String?
+  strengths         Json          @default("[]")
+  improvements      Json          @default("[]")
+  confidence        AiConfidence?
+  concerns          String[]      @default([])
+  model             String        @default("")
+  inputTokens       Int           @default(0) @map("input_tokens")
+  outputTokens      Int           @default(0) @map("output_tokens")
+  error             String?
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  completedAt       DateTime?     @map("completed_at") @db.Timestamptz(6)
+
+  run             AiEvaluationRun      @relation(fields: [runId], references: [id], onDelete: Restrict)
+  attemptQuestion AttemptQuestion      @relation(fields: [attemptQuestionId], references: [id], onDelete: Restrict)
+  acceptedBy      QuestionEvaluation[]
+
+  @@unique([runId, attemptQuestionId])
+  @@index([attemptQuestionId, completedAt])
+  @@index([runId, status])
+  @@map("ai_question_scores")
 }

@@ -19,6 +19,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useRoles, useSaveRole, useUpdateSettings, type JobRole } from '@/api/admin/roles';
 import { examAvailability, type ExamAvailability } from '@exam/shared';
+import { WEIGHT_KEYS, parseWeights, weightsError, weightsSum } from '@/lib/aiEvaluation';
 import { formatIst, isoToIstInput, istInputToIso } from '@/lib/istTime';
 
 const schema = z
@@ -28,7 +29,9 @@ const schema = z
     windowEnd: z.string(),
     instructions: z.string().max(10000, 'At most 10,000 characters'),
     isOpen: z.boolean(),
+    weights: z.object({ exam: z.number(), x: z.number(), xii: z.number(), cpi: z.number() }),
   })
+  .refine((v) => !weightsError(v.weights), { path: ['weights'], message: 'Fix the composite weights' })
   .refine((v) => !v.windowStart || !v.windowEnd || v.windowEnd > v.windowStart, {
     path: ['windowEnd'],
     message: 'End must be after start',
@@ -91,7 +94,7 @@ const AVAIL: Record<ExamAvailability, string> = {
 
 function SettingsDialog({ role, onClose }: { role: JobRole | null; onClose: () => void }) {
   const save = useUpdateSettings();
-  const { register, control, handleSubmit, reset, formState: { errors } } = useForm<Values>({
+  const { register, control, handleSubmit, reset, watch, formState: { errors } } = useForm<Values>({
     resolver: zodResolver(schema),
     values: role
       ? {
@@ -100,9 +103,12 @@ function SettingsDialog({ role, onClose }: { role: JobRole | null; onClose: () =
           windowEnd: isoToIstInput(role.settings.windowEnd),
           instructions: role.settings.instructions,
           isOpen: role.settings.isOpen,
+          weights: { ...role.settings.weights },
         }
       : undefined,
   });
+  const weights = watch('weights');
+  const wError = weights ? weightsError(weights) : null;
   const close = () => {
     reset();
     save.reset();
@@ -128,6 +134,7 @@ function SettingsDialog({ role, onClose }: { role: JobRole | null; onClose: () =
                 windowEnd: istInputToIso(v.windowEnd),
                 instructions: v.instructions,
                 isOpen: v.isOpen,
+                weights: parseWeights(v.weights),
               },
               { onSuccess: close },
             );
@@ -163,11 +170,28 @@ function SettingsDialog({ role, onClose }: { role: JobRole | null; onClose: () =
               />
               <Label htmlFor="rs-open">Exam is open for this role</Label>
             </div>
+            <fieldset className="space-y-2 rounded-lg border border-border p-3">
+              <legend className="px-1 text-sm font-medium">Composite score weights (%)</legend>
+              <p className="text-xs text-muted-foreground">
+                How the leaderboard Composite mixes exam %, Class X %, Class XII % and CPI. Must add up to 100. A missing X, XII or CPI is skipped and its weight shared among the rest.
+              </p>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {WEIGHT_KEYS.map((k) => (
+                  <div key={k} className="space-y-1.5">
+                    <Label htmlFor={`rs-w-${k}`}>{k === 'exam' ? 'Exam' : k === 'cpi' ? 'CPI' : k.toUpperCase()}</Label>
+                    <Input id={`rs-w-${k}`} type="number" min={0} max={100} step={1} aria-describedby="rs-w-sum" {...register(`weights.${k}`, { valueAsNumber: true })} />
+                  </div>
+                ))}
+              </div>
+              <p id="rs-w-sum" aria-live="polite" className={wError ? 'text-xs text-destructive' : 'text-xs text-muted-foreground'}>
+                {weights ? `Total ${weightsSum(weights)} / 100` : ''}{wError ? `. ${wError}` : ''}
+              </p>
+            </fieldset>
             {save.isError && <p role="alert" className="text-sm text-destructive">{save.error.message}</p>}
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={close}>Cancel</Button>
-            <Button type="submit" disabled={save.isPending}>{save.isPending ? 'Saving…' : 'Save settings'}</Button>
+            <Button type="submit" disabled={save.isPending || Boolean(wError)}>{save.isPending ? 'Saving…' : 'Save settings'}</Button>
           </DialogFooter>
         </form>
       </DialogContent>

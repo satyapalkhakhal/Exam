@@ -17,6 +17,8 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { ReasonDialog } from '@/components/admin/ReasonDialog';
 import { ExamTimeline } from '@/components/admin/ExamTimeline';
+import { AiPanel } from '@/components/admin/AiPanel';
+import { countAiUsable, fillDraftsFromAi } from '@/lib/aiEvaluation';
 import { ApiError } from '@/lib/api';
 import { createLockManager, LOCK_RENEW_MS } from '@/lib/lockManager';
 import { canSubmitEvaluation, shouldSeedDrafts, sumMarks, validateMarksClient } from '@/lib/marking';
@@ -49,14 +51,17 @@ function lockHolder(e: unknown): string {
   return 'another evaluator';
 }
 
-function QuestionPanel({ q, draft, readOnly, onChange }: { q: MarkingQuestion; draft: Draft; readOnly: boolean; onChange: (d: Draft) => void }) {
+function QuestionPanel({ q, draft, readOnly, onChange, onUseAi }: { q: MarkingQuestion; draft: Draft; readOnly: boolean; onChange: (d: Draft) => void; onUseAi: () => void }) {
   const err = draft.marks.trim() === '' ? null : validateMarksClient(Number(draft.marks), q.maxMarks);
   const { pasteAttempts, bulkInsert } = q.integrity;
   return (
     <section className="space-y-3 rounded-lg border border-border bg-card p-4" aria-label={`Question ${q.order}`}>
       <div className="flex items-start justify-between gap-3">
         <h2 className="text-sm font-semibold text-foreground">Q{q.order}. <span className="whitespace-pre-wrap font-normal">{q.text}</span></h2>
-        <Badge variant="outline">{q.maxMarks} marks</Badge>
+        <div className="flex shrink-0 items-center gap-2">
+          {q.acceptedFromAi && <Badge variant="default">Accepted from AI</Badge>}
+          <Badge variant="outline">{q.maxMarks} marks</Badge>
+        </div>
       </div>
       {q.evaluatorGuidance && (
         <div className="rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-foreground">
@@ -92,6 +97,7 @@ function QuestionPanel({ q, draft, readOnly, onChange }: { q: MarkingQuestion; d
           </ul>
         </details>
       )}
+      <AiPanel ai={q.ai} readOnly={readOnly} onUse={onUseAi} />
       <div className="grid gap-3 sm:grid-cols-[10rem_1fr]">
         <div className="space-y-1.5">
           <Label htmlFor={`marks-${q.attemptQuestionId}`}>Marks (max {q.maxMarks})</Label>
@@ -190,6 +196,7 @@ export default function Marking() {
   const readOnly = lockedBy !== null || lockError !== null || finalised || !seeded;
   const rows = v.questions.map((q) => ({ q, marks: parseMarks(drafts[q.attemptQuestionId]?.marks ?? '') }));
   const invalid = rows.some(({ q, marks }) => marks !== null && validateMarksClient(marks, q.maxMarks) !== null);
+  const aiUsable = countAiUsable(v.questions);
   const max = v.questions.reduce((t, q) => t + q.maxMarks, 0);
   const items: EvaluationItem[] = v.questions.map((q) => {
     const d = drafts[q.attemptQuestionId];
@@ -230,7 +237,14 @@ export default function Marking() {
             <span className="font-mono">{v.candidateCode}</span> <span className="text-base font-normal text-muted-foreground">{v.jobRole}</span>
           </h1>
         </div>
-        {isSa && finalised && <Button variant="outline" onClick={() => setReopening(true)}>Reopen</Button>}
+        <div className="flex gap-2">
+          {aiUsable > 0 && (
+            <Button variant="outline" disabled={readOnly} onClick={() => setDrafts((c) => fillDraftsFromAi(c, v.questions) as Record<string, Draft>)}>
+              Use all AI marks ({aiUsable})
+            </Button>
+          )}
+          {isSa && finalised && <Button variant="outline" onClick={() => setReopening(true)}>Reopen</Button>}
+        </div>
       </div>
 
       {lockedBy && <p className="rounded-md border border-border bg-muted p-3 text-sm" role="status">Being marked by {lockedBy}. This view is read-only.</p>}
@@ -257,6 +271,7 @@ export default function Marking() {
           readOnly={readOnly}
           draft={drafts[q.attemptQuestionId] ?? { marks: '', comment: '' }}
           onChange={(d) => setDrafts((c) => ({ ...c, [q.attemptQuestionId]: d }))}
+          onUseAi={() => setDrafts((c) => fillDraftsFromAi(c, v.questions, q.attemptQuestionId) as Record<string, Draft>)}
         />
       ))}
 

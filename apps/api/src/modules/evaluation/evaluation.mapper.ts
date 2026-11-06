@@ -6,11 +6,18 @@
 // included for anyone. Integrity evidence is reduced to counts and the
 // bulk-insert numbers, never the raw activity metadata. The exam timeline is the
 // same idea: whitelisted event types with time and question only (an IP change
-// shows that it happened, never the addresses).
+// shows that it happened, never the addresses). AI scores are whitelisted the
+// same way and are visible to Evaluators (no candidate data in them); the
+// composite score mixes in academics, so it is never built here at all.
 
 import { maskEmail } from '../../shared/utils/piiMask.js';
+import { percentageOf } from './marks.js';
+import { AI_CONCERNS } from '@exam/shared';
 import type {
   AdminRole,
+  AiAttemptSummaryDto,
+  AiConcern,
+  AiQuestionScoreDto,
   CandidatePiiDto,
   EvaluationState,
   MarkingQuestionDto,
@@ -36,6 +43,28 @@ export interface CandidateSource {
   jobRole: { name: string };
 }
 
+/** One ai_question_scores row, as selected for display. */
+export interface AiScoreSource {
+  id: string;
+  status: 'QUEUED' | 'DONE' | 'FAILED';
+  marks: Num;
+  maxMarks: Num;
+  rationale: string | null;
+  strengths: unknown;
+  improvements: unknown;
+  confidence: 'LOW' | 'MEDIUM' | 'HIGH' | null;
+  concerns: string[];
+  model: string;
+  error: string | null;
+  completedAt: Date | null;
+}
+
+/** What the AI roll-up needs per question; scores are newest first. */
+export interface AiRollupQuestion {
+  maxMarksSnapshot: Num;
+  aiScores: AiScoreSource[];
+}
+
 export interface SubmissionSource {
   attemptId: string;
   startedAt: Date;
@@ -47,16 +76,16 @@ export interface SubmissionSource {
   flags: Record<string, number>;
   /** Omitted by older callers/tests: treated as no start location. */
   nearbyCount?: number | null;
+  questions: AiRollupQuestion[];
 }
 
-export interface MarkingQuestionSource {
+export interface MarkingQuestionSource extends AiRollupQuestion {
   id: string;
   order: number;
   textSnapshot: string;
-  maxMarksSnapshot: Num;
   question: { evaluatorGuidance: string | null };
   answer: { text: string; wordCount: number; versions: { savedAt: Date; wordCount: number }[] } | null;
-  evaluation: { marks: Num; comment: string | null } | null;
+  evaluation: { marks: Num; comment: string | null; aiScoreId: string | null } | null;
 }
 
 export interface ActivitySource {
@@ -119,6 +148,44 @@ export function toCandidatePii(c: CandidateSource): CandidatePiiDto {
   };
 }
 
+const CONCERNS = new Set<string>(AI_CONCERNS);
+const stringList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+
+/** The AI score shown for a question: the latest DONE one, else the latest of any status. */
+export function pickAiScore(scores: AiScoreSource[]): AiScoreSource | null {
+  return scores.find((s) => s.status === 'DONE') ?? scores[0] ?? null;
+}
+
+export function toAiScoreDto(s: AiScoreSource | null): AiQuestionScoreDto | null {
+  if (!s) return null;
+  return {
+    id: s.id,
+    status: s.status,
+    marks: s.status === 'DONE' ? num(s.marks) : null,
+    maxMarks: num(s.maxMarks) ?? 0,
+    rationale: s.rationale,
+    strengths: stringList(s.strengths),
+    improvements: stringList(s.improvements),
+    confidence: s.confidence,
+    concerns: s.concerns.filter((c): c is AiConcern => CONCERNS.has(c)),
+    model: s.model,
+    error: s.error,
+    completedAt: s.completedAt?.toISOString() ?? null,
+  };
+}
+
+/** NONE = never run; DONE = every question has a DONE score; otherwise PARTIAL. */
+export function toAiSummary(questions: AiRollupQuestion[]): AiAttemptSummaryDto {
+  if (!questions.some((q) => q.aiScores.length > 0)) return { state: 'NONE', totalMarks: null, percentage: null, needsReview: false };
+  const picks = questions.map((q) => pickAiScore(q.aiScores));
+  const done = picks.filter((p): p is AiScoreSource => p?.status === 'DONE');
+  const needsReview = done.some((p) => p.concerns.length > 0 || p.confidence === 'LOW');
+  if (done.length !== questions.length) return { state: 'PARTIAL', totalMarks: null, percentage: null, needsReview };
+  const total = done.reduce((a, p) => a + (num(p.marks) ?? 0), 0);
+  const max = questions.reduce((a, q) => a + (num(q.maxMarksSnapshot) ?? 0), 0);
+  return { state: 'DONE', totalMarks: total, percentage: percentageOf(total, max), needsReview };
+}
+
 const finiteOr0 = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
 export function toSubmissionView(row: SubmissionSource, viewerRole: AdminRole): SubmissionViewDto {
@@ -133,6 +200,7 @@ export function toSubmissionView(row: SubmissionSource, viewerRole: AdminRole): 
     nearbyCount: row.nearbyCount ?? null,
     evaluationStatus: evaluationState(row.evaluation),
     totalMarks: num(row.totalMarks),
+    ai: toAiSummary(row.questions),
   };
   return viewerRole === 'SUPER_ADMIN' ? { ...base, ...toCandidatePii(row.candidate) } : base;
 }
@@ -160,6 +228,8 @@ function toMarkingQuestion(q: MarkingQuestionSource, activity: ActivitySource[])
         }),
     },
     evaluation: { marks: num(q.evaluation?.marks ?? null), comment: q.evaluation?.comment ?? null },
+    ai: toAiScoreDto(pickAiScore(q.aiScores)),
+    acceptedFromAi: (q.evaluation?.aiScoreId ?? null) !== null && q.evaluation?.marks !== null,
   };
 }
 

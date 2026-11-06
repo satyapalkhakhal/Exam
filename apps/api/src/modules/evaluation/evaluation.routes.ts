@@ -7,7 +7,7 @@ import { authorize } from '../../shared/middleware/authorize.js';
 import { validate } from '../../shared/middleware/validate.js';
 import { createEvaluationController } from './evaluation.controller.js';
 import type { EvaluationService } from './evaluation.service.js';
-import { AttemptIdParamsSchema, EvaluationSaveSchema, ReopenSchema, SubmissionListQuerySchema } from './evaluation.schemas.js';
+import { AiAcceptSchema, AttemptIdParamsSchema, EvaluationSaveSchema, ReopenSchema, SubmissionListQuerySchema } from './evaluation.schemas.js';
 
 export function createEvaluationRouter(service: EvaluationService): Router {
   const c = createEvaluationController(service);
@@ -15,6 +15,7 @@ export function createEvaluationRouter(service: EvaluationService): Router {
   const params = validate({ params: AttemptIdParamsSchema });
   r.use(authorize('SUPER_ADMIN', 'EVALUATOR'));
   r.get('/', validate({ query: SubmissionListQuerySchema }), c.list);
+  r.post('/ai/accept', authorize('SUPER_ADMIN'), validate({ body: AiAcceptSchema }), c.acceptAi);
   r.get('/:attemptId', params, c.marking);
   r.post('/:attemptId/lock', params, c.lock);
   r.delete('/:attemptId/lock', params, c.unlock);

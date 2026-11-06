@@ -1,11 +1,18 @@
 // modules/results/results.service.ts
 // Super Admin outcomes (design §8, §9): the shortlist/reject decision (only
 // after an evaluation, with history and audit), the per-role leaderboard
-// (total marks desc, ties by earlier submit), the dashboard counts every admin
+// (total marks desc, ties by earlier submit; or by composite / AI % on request),
+// AI marks and the weighted composite (docs/ai-evaluation.md §7, §10), the dashboard counts every admin
 // sees (numbers only, so nothing here is blind-marking sensitive), and the two
 // XLSX exports. Marks, totals and comments are exported only once an
 // evaluation is submitted; a draft or reopened one is work in progress.
 
+import {
+  DEFAULT_COMPOSITE_WEIGHTS,
+  compositeScore,
+  type CompositeWeights,
+  type LeaderboardSort,
+} from '@exam/shared';
 import type {
   CandidateDecisionBulkInput,
   CandidateDecisionBulkResultDto,
@@ -20,7 +27,7 @@ import { conflict, notFound } from '../../shared/errors.js';
 import { logger } from '../../infrastructure/logger/logger.js';
 import type { CandidateFlags } from '../exam/index.js';
 import { flagBreakdown, flagScore } from '../exam/index.js';
-import { num, toCandidatePii } from '../evaluation/index.js';
+import { num, percentageOf, toCandidatePii } from '../evaluation/index.js';
 import type { Cell, SheetSpec } from './exports.js';
 import type { CandidateStatusValue, LiveAttemptRow, ResultsRepository, ScoredAttempt } from './results.repository.js';
 
@@ -62,6 +69,39 @@ const FLAG_COLUMNS = [
 ] as const;
 
 const minutes = (a: Date, b: Date | null): number | null => (b ? Math.round((b.getTime() - a.getTime()) / 6_000) / 10 : null);
+
+interface RowScores {
+  aiMarksByOrder: Map<number, number>;
+  aiPercentage: number | null;
+  composite: number | null;
+  provisional: boolean;
+}
+
+/**
+ * AI % (only when every question has a DONE AI score) and the composite. The
+ * exam % in the composite is the human percentage once the evaluation is
+ * submitted, else the AI % (provisional).
+ */
+export function scoreRow(r: ScoredAttempt, weights: CompositeWeights): RowScores {
+  const aiMarksByOrder = new Map<number, number>();
+  for (const q of r.questions) {
+    const m = num(q.aiScores[0]?.marks ?? null);
+    if (m !== null) aiMarksByOrder.set(q.order, m);
+  }
+  const allScored = r.questions.length > 0 && aiMarksByOrder.size === r.questions.length;
+  const aiMax = r.questions.reduce((a, q) => a + (num(q.maxMarksSnapshot) ?? 0), 0);
+  const aiPercentage = allScored ? percentageOf([...aiMarksByOrder.values()].reduce((a, b) => a + b, 0), aiMax) : null;
+  const human = r.evaluation?.status === 'SUBMITTED' ? num(r.percentage) : null;
+  const exam = human ?? aiPercentage;
+  const c = r.candidate;
+  const composite = compositeScore(
+    { examPercentage: exam, xPercentage: num(c.xPercentage), xiiPercentage: num(c.xiiPercentage), majorCpi: num(c.majorCpi) },
+    weights,
+  );
+  return { aiMarksByOrder, aiPercentage, composite, provisional: human === null && composite !== null };
+}
+
+const nullsLast = (a: number | null, b: number | null): number => (a === b ? 0 : a === null ? 1 : b === null ? -1 : b - a);
 
 export function createResultsService(deps: ResultsDeps) {
   const { repo } = deps;
@@ -111,11 +151,18 @@ export function createResultsService(deps: ResultsDeps) {
     return result;
   }
 
-  async function leaderboard(jobRoleId: string): Promise<{ items: LeaderboardRowDto[] }> {
-    const rows = await repo.leaderboard(jobRoleId);
+  async function leaderboard(jobRoleId: string, sort: LeaderboardSort = 'human'): Promise<{ items: LeaderboardRowDto[] }> {
+    const [rows, weightsByRole] = await Promise.all([repo.leaderboard(jobRoleId, sort !== 'human'), repo.weightsFor([jobRoleId])]);
+    const weights = weightsByRole.get(jobRoleId) ?? DEFAULT_COMPOSITE_WEIGHTS;
     const flags = await deps.getFlagsBatch(rows.map((r) => r.candidate.id));
+    const scored = rows.map((r) => ({ r, s: scoreRow(r, weights) }));
+    if (sort !== 'human') {
+      const key = (x: (typeof scored)[number]) => (sort === 'composite' ? x.s.composite : x.s.aiPercentage);
+      // Array.sort is stable and the repository order already has submittedAt asc as the tiebreak.
+      scored.sort((a, b) => nullsLast(key(a), key(b)) || (a.r.submittedAt?.getTime() ?? Infinity) - (b.r.submittedAt?.getTime() ?? Infinity));
+    }
     return {
-      items: rows.map((r, i) => ({
+      items: scored.map(({ r, s }, i) => ({
         rank: i + 1,
         candidateCode: r.candidate.candidateCode,
         ...toCandidatePii(r.candidate),
@@ -125,7 +172,15 @@ export function createResultsService(deps: ResultsDeps) {
         totalMarks: num(r.totalMarks) ?? 0,
         maxMarks: num(r.maxMarks) ?? 0,
         percentage: num(r.percentage) ?? 0,
-        questionMarks: r.questions.map((q) => ({ order: q.order, marks: num(q.evaluation?.marks ?? null), maxMarks: num(q.maxMarksSnapshot) ?? 0 })),
+        questionMarks: r.questions.map((q) => ({
+          order: q.order,
+          marks: r.evaluation?.status === 'SUBMITTED' ? num(q.evaluation?.marks ?? null) : null,
+          aiMarks: s.aiMarksByOrder.get(q.order) ?? null,
+          maxMarks: num(q.maxMarksSnapshot) ?? 0,
+        })),
+        aiPercentage: s.aiPercentage,
+        compositeScore: s.composite,
+        compositeProvisional: s.provisional,
         flagCounts: flagBreakdown(flags.get(r.candidate.id) ?? EMPTY_FLAGS),
         nearbyCount: (flags.get(r.candidate.id) ?? EMPTY_FLAGS).nearbyCount,
       })),
@@ -169,10 +224,11 @@ export function createResultsService(deps: ResultsDeps) {
     return roles;
   }
 
-  function resultsSheet(roleName: string, rows: ScoredAttempt[], flags: Map<string, CandidateFlags>): SheetSpec {
+  function resultsSheet(roleName: string, rows: ScoredAttempt[], flags: Map<string, CandidateFlags>, weights: CompositeWeights): SheetSpec {
     const qCount = Math.max(0, ...rows.flatMap((r) => r.questions.map((q) => q.order)));
     const orders = Array.from({ length: qCount }, (_, i) => i + 1);
     let rank = 0;
+    const weightsText = `${weights.exam}/${weights.x}/${weights.xii}/${weights.cpi}`;
     return {
       name: roleName,
       columns: [
@@ -197,6 +253,11 @@ export function createResultsService(deps: ResultsDeps) {
         { header: 'Total' },
         { header: 'Max' },
         { header: 'Percentage' },
+        ...orders.map((o) => ({ header: `Q${o} AI marks` })),
+        { header: 'AI %' },
+        { header: 'Composite' },
+        { header: 'Composite basis' },
+        { header: 'Weights (exam/X/XII/CPI)' },
         ...FLAG_COLUMNS.map((f) => ({ header: f.header })),
         { header: 'Nearby candidates' },
         { header: 'Flag score' },
@@ -208,6 +269,7 @@ export function createResultsService(deps: ResultsDeps) {
         const f = flags.get(c.id) ?? EMPTY_FLAGS;
         const breakdown = flagBreakdown(f);
         const byOrder = new Map(r.questions.map((q) => [q.order, q]));
+        const sc = scoreRow(r, weights);
         return [
           evaluated ? ++rank : null,
           c.candidateCode,
@@ -230,6 +292,11 @@ export function createResultsService(deps: ResultsDeps) {
           evaluated ? num(r.totalMarks) : null,
           evaluated ? num(r.maxMarks) : null,
           evaluated ? num(r.percentage) : null,
+          ...orders.map((o) => sc.aiMarksByOrder.get(o) ?? null),
+          sc.aiPercentage,
+          sc.composite,
+          sc.composite === null ? null : sc.provisional ? 'AI (provisional)' : 'Human',
+          weightsText,
           ...FLAG_COLUMNS.map((col) => breakdown[col.key]),
           f.nearbyCount,
           flagScore(f),
@@ -246,8 +313,10 @@ export function createResultsService(deps: ResultsDeps) {
     const roles = await rolesFor(jobRoleId);
     const attempts = await repo.submittedAttempts(roles.map((r) => r.id));
     const flags = await deps.getFlagsBatch(attempts.map((a) => a.candidate.id));
-    const sheets = roles.map((role) => resultsSheet(role.name, attempts.filter((a) => a.candidate.jobRoleId === role.id), flags));
-    return { roleName: jobRoleId ? roles[0]!.name : null, sheets: sheets.length > 0 ? sheets : [resultsSheet('Results', [], flags)] };
+    const weightsByRole = await repo.weightsFor(roles.map((r) => r.id));
+    const weightsOf = (id: string) => weightsByRole.get(id) ?? DEFAULT_COMPOSITE_WEIGHTS;
+    const sheets = roles.map((role) => resultsSheet(role.name, attempts.filter((a) => a.candidate.jobRoleId === role.id), flags, weightsOf(role.id)));
+    return { roleName: jobRoleId ? roles[0]!.name : null, sheets: sheets.length > 0 ? sheets : [resultsSheet('Results', [], flags, DEFAULT_COMPOSITE_WEIGHTS)] };
   }
 
   async function activityExport(jobRoleId: string | undefined): Promise<{ roleName: string | null; sheets: SheetSpec[] }> {

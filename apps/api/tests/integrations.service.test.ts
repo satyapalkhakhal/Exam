@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSystemConfigService, type SystemConfigRepository } from '../src/modules/systemConfig/systemConfig.service.js';
 import { createIntegrationsService, type AuditEntry } from '../src/modules/integrations/integrations.service.js';
+import { AiProviderError } from '../src/modules/aiEvaluation/index.js';
 import { MessagingError } from '../src/modules/messaging/messaging.errors.js';
 import { isChannelReady, type SmsConfig } from '../src/modules/messaging/messaging.config.js';
 import { open } from '../src/infrastructure/crypto/secretBox.js';
@@ -36,6 +37,10 @@ function setup(overrides: Partial<Parameters<typeof createIntegrationsService>[0
     },
     sendEmail: async (p) => {
       sent.push(p);
+    },
+    testAi: async () => {
+      sent.push({ ai: 'test' });
+      return { model: 'm' };
     },
     countCandidatesWithoutMobile: async () => 3,
     ...overrides,
@@ -221,4 +226,67 @@ test('email CC list: normalised, de-duplicated, invalid or too many rejected', (
   assert.match(JSON.stringify(bad.error?.issues), /Not a valid email: not-an-email/);
   const many = Array.from({ length: 11 }, (_, i) => `u${i}@x.test`).join(',');
   assert.equal(EmailConfigInputSchema.safeParse({ ...ok, ccAddresses: many }).success, false);
+});
+
+// ---- AI (OpenAI) integration -------------------------------------------------------
+
+const aiInput = { enabled: true, apiKey: 'sk-proj-secret-key-7777', model: 'gpt-x', concurrency: 2, gradingInstructions: 'Be strict.' };
+
+test('ai: GET masks the key as {set,last4} and never returns it', async () => {
+  const { service } = setup();
+  assert.deepEqual((await service.get()).ai.apiKey, { set: false, last4: null });
+  await service.updateAi(aiInput, 'admin-1');
+  const view = await service.get();
+  assert.deepEqual(view.ai.apiKey, { set: true, last4: '7777' });
+  assert.equal(view.ai.model, 'gpt-x');
+  assert.equal(view.ai.concurrency, 2);
+  assert.ok(!JSON.stringify(view).includes('sk-proj-secret'));
+});
+
+test('ai: the key is stored sealed, and omitted/null keeps it while "" clears it', async () => {
+  const { service, repo } = setup();
+  await service.updateAi(aiInput, 'admin-1');
+  const stored = repo.rows.get('ai.openai') as Record<string, string>;
+  assert.match(stored.apiKey!, /^v1:/);
+  assert.equal(open(stored.apiKey!), aiInput.apiKey);
+
+  const { apiKey: _drop, ...rest } = aiInput;
+  await service.updateAi({ ...rest, model: 'gpt-y' }, 'admin-1');
+  await service.updateAi({ ...rest, apiKey: null }, 'admin-1');
+  const kept = repo.rows.get('ai.openai') as Record<string, string>;
+  assert.equal(open(kept.apiKey!), aiInput.apiKey);
+  assert.equal(kept.model, 'gpt-x');
+
+  await service.updateAi({ ...rest, apiKey: '' }, 'admin-1');
+  assert.deepEqual((await service.get()).ai.apiKey, { set: false, last4: null });
+});
+
+test('ai: the input schema trims and bounds concurrency; an out-of-range value is rejected', async () => {
+  const { AiConfigInputSchema } = await import('@exam/shared');
+  assert.equal(AiConfigInputSchema.parse({ enabled: true, model: ' gpt-x ' }).model, 'gpt-x');
+  assert.equal(AiConfigInputSchema.parse({ enabled: true, model: 'm' }).concurrency, 3);
+  assert.equal(AiConfigInputSchema.safeParse({ enabled: true, model: 'm', concurrency: 9 }).success, false);
+});
+
+test('ai: save and test are audited without the key', async () => {
+  const { service, audits } = setup();
+  await service.updateAi(aiInput, 'admin-1');
+  assert.deepEqual(await service.testAi('admin-1'), { delivered: true });
+  assert.equal(audits.length, 2);
+  assert.deepEqual(audits.map((a) => a.action), ['INTEGRATION_AI_UPDATED', 'INTEGRATION_AI_TESTED']);
+  const blob = JSON.stringify(audits);
+  assert.ok(!blob.includes('sk-proj') && !blob.includes('7777') && !blob.includes('Be strict'));
+});
+
+test('ai: a provider failure on the test becomes a 502 with the safe message and is audited', async () => {
+  const { service, audits } = setup({
+    testAi: async () => {
+      throw new AiProviderError('OpenAI rejected the API key (401)', 401);
+    },
+  });
+  await assert.rejects(
+    () => service.testAi('admin-1'),
+    (e: unknown) => e instanceof AppError && e.statusCode === 502 && e.message.includes('401'),
+  );
+  assert.equal(audits.length, 1);
 });

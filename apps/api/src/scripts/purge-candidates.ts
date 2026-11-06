@@ -6,7 +6,9 @@
 // once every one of its applications has been. Login logs lose their
 // coordinates, IP and user agent, activity logs their IP and user agent, and
 // email dispatches (docs/email-templates.md) their address and rendered
-// content (rows stay; the purge is the only writer besides the app's inserts).
+// content (rows stay; the purge is the only writer besides the app's inserts),
+// and AI scores (docs/ai-evaluation.md) their rationale, strengths and
+// improvements text (marks, confidence and concerns stay for the record).
 // It is a dry run unless
 // --yes is passed, and it writes one audit row when it applies.
 // Usage: pnpm --filter @exam/api purge-candidates --before 2027-04-30 [--yes]
@@ -63,6 +65,9 @@ export const LOG_SCRUB = {
 export const EMAIL_DISPATCH_SCRUB = (candidateId: string) =>
   ({ toEmail: `anon+${candidateId}@invalid`, subject: 'Anonymised', html: '', text: '' }) as const;
 
+/** Update payload for a purged candidate's AI scores: the free text derived from their answers goes. */
+export const AI_SCORE_SCRUB = { rationale: null, strengths: [], improvements: [] } as const;
+
 export function parsePurgeArgs(argv: string[]): { before: Date; apply: boolean } {
   const i = argv.indexOf('--before');
   const raw = i >= 0 ? argv[i + 1] : undefined;
@@ -101,6 +106,10 @@ async function main(): Promise<void> {
       prisma.emailDispatch.updateMany({
         where: { candidateId: row.id },
         data: EMAIL_DISPATCH_SCRUB(row.id),
+      }),
+      prisma.aiQuestionScore.updateMany({
+        where: { attemptQuestion: { attempt: { candidateId: row.id } } },
+        data: AI_SCORE_SCRUB,
       }),
     ]);
   }

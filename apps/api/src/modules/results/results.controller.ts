@@ -2,6 +2,7 @@
 // Thin HTTP layer. Exports load all their data first and only then start the
 // stream, so a failure still gets the normal JSON error envelope.
 
+import type { LeaderboardSort } from '@exam/shared';
 import type { NextFunction, Request, Response } from 'express';
 import { ok } from '../../shared/http.js';
 import { unauthorized } from '../../shared/errors.js';
@@ -34,7 +35,10 @@ export function createResultsController(service: ResultsService) {
   return {
     decide: wrap(async (req, res) => ok(res, await service.decide((req.params as { id: string }).id, req.body, actorOf(req)))),
     decideMany: wrap(async (req, res) => ok(res, await service.decideMany(req.body, actorOf(req)))),
-    leaderboard: wrap(async (req, res) => ok(res, await service.leaderboard((req.query as { jobRoleId: string }).jobRoleId))),
+    leaderboard: wrap(async (req, res) => {
+      const q = req.query as { jobRoleId: string; sort?: LeaderboardSort };
+      ok(res, await service.leaderboard(q.jobRoleId, q.sort));
+    }),
     dashboard: wrap(async (_req, res) => ok(res, await service.dashboard())),
     resultsExport: wrap(async (req, res) => stream(res, 'results', await service.resultsExport((req.query as { jobRoleId?: string }).jobRoleId))),
     activityExport: wrap(async (req, res) => stream(res, 'activity', await service.activityExport((req.query as { jobRoleId?: string }).jobRoleId))),

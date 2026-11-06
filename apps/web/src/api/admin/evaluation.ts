@@ -6,8 +6,10 @@
 
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '@/lib/api';
+import type { AI_FILTERS, AiAttemptSummaryDto, AiQuestionScoreDto } from '@exam/shared';
 import type { Paged } from './users';
 
+export type AiFilter = (typeof AI_FILTERS)[number];
 export type EvaluationFilter = 'PENDING' | 'DRAFT' | 'SUBMITTED';
 export const EVALUATION_FILTERS: EvaluationFilter[] = ['PENDING', 'DRAFT', 'SUBMITTED'];
 
@@ -35,11 +37,13 @@ export interface SubmissionRow extends Partial<SaPii> {
   nearbyCount: number | null;
   evaluationStatus: EvaluationFilter;
   totalMarks?: number | null;
+  ai: AiAttemptSummaryDto;
 }
 
 export interface SubmissionFilters {
   jobRoleId: string;
   evaluation: '' | EvaluationFilter;
+  ai: '' | AiFilter;
   search: string;
 }
 
@@ -47,6 +51,7 @@ export function useSubmissions(f: SubmissionFilters, page: number, pageSize: num
   const q = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
   if (f.jobRoleId) q.set('jobRoleId', f.jobRoleId);
   if (f.evaluation) q.set('evaluation', f.evaluation);
+  if (f.ai) q.set('ai', f.ai);
   if (f.search) q.set('search', f.search);
   return useQuery({
     queryKey: ['admin', 'submissions', 'list', q.toString()],
@@ -64,6 +69,8 @@ export interface MarkingQuestion {
   answer: { text: string; wordCount: number; versions: { savedAt: string; wordCount: number }[] };
   integrity: { pasteAttempts: number; bulkInsert: { at: string; grown: number; typed: number }[] };
   evaluation: { marks: number | null; comment: string | null };
+  ai: AiQuestionScoreDto | null;
+  acceptedFromAi: boolean;
 }
 
 export interface MarkingView extends Partial<SaPii> {

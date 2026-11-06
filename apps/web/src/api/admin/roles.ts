@@ -4,6 +4,7 @@
 // (ISO UTC | null), instructions, isOpen, questionsLocked.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import type { CompositeWeights } from '@exam/shared';
 import { apiFetch } from '@/lib/api';
 
 export interface ExamSettingDto {
@@ -13,6 +14,7 @@ export interface ExamSettingDto {
   instructions: string;
   isOpen: boolean;
   questionsLocked: boolean;
+  weights: CompositeWeights;
 }
 
 export interface JobRole {
@@ -30,6 +32,7 @@ export interface UpdateSettings {
   windowEnd: string | null;
   instructions: string;
   isOpen: boolean;
+  weights: CompositeWeights;
 }
 
 export const rolesKey = ['admin', 'roles'] as const;

@@ -4,7 +4,7 @@
 // in the same transaction as the change; instructions text is never copied
 // into the audit metadata.
 
-import type { ExamSettingDto, ExamSettingsUpdateInput, JobRoleCreateInput, JobRoleDto, JobRoleUpdateInput } from '@exam/shared';
+import { DEFAULT_COMPOSITE_WEIGHTS, type CompositeWeights, type ExamSettingDto, ExamSettingsUpdateInput, JobRoleCreateInput, JobRoleDto, JobRoleUpdateInput } from '@exam/shared';
 import { notFound } from '../../shared/errors.js';
 import type { AuditRecord } from '../audit/index.js';
 
@@ -15,6 +15,10 @@ export interface ExamSettingRow {
   instructions: string;
   isOpen: boolean;
   questionsLocked: boolean;
+  weightExam: number;
+  weightX: number;
+  weightXii: number;
+  weightCpi: number;
 }
 
 export interface JobRoleRow {
@@ -43,6 +47,8 @@ export interface ExamSettingsWrite {
   windowEnd: Date | null;
   instructions: string;
   isOpen: boolean;
+  /** Omitted keeps the stored weights. */
+  weights?: CompositeWeights;
 }
 
 export const DEFAULT_SETTINGS: ExamSettingDto = {
@@ -52,6 +58,7 @@ export const DEFAULT_SETTINGS: ExamSettingDto = {
   instructions: '',
   isOpen: false,
   questionsLocked: false,
+  weights: DEFAULT_COMPOSITE_WEIGHTS,
 };
 
 const toSettingDto = (s: ExamSettingRow | null): ExamSettingDto =>
@@ -63,6 +70,7 @@ const toSettingDto = (s: ExamSettingRow | null): ExamSettingDto =>
         instructions: s.instructions,
         isOpen: s.isOpen,
         questionsLocked: s.questionsLocked,
+        weights: { exam: s.weightExam, x: s.weightX, xii: s.weightXii, cpi: s.weightCpi },
       }
     : DEFAULT_SETTINGS;
 
@@ -124,6 +132,7 @@ export function createJobRolesService(repo: JobRolesRepository) {
       windowEnd: input.windowEnd ? new Date(input.windowEnd) : null,
       instructions: input.instructions,
       isOpen: input.isOpen,
+      ...(input.weights ? { weights: input.weights } : {}),
     };
     const row = await repo.upsertSettings(id, data, {
       adminId: actorId,
@@ -136,6 +145,7 @@ export function createJobRolesService(repo: JobRolesRepository) {
         windowEnd: data.windowEnd?.toISOString() ?? null,
         isOpen: data.isOpen,
         instructionsLength: data.instructions.length,
+        ...(data.weights ? { weights: data.weights } : {}),
       },
       ip,
     });

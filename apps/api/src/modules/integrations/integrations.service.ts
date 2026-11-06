@@ -5,8 +5,10 @@
 // and the senders are injected: the audit module arrives in Task 5.
 
 import type {
+  AiConfigInput,
   EmailConfigInput,
   IntegrationsView,
+  MaskedAiConfig,
   MaskedEmailConfig,
   MaskedSecret,
   MaskedSmsConfig,
@@ -25,6 +27,7 @@ import {
 } from '../messaging/messaging.config.js';
 import type { SendSmsParams } from '../messaging/sms.client.js';
 import type { SendEmailParams } from '../messaging/email.client.js';
+import { AI_KEY, AiProviderError, mergeAi, type AiConfig } from '../aiEvaluation/index.js';
 
 export interface AuditEntry {
   adminId: string;
@@ -39,6 +42,8 @@ export interface IntegrationsDeps {
   audit: (entry: AuditEntry) => Promise<void>;
   sendSms: (p: SendSmsParams) => Promise<void>;
   sendEmail: (p: SendEmailParams) => Promise<void>;
+  /** One tiny structured call with the saved AI key and model; throws AiProviderError on provider failure. */
+  testAi: () => Promise<{ model: string }>;
   /** Candidates with no mobile can only receive OTPs by email; shown beside the SMS card. */
   countCandidatesWithoutMobile: () => Promise<number>;
 }
@@ -59,6 +64,16 @@ const keep = (incoming: string | null | undefined, current: string): string =>
 export function createIntegrationsService(deps: IntegrationsDeps) {
   const loadSms = async (): Promise<SmsConfig> => mergeSms(await deps.config.getConfig<Partial<SmsConfig>>(SMS_KEY));
   const loadEmail = async (): Promise<EmailConfig> => mergeEmail(await deps.config.getConfig<Partial<EmailConfig>>(EMAIL_KEY));
+
+  const loadAi = async (): Promise<AiConfig> => mergeAi(await deps.config.getConfig<Partial<AiConfig>>(AI_KEY));
+
+  const maskAi = (c: AiConfig): MaskedAiConfig => ({
+    enabled: c.enabled,
+    apiKey: mask(c.apiKey),
+    model: c.model,
+    concurrency: c.concurrency,
+    gradingInstructions: c.gradingInstructions,
+  });
 
   const maskSms = (c: SmsConfig): MaskedSmsConfig => ({
     enabled: c.enabled,
@@ -82,6 +97,7 @@ export function createIntegrationsService(deps: IntegrationsDeps) {
     return {
       sms: maskSms(await loadSms()),
       email: maskEmailCfg(await loadEmail()),
+      ai: maskAi(await loadAi()),
       candidatesWithoutMobile: await deps.countCandidatesWithoutMobile(),
     };
   }
@@ -131,6 +147,32 @@ export function createIntegrationsService(deps: IntegrationsDeps) {
     return maskEmailCfg(next);
   }
 
+  async function updateAi(input: AiConfigInput, adminId: string): Promise<MaskedAiConfig> {
+    const current = await loadAi();
+    const next: AiConfig = {
+      enabled: input.enabled,
+      apiKey: input.apiKey === '' ? '' : keep(input.apiKey, current.apiKey),
+      model: input.model,
+      concurrency: input.concurrency ?? current.concurrency,
+      gradingInstructions: input.gradingInstructions ?? '',
+    };
+    await deps.config.setConfig(AI_KEY, { ...next }, adminId);
+    await deps.audit({
+      adminId,
+      action: 'INTEGRATION_AI_UPDATED',
+      entity: 'system_config',
+      entityId: AI_KEY,
+      metadata: {
+        enabled: next.enabled,
+        model: next.model,
+        concurrency: next.concurrency,
+        apiKeyChanged: input.apiKey !== undefined && input.apiKey !== null,
+        instructionsLength: next.gradingInstructions.length,
+      },
+    });
+    return maskAi(next);
+  }
+
   // Provider failures surface as 502 with the provider's own message; the
   // attempt is audited either way, with the outcome but not the recipient.
   async function deliver(action: string, entityId: string, adminId: string, send: () => Promise<void>) {
@@ -138,7 +180,7 @@ export function createIntegrationsService(deps: IntegrationsDeps) {
       await send();
     } catch (err) {
       await deps.audit({ adminId, action, entity: 'system_config', entityId, metadata: { delivered: false } });
-      if (err instanceof MessagingError) throw new AppError(502, 'BAD_GATEWAY', err.message);
+      if (err instanceof MessagingError || err instanceof AiProviderError) throw new AppError(502, 'BAD_GATEWAY', err.message);
       throw err;
     }
     await deps.audit({ adminId, action, entity: 'system_config', entityId, metadata: { delivered: true } });
@@ -163,7 +205,13 @@ export function createIntegrationsService(deps: IntegrationsDeps) {
     );
   }
 
-  return { get, updateSms, updateEmail, testSms, testEmail };
+  async function testAi(adminId: string) {
+    return deliver('INTEGRATION_AI_TESTED', AI_KEY, adminId, async () => {
+      await deps.testAi();
+    });
+  }
+
+  return { get, updateSms, updateEmail, updateAi, testSms, testEmail, testAi };
 }
 
 export type IntegrationsService = ReturnType<typeof createIntegrationsService>;

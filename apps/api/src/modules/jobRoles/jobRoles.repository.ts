@@ -15,6 +15,10 @@ const settingSelect = {
   instructions: true,
   isOpen: true,
   questionsLocked: true,
+  weightExam: true,
+  weightX: true,
+  weightXii: true,
+  weightCpi: true,
 } as const;
 
 const include = {
@@ -62,11 +66,13 @@ export const jobRolesRepository: JobRolesRepository = {
   },
 
   async upsertSettings(jobRoleId, data, audit) {
+    const { weights, ...rest } = data;
+    const w = weights ? { weightExam: weights.exam, weightX: weights.x, weightXii: weights.xii, weightCpi: weights.cpi } : {};
     return prisma.$transaction(async (tx) => {
       const row = await tx.examSetting.upsert({
         where: { jobRoleId },
-        create: { jobRoleId, ...data },
-        update: data,
+        create: { jobRoleId, ...rest, ...w },
+        update: { ...rest, ...w },
         select: settingSelect,
       });
       await writeAudit(tx, audit);

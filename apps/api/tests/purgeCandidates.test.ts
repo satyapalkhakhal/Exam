@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { anonymizeCandidate, parsePurgeArgs, LOG_SCRUB, EMAIL_DISPATCH_SCRUB } from '../src/scripts/purge-candidates.js';
+import { anonymizeCandidate, parsePurgeArgs, LOG_SCRUB, EMAIL_DISPATCH_SCRUB, AI_SCORE_SCRUB } from '../src/scripts/purge-candidates.js';
 
 const row = {
   id: '6b1f0c52-1111-4222-8333-944455556666',
@@ -68,4 +68,9 @@ test('EMAIL_DISPATCH_SCRUB removes the address and rendered content', () => {
   assert.equal(s.html, '');
   assert.equal(s.text, '');
   assert.equal(s.subject, 'Anonymised');
+});
+
+test('AI_SCORE_SCRUB blanks the free text derived from the answers and nothing else', () => {
+  assert.deepEqual(AI_SCORE_SCRUB, { rationale: null, strengths: [], improvements: [] });
+  assert.deepEqual(Object.keys(AI_SCORE_SCRUB).sort(), ['improvements', 'rationale', 'strengths']);
 });

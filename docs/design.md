@@ -204,6 +204,7 @@ The dashboard shows name, candidate code, role, duration, exam window, the role'
 - One evaluator per attempt at a time: the first to open it holds a soft lock that the screen shows to others, so two people don't mark the same script at once.
 - **Decision:** the Super Admin marks `SHORTLISTED` or `REJECTED` with an optional internal comment. Status history is kept.
 - **Ranking:** a per-role leaderboard sorted by total marks (ties broken by submit time). Exportable to XLSX along with candidate details, per-question marks and flag counts.
+- **AI assistance (added 2026-11-06, docs/ai-evaluation.md):** after a role's exam is over a Super Admin can have OpenAI suggest marks per question. Suggestions never become marks on their own: an evaluator uses them on the marking screen, or a Super Admin bulk-accepts clean scripts. The model sees only the question, guidance and answer. The leaderboard can also rank by a composite of exam %, Class X/XII % and CPI with per-role weights.
 
 ## 9. Admin dashboard (v1, small)
 

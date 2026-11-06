@@ -43,7 +43,13 @@ const scoredAttemptSelect = {
   evaluation: { select: { status: true } },
   questions: {
     orderBy: { order: 'asc' },
-    select: { order: true, maxMarksSnapshot: true, evaluation: { select: { marks: true, comment: true } } },
+    select: {
+      order: true,
+      maxMarksSnapshot: true,
+      evaluation: { select: { marks: true, comment: true } },
+      // Latest DONE AI score only.
+      aiScores: { where: { status: 'DONE' }, orderBy: [{ createdAt: 'desc' }, { id: 'asc' }], take: 1, select: { marks: true } },
+    },
   },
 } as const satisfies Prisma.ExamAttemptSelect;
 
@@ -67,18 +73,36 @@ export const resultsRepository = {
     return rows.map((r) => ({ jobRoleId: r.jobRoleId, status: r.status as CandidateStatusValue, result: r.result, count: r._count._all }));
   },
 
-  /** Evaluated candidates of a role, best first, ties by earlier submit. */
-  leaderboard(jobRoleId: string) {
+  /**
+   * Evaluated candidates of a role, best first, ties by earlier submit. With
+   * `withAiOnly`, also submitted attempts that are not human-evaluated yet but
+   * have an AI score (they appear with a provisional composite).
+   */
+  leaderboard(jobRoleId: string, withAiOnly = false) {
+    const evaluated: Prisma.ExamAttemptWhereInput = {
+      evaluation: { is: { status: 'SUBMITTED' } },
+      totalMarks: { not: null },
+      candidate: { jobRoleId, status: 'EVALUATED' },
+    };
+    const aiOnly: Prisma.ExamAttemptWhereInput = {
+      NOT: { evaluation: { is: { status: 'SUBMITTED' } } },
+      candidate: { jobRoleId },
+      questions: { some: { aiScores: { some: { status: 'DONE' } } } },
+    };
     return prisma.examAttempt.findMany({
-      where: {
-        status: { in: [...SUBMITTED_STATUSES] },
-        evaluation: { is: { status: 'SUBMITTED' } },
-        totalMarks: { not: null },
-        candidate: { jobRoleId, status: 'EVALUATED' },
-      },
+      where: { status: { in: [...SUBMITTED_STATUSES] }, ...(withAiOnly ? { OR: [evaluated, aiOnly] } : evaluated) },
       orderBy: rankOrder,
       select: scoredAttemptSelect,
     });
+  },
+
+  /** Composite weights per role (a role without a settings row uses the defaults in the service). */
+  async weightsFor(jobRoleIds: string[]): Promise<Map<string, { exam: number; x: number; xii: number; cpi: number }>> {
+    const rows = await prisma.examSetting.findMany({
+      where: { jobRoleId: { in: jobRoleIds } },
+      select: { jobRoleId: true, weightExam: true, weightX: true, weightXii: true, weightCpi: true },
+    });
+    return new Map(rows.map((r) => [r.jobRoleId, { exam: r.weightExam, x: r.weightX, xii: r.weightXii, cpi: r.weightCpi }]));
   },
 
   /** Every submitted attempt of the roles, ranked like the leaderboard (unevaluated last). */
