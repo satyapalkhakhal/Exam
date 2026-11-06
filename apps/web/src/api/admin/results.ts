@@ -20,6 +20,7 @@ export interface LeaderboardRow extends SaPii {
   percentage: number;
   questionMarks: { order: number; marks: number | null; maxMarks: number }[];
   flagCounts: Record<string, number>;
+  nearbyCount: number | null;
 }
 
 export type Decision = 'SHORTLISTED' | 'REJECTED';

@@ -12,9 +12,9 @@ export type { EvaluationService } from './evaluation.service.js';
 export { toMarkingView, toSubmissionView, toCandidatePii, num } from './evaluation.mapper.js';
 export { percentageOf, validateMarks } from './marks.js';
 
-export async function flagCountsFor(candidateIds: string[]): Promise<Map<string, Record<string, number>>> {
+export async function flagCountsFor(candidateIds: string[]): Promise<Map<string, { counts: Record<string, number>; nearbyCount: number | null }>> {
   const flags = await exam.getFlagsBatch(candidateIds);
-  return new Map([...flags].map(([id, f]) => [id, flagBreakdown(f)]));
+  return new Map([...flags].map(([id, f]) => [id, { counts: flagBreakdown(f), nearbyCount: f.nearbyCount }]));
 }
 
 export const evaluation = createEvaluationService({ repo: evaluationRepository, flagCounts: flagCountsFor });

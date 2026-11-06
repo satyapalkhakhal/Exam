@@ -31,6 +31,8 @@ export interface SubmissionRow extends Partial<SaPii> {
   timeTakenSec: number | null;
   submitType: string;
   flagCounts: Record<string, number>;
+  /** Other candidates who started within 100 m and ±2 h; null without a start location. */
+  nearbyCount: number | null;
   evaluationStatus: EvaluationFilter;
   totalMarks?: number | null;
 }

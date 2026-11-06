@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluateLocationFlags, LOCATION_FLAG_THRESHOLDS } from '../src/modules/exam/locationFlags.js';
+import { evaluateLocationFlags, LOCATION_FLAG_THRESHOLDS, nearbyCountOf } from '../src/modules/exam/locationFlags.js';
 
 const GUWAHATI = { lat: 26.144, lng: 91.736 };
 // ~60 km east of Guwahati along the same latitude.
@@ -52,4 +52,10 @@ test('2 candidates on the same IP → no flag', () => {
 
 test('the thresholds are the plan values', () => {
   assert.deepEqual(LOCATION_FLAG_THRESHOLDS, { loginStartKm: 50, nearbyMeters: 100, sharedIpCandidates: 3 });
+});
+
+test('nearbyCountOf: null without a start location, 0 with one and nobody near, else the number of nearby candidates', () => {
+  assert.equal(nearbyCountOf([], false), null);
+  assert.equal(nearbyCountOf([{ code: 'SHARED_IP', ip: '1.1.1.1', count: 4 }], true), 0);
+  assert.equal(nearbyCountOf([{ code: 'NEARBY_CANDIDATES', withCandidateIds: ['a', 'b', 'c'], meters: 12 }], true), 3);
 });

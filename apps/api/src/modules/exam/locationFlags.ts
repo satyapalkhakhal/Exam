@@ -70,3 +70,13 @@ export function evaluateLocationFlags(
   }
   return flags;
 }
+
+/**
+ * How many other candidates started within nearbyMeters (and the ±2 h window) of
+ * this one: null when this candidate has no granted start location to compare.
+ */
+export function nearbyCountOf(flags: LocationFlag[], hasStart: boolean): number | null {
+  if (!hasStart) return null;
+  const near = flags.find((f) => f.code === 'NEARBY_CANDIDATES');
+  return near && near.code === 'NEARBY_CANDIDATES' ? near.withCandidateIds.length : 0;
+}

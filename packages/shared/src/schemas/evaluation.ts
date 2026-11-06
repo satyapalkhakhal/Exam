@@ -107,6 +107,8 @@ export interface SubmissionViewDto extends Partial<CandidatePiiDto> {
   timeTakenSec: number | null;
   submitType: 'MANUAL' | 'AUTO' | null;
   flagCounts: Record<string, number>;
+  /** Other candidates who started within 100 m and ±2 h; null without a start location. */
+  nearbyCount: number | null;
   evaluationStatus: EvaluationState;
   totalMarks: number | null;
 }
@@ -157,6 +159,7 @@ export interface LeaderboardRowDto extends CandidatePiiDto {
   percentage: number;
   questionMarks: { order: number; marks: number | null; maxMarks: number }[];
   flagCounts: Record<string, number>;
+  nearbyCount: number | null;
 }
 
 export interface DashboardRoleDto {

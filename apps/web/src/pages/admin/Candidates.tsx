@@ -266,11 +266,12 @@ export default function Candidates() {
                   </TableHeaderFilter>
                 </span>
               </TableHead>
+              <TableHead title="Other candidates who started the exam within 100 m and 2 hours">Nearby</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {isPending && <TableRow><TableCell colSpan={13} className="text-muted-foreground">Loading…</TableCell></TableRow>}
-            {data?.items.length === 0 && <TableRow><TableCell colSpan={13} className="text-muted-foreground">No candidates match.</TableCell></TableRow>}
+            {isPending && <TableRow><TableCell colSpan={14} className="text-muted-foreground">Loading…</TableCell></TableRow>}
+            {data?.items.length === 0 && <TableRow><TableCell colSpan={14} className="text-muted-foreground">No candidates match.</TableCell></TableRow>}
             {data?.items.map((c) => (
               <TableRow key={c.id} data-state={selected.has(c.id) ? 'selected' : undefined}>
                 <TableCell>
@@ -295,6 +296,7 @@ export default function Candidates() {
                 <TableCell>{c.xiiPercentage ?? '-'}</TableCell>
                 <TableCell>{c.majorCpi ?? '-'}</TableCell>
                 <TableCell>{c.flagCount > 0 ? <Badge variant="default">{c.flagCount}</Badge> : '-'}</TableCell>
+                <TableCell>{c.nearbyCount ?? '-'}</TableCell>
               </TableRow>
             ))}
           </TableBody>

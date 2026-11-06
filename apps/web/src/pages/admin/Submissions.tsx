@@ -36,7 +36,7 @@ export default function Submissions() {
     setPage(1);
   };
   const activeCount = [f.jobRoleId, f.evaluation, f.search].filter(Boolean).length;
-  const cols = isSa ? 9 : 6;
+  const cols = isSa ? 10 : 7;
 
   return (
     <div className="space-y-4">
@@ -69,6 +69,7 @@ export default function Submissions() {
               <TableHead>Submitted</TableHead>
               <TableHead>Time taken</TableHead>
               <TableHead>Flags</TableHead>
+              <TableHead title="Other candidates who started the exam within 100 m and 2 hours">Nearby</TableHead>
               <TableHead>
                 <span className="inline-flex items-center gap-1.5">
                   Evaluation
@@ -106,6 +107,7 @@ export default function Submissions() {
                 </TableCell>
                 <TableCell>{formatDuration(s.timeTakenSec)}</TableCell>
                 <TableCell title={flagTitle(s.flagCounts)}>{totalFlags(s.flagCounts) > 0 ? <Badge variant="default">{totalFlags(s.flagCounts)}</Badge> : '-'}</TableCell>
+                <TableCell>{s.nearbyCount ?? '-'}</TableCell>
                 <TableCell><Badge variant={s.evaluationStatus === 'SUBMITTED' ? 'default' : 'outline'}>{EVAL_LABEL[s.evaluationStatus]}</Badge></TableCell>
                 {isSa && <TableCell>{s.totalMarks ?? '-'}</TableCell>}
                 {isSa && (

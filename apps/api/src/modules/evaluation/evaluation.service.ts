@@ -31,7 +31,8 @@ const ENTITY = 'exam_attempt';
 export interface EvaluationDeps {
   repo: EvaluationRepository;
   /** Per-candidate flag breakdown (numbers only, no location detail). */
-  flagCounts: (candidateIds: string[]) => Promise<Map<string, Record<string, number>>>;
+  /** Per candidate: the numeric flag breakdown and the nearby-candidates count. */
+  flagCounts: (candidateIds: string[]) => Promise<Map<string, { counts: Record<string, number>; nearbyCount: number | null }>>;
   now?: () => Date;
 }
 
@@ -58,7 +59,10 @@ export function createEvaluationService(deps: EvaluationDeps) {
     const { rows, total } = await repo.listSubmissions(q, role === 'SUPER_ADMIN');
     const flags = await deps.flagCounts(rows.map((r) => r.candidate.id));
     return {
-      items: rows.map((r) => toSubmissionView({ ...r, attemptId: r.id, flags: flags.get(r.candidate.id) ?? {} }, role)),
+      items: rows.map((r) => {
+        const f = flags.get(r.candidate.id);
+        return toSubmissionView({ ...r, attemptId: r.id, flags: f?.counts ?? {}, nearbyCount: f?.nearbyCount ?? null }, role);
+      }),
       total,
       page: q.page,
       pageSize: q.pageSize,
@@ -70,7 +74,8 @@ export function createEvaluationService(deps: EvaluationDeps) {
     const a = await repo.marking(attemptId);
     if (!a) throw notFound('Submission not found');
     const flags = await deps.flagCounts([a.candidate.id]);
-    return toMarkingView({ ...a, attemptId: a.id, flags: flags.get(a.candidate.id) ?? {} }, role);
+    const f = flags.get(a.candidate.id);
+    return toMarkingView({ ...a, attemptId: a.id, flags: f?.counts ?? {}, nearbyCount: f?.nearbyCount ?? null }, role);
   }
 
   async function lock(attemptId: string, actor: Actor): Promise<LockDto> {

@@ -65,15 +65,16 @@ export default function Leaderboard() {
               <TableHead>Total</TableHead>
               <TableHead>%</TableHead>
               <TableHead>Flags</TableHead>
+              <TableHead title="Other candidates who started the exam within 100 m and 2 hours">Nearby</TableHead>
               <TableHead>Result</TableHead>
               <TableHead>Decision</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {board.isPending && jobRoleId && <TableRow><TableCell colSpan={7 + questionCols.length} className="text-muted-foreground">Loading…</TableCell></TableRow>}
-            {board.data?.length === 0 && <TableRow><TableCell colSpan={7 + questionCols.length} className="text-muted-foreground">No evaluated candidates yet.</TableCell></TableRow>}
+            {board.isPending && jobRoleId && <TableRow><TableCell colSpan={8 + questionCols.length} className="text-muted-foreground">Loading…</TableCell></TableRow>}
+            {board.data?.length === 0 && <TableRow><TableCell colSpan={8 + questionCols.length} className="text-muted-foreground">No evaluated candidates yet.</TableCell></TableRow>}
             {board.data && board.data.length > 0 && rows.length === 0 && (
-              <TableRow><TableCell colSpan={7 + questionCols.length} className="text-muted-foreground">No candidate matches the search.</TableCell></TableRow>
+              <TableRow><TableCell colSpan={8 + questionCols.length} className="text-muted-foreground">No candidate matches the search.</TableCell></TableRow>
             )}
             {rows.map((r) => (
               <TableRow key={r.candidateId}>
@@ -86,6 +87,7 @@ export default function Leaderboard() {
                 <TableCell>{r.totalMarks} / {r.maxMarks}</TableCell>
                 <TableCell>{r.percentage}</TableCell>
                 <TableCell title={flagTitle(r.flagCounts)}>{totalFlags(r.flagCounts) > 0 ? <Badge variant="default">{totalFlags(r.flagCounts)}</Badge> : '-'}</TableCell>
+                <TableCell>{r.nearbyCount ?? '-'}</TableCell>
                 <TableCell><ResultBadge result={r.result} /></TableCell>
                 <TableCell>
                   <div className="flex gap-1.5">

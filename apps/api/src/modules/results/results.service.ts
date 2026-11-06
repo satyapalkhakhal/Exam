@@ -41,7 +41,7 @@ export interface Actor {
   ip: string | null;
 }
 
-const EMPTY_FLAGS: CandidateFlags = { integrity: { pasteAttempts: 0, bulkInsert: 0, tabHidden: 0, blur: 0, ipChanges: 0 }, location: [] };
+const EMPTY_FLAGS: CandidateFlags = { integrity: { pasteAttempts: 0, bulkInsert: 0, tabHidden: 0, blur: 0, ipChanges: 0 }, location: [], nearbyCount: null };
 
 const STATUS_KEYS: Record<CandidateStatusValue, keyof DashboardRoleDto> = {
   NOT_STARTED: 'notStarted',
@@ -127,6 +127,7 @@ export function createResultsService(deps: ResultsDeps) {
         percentage: num(r.percentage) ?? 0,
         questionMarks: r.questions.map((q) => ({ order: q.order, marks: num(q.evaluation?.marks ?? null), maxMarks: num(q.maxMarksSnapshot) ?? 0 })),
         flagCounts: flagBreakdown(flags.get(r.candidate.id) ?? EMPTY_FLAGS),
+        nearbyCount: (flags.get(r.candidate.id) ?? EMPTY_FLAGS).nearbyCount,
       })),
     };
   }
@@ -197,6 +198,7 @@ export function createResultsService(deps: ResultsDeps) {
         { header: 'Max' },
         { header: 'Percentage' },
         ...FLAG_COLUMNS.map((f) => ({ header: f.header })),
+        { header: 'Nearby candidates' },
         { header: 'Flag score' },
         { header: 'Evaluator comments', width: 60 },
       ],
@@ -229,6 +231,7 @@ export function createResultsService(deps: ResultsDeps) {
           evaluated ? num(r.maxMarks) : null,
           evaluated ? num(r.percentage) : null,
           ...FLAG_COLUMNS.map((col) => breakdown[col.key]),
+          f.nearbyCount,
           flagScore(f),
           r.questions
             .filter((q) => evaluated && q.evaluation?.comment)
