@@ -14,6 +14,7 @@ import { candidateAuthService, createCandidateAuthRouter } from './modules/candi
 import { createExamRouter, examAuth, examService, ownsApplication } from './modules/exam/index.js';
 import { createEvaluationRouter, evaluation } from './modules/evaluation/index.js';
 import { createResultsRouter, results } from './modules/results/index.js';
+import { aiEvaluation, createAiEvaluationRouter } from './modules/aiEvaluation/index.js';
 import { audit, createAuditRouter } from './modules/audit/index.js';
 import { createIntegrationsRouter, createIntegrationsService, integrationsRepository } from './modules/integrations/index.js';
 import { createEmailTemplatesRouter, createEmailsRouter, emails } from './modules/emails/index.js';
@@ -27,6 +28,7 @@ const integrationsService = createIntegrationsService({
   audit: (entry) => audit.record(entry),
   sendSms,
   sendEmail,
+  testAi: aiEvaluation.testConnection,
   countCandidatesWithoutMobile: integrationsRepository.countCandidatesWithoutMobile,
 });
 
@@ -38,6 +40,7 @@ router.use('/admin/auth', createAdminAuthRouter(adminAuthService));
 router.use('/admin/users', ...superAdminOnly, createAdminUsersRouter(adminUsersService));
 router.use('/admin/audit', ...superAdminOnly, createAuditRouter(audit));
 router.use('/admin/integrations', ...superAdminOnly, createIntegrationsRouter(integrationsService));
+router.use('/admin/ai-evaluations', ...superAdminOnly, createAiEvaluationRouter(aiEvaluation));
 router.use('/admin/email-templates', ...superAdminOnly, createEmailTemplatesRouter(emails));
 router.use('/admin/emails', ...superAdminOnly, createEmailsRouter(emails));
 router.use('/admin/roles', authenticateAdmin, createJobRolesRouter(jobRoles));

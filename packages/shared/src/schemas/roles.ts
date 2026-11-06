@@ -3,6 +3,7 @@
 // the web forms. Datetimes are ISO strings with an offset (UTC on the wire).
 
 import { z } from 'zod';
+import { CompositeWeightsSchema, type CompositeWeights } from './aiEvaluation.js';
 
 const roleName = z.string().trim().min(1).max(120);
 const refCount = z.number().int().min(0).max(100_000);
@@ -31,6 +32,8 @@ export const ExamSettingsUpdateSchema = z
     windowEnd: instant,
     instructions: z.string().max(10_000),
     isOpen: z.boolean(),
+    /** Composite-score weights (docs/ai-evaluation.md); omitted keeps the stored ones. */
+    weights: CompositeWeightsSchema.optional(),
   })
   .refine(
     (v) => !v.windowStart || !v.windowEnd || new Date(v.windowEnd).getTime() > new Date(v.windowStart).getTime(),
@@ -45,6 +48,7 @@ export interface ExamSettingDto {
   instructions: string;
   isOpen: boolean;
   questionsLocked: boolean;
+  weights: CompositeWeights;
 }
 
 export interface JobRoleDto {

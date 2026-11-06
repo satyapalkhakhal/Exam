@@ -6,6 +6,10 @@
 import { z } from 'zod';
 import { CANDIDATE_BULK_MAX, type CandidateResult } from './candidates.js';
 import { NextRoundSchema, type EmailSendResultDto } from './emails.js';
+import { LEADERBOARD_SORTS, type AiAttemptSummaryDto, type AiQuestionScoreDto } from './aiEvaluation.js';
+
+/** Submissions filter on the AI roll-up; NEEDS_REVIEW = AI done with concerns or LOW confidence. */
+export const AI_FILTERS = ['NONE', 'PARTIAL', 'DONE', 'NEEDS_REVIEW'] as const;
 
 export const EVALUATION_STATES = ['PENDING', 'DRAFT', 'SUBMITTED'] as const;
 export type EvaluationState = (typeof EVALUATION_STATES)[number];
@@ -21,6 +25,7 @@ const pageSize = z.coerce.number().int().min(1).max(100).default(25);
 export const SubmissionListQuerySchema = z.object({
   jobRoleId: uuid.optional(),
   evaluation: z.enum(EVALUATION_STATES).optional(),
+  ai: z.enum(AI_FILTERS).optional(),
   search: z.string().trim().max(100).optional(),
   page,
   pageSize,
@@ -84,7 +89,7 @@ export interface CandidateDecisionBulkResultDto {
   emailSkipped: EmailSendResultDto['skipped'];
 }
 
-export const LeaderboardQuerySchema = z.object({ jobRoleId: uuid });
+export const LeaderboardQuerySchema = z.object({ jobRoleId: uuid, sort: z.enum(LEADERBOARD_SORTS).default('human') });
 export const ExportQuerySchema = z.object({ jobRoleId: uuid.optional() });
 
 export interface CandidatePiiDto {
@@ -109,6 +114,8 @@ export interface SubmissionViewDto extends Partial<CandidatePiiDto> {
   flagCounts: Record<string, number>;
   evaluationStatus: EvaluationState;
   totalMarks: number | null;
+  /** AI roll-up (visible to Evaluators too: no candidate data). */
+  ai: AiAttemptSummaryDto;
 }
 
 export interface MarkingQuestionDto {
@@ -120,6 +127,10 @@ export interface MarkingQuestionDto {
   answer: { text: string; wordCount: number; versions: { savedAt: string; wordCount: number }[] };
   integrity: { pasteAttempts: number; bulkInsert: { at: string; grown: number; typed: number }[] };
   evaluation: { marks: number | null; comment: string | null };
+  /** Latest AI suggestion for this question, or null if never graded. */
+  ai: AiQuestionScoreDto | null;
+  /** True when the stored human mark was accepted unchanged from the AI score. */
+  acceptedFromAi: boolean;
 }
 
 /**
@@ -155,7 +166,13 @@ export interface LeaderboardRowDto extends CandidatePiiDto {
   totalMarks: number;
   maxMarks: number;
   percentage: number;
-  questionMarks: { order: number; marks: number | null; maxMarks: number }[];
+  questionMarks: { order: number; marks: number | null; aiMarks: number | null; maxMarks: number }[];
+  /** AI exam % when every question has an AI score. */
+  aiPercentage: number | null;
+  /** Weighted composite (exam %, X, XII, CPI); null when no exam % exists. */
+  compositeScore: number | null;
+  /** The exam % inside the composite is the AI % (no submitted human evaluation yet). */
+  compositeProvisional: boolean;
   flagCounts: Record<string, number>;
 }
 

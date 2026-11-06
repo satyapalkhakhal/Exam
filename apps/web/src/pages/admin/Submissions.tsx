@@ -6,6 +6,10 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { AdminRole } from '@exam/shared';
+import { AI_FILTERS } from '@exam/shared';
+import { AiSubmissionsToolbar } from '@/components/admin/AiSubmissionsToolbar';
+import { Checkbox } from '@/components/ui/checkbox';
+import { AI_FILTER_LABEL, aiStateBadge } from '@/lib/aiEvaluation';
 import { Badge } from '@/components/ui/badge';
 import { ClearFiltersButton } from '@/components/ui/clear-filters-button';
 import { Pagination } from '@/components/ui/pagination';
@@ -16,7 +20,7 @@ import { EVALUATION_FILTERS, useSubmissions, type EvaluationFilter, type Submiss
 import { useAdminAuth } from '@/stores/adminAuth';
 
 const PAGE_SIZES = [25, 50, 100];
-const EMPTY: SubmissionFilters = { jobRoleId: '', evaluation: '', search: '' };
+const EMPTY: SubmissionFilters = { jobRoleId: '', evaluation: '', ai: '', search: '' };
 const EVAL_LABEL: Record<EvaluationFilter, string> = { PENDING: 'Pending', DRAFT: 'Draft', SUBMITTED: 'Evaluated' };
 
 export const formatDuration = (sec: number | null) => (sec === null ? '-' : `${Math.floor(sec / 60)}m ${String(sec % 60).padStart(2, '0')}s`);
@@ -29,14 +33,19 @@ export default function Submissions() {
   const [f, setF] = useState<SubmissionFilters>(EMPTY);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const [selected, setSelected] = useState<string[]>([]);
   const roles = useRoles();
   const { data, isPending, error } = useSubmissions(f, page, pageSize);
   const set = (patch: Partial<SubmissionFilters>) => {
     setF((c) => ({ ...c, ...patch }));
     setPage(1);
+    setSelected([]);
   };
-  const activeCount = [f.jobRoleId, f.evaluation, f.search].filter(Boolean).length;
-  const cols = isSa ? 9 : 6;
+  const activeCount = [f.jobRoleId, f.evaluation, f.ai, f.search].filter(Boolean).length;
+  const cols = isSa ? 12 : 7;
+  const rowsIds = data?.items.map((s) => s.attemptId) ?? [];
+  const allSelected = rowsIds.length > 0 && rowsIds.every((id) => selected.includes(id));
+  const toggle = (id: string) => setSelected((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
 
   return (
     <div className="space-y-4">
@@ -44,11 +53,17 @@ export default function Submissions() {
         <h1 className="text-xl font-semibold text-foreground">Submissions</h1>
         <ClearFiltersButton count={activeCount} onClear={() => set(EMPTY)} />
       </div>
+      {isSa && <AiSubmissionsToolbar jobRoleId={f.jobRoleId} total={data?.total ?? 0} selectedIds={selected} onClearSelection={() => setSelected([])} />}
       {error && <p className="text-sm text-destructive" role="alert">{error.message}</p>}
       <div className="overflow-x-auto rounded-lg border border-border bg-card">
         <Table>
           <TableHeader>
             <TableRow>
+              {isSa && (
+                <TableHead className="w-8">
+                  <Checkbox aria-label="Select all rows on this page" checked={allSelected} onChange={(e) => setSelected((c) => (e.target.checked ? [...new Set([...c, ...rowsIds])] : c.filter((id) => !rowsIds.includes(id))))} />
+                </TableHead>
+              )}
               <TableHead>
                 <span className="inline-flex items-center gap-1.5">
                   Code
@@ -81,6 +96,19 @@ export default function Submissions() {
                   </TableHeaderFilter>
                 </span>
               </TableHead>
+              <TableHead>
+                <span className="inline-flex items-center gap-1.5">
+                  AI
+                  <TableHeaderFilter active={Boolean(f.ai)} ariaLabel="Filter by AI status">
+                    <TableHeaderFilterOptions
+                      value={f.ai}
+                      options={AI_FILTERS.map((s) => ({ value: s, label: AI_FILTER_LABEL[s] }))}
+                      onChange={(v) => set({ ai: v as SubmissionFilters['ai'] })}
+                    />
+                  </TableHeaderFilter>
+                </span>
+              </TableHead>
+              <TableHead>AI %</TableHead>
               {isSa && <TableHead>Total</TableHead>}
               {isSa && <TableHead>X / XII / CPI</TableHead>}
             </TableRow>
@@ -90,6 +118,11 @@ export default function Submissions() {
             {data?.items.length === 0 && <TableRow><TableCell colSpan={cols} className="text-muted-foreground">No submissions match.</TableCell></TableRow>}
             {data?.items.map((s) => (
               <TableRow key={s.attemptId}>
+                {isSa && (
+                  <TableCell>
+                    <Checkbox aria-label={`Select ${s.candidateCode}`} checked={selected.includes(s.attemptId)} onChange={() => toggle(s.attemptId)} />
+                  </TableCell>
+                )}
                 <TableCell className="font-mono text-xs">
                   <Link to={`/admin/submissions/${s.attemptId}`} className="font-medium text-primary hover:underline">{s.candidateCode}</Link>
                 </TableCell>
@@ -107,6 +140,8 @@ export default function Submissions() {
                 <TableCell>{formatDuration(s.timeTakenSec)}</TableCell>
                 <TableCell title={flagTitle(s.flagCounts)}>{totalFlags(s.flagCounts) > 0 ? <Badge variant="default">{totalFlags(s.flagCounts)}</Badge> : '-'}</TableCell>
                 <TableCell><Badge variant={s.evaluationStatus === 'SUBMITTED' ? 'default' : 'outline'}>{EVAL_LABEL[s.evaluationStatus]}</Badge></TableCell>
+                <TableCell><Badge variant={aiStateBadge(s.ai).variant}>{aiStateBadge(s.ai).label}</Badge></TableCell>
+                <TableCell>{s.ai.percentage ?? '-'}</TableCell>
                 {isSa && <TableCell>{s.totalMarks ?? '-'}</TableCell>}
                 {isSa && (
                   <TableCell className="text-xs text-muted-foreground">

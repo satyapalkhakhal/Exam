@@ -111,6 +111,8 @@ REVOKE UPDATE, DELETE ON activity_logs, admin_audit_logs FROM exam_user;
 8. Dry run with 2-3 test candidates on real phones and laptops (OTP, location, paste blocked, autosave across refresh and offline, auto-submit, evaluator marking), then reset or delete them.
 9. Take a manual DB backup right before the window opens.
 
+**AI-assisted marking (optional, after the exam):** Admin → Integrations → AI evaluation: enter the OpenAI API key and model, then Test connection (the key is stored encrypted with `CONFIG_ENCRYPTION_KEY`). Set the composite weights per role in Exam Settings. Before relying on bulk accept, compare AI and human marks on 10-20 scripts. Candidate answers (no names, codes or academics) are sent to OpenAI; confirm your OpenAI organisation's data-retention settings are acceptable. A change to the AI concurrency setting takes effect after an API restart.
+
 ### After the exam
 
 Export results and take a final backup. Close the roles. After the agreed retention period (suggested 6 months), anonymise personal data while keeping marks: `pnpm --filter @exam/api purge-candidates --before YYYY-MM-DD` (dry run), then add `--yes` to apply. In the container: `docker exec exam_api_production node dist/scripts/purge-candidates.js --before YYYY-MM-DD --yes`.

@@ -4,6 +4,7 @@
 // stored one), output only ever says whether it is set plus its last 4 chars.
 
 import { z } from 'zod';
+import type { MaskedAiConfig } from './aiEvaluation.js';
 
 const secretInput = z
   .string()
@@ -119,4 +120,5 @@ export interface MaskedEmailConfig {
 export interface IntegrationsView {
   sms: MaskedSmsConfig;
   email: MaskedEmailConfig;
+  ai: MaskedAiConfig;
 }

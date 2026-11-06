@@ -24,7 +24,9 @@ export function createIntegrationsController(service: IntegrationsService) {
   return {
     get: wrap(async (_req, res) => ok(res, await service.get())),
     updateSms: wrap(async (req, res) => ok(res, await service.updateSms(req.body, adminId(req)))),
+    updateAi: wrap(async (req, res) => ok(res, await service.updateAi(req.body, adminId(req)))),
     updateEmail: wrap(async (req, res) => ok(res, await service.updateEmail(req.body, adminId(req)))),
+    testAi: wrap(async (req, res) => ok(res, await service.testAi(adminId(req)))),
     testSms: wrap(async (req, res) => ok(res, await service.testSms(req.body.mobile, adminId(req)))),
     testEmail: wrap(async (req, res) => ok(res, await service.testEmail(req.body.email, adminId(req)))),
   };

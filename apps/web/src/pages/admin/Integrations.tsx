@@ -8,6 +8,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { AlertTriangle } from 'lucide-react';
+import { AI_CONCURRENCY_MAX, type AiConfigInput, type MaskedAiConfig } from '@exam/shared';
 import { MAX_EMAIL_CC, invalidEmailInList, parseEmailList } from '@exam/shared';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -17,7 +18,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import {
-  useIntegrations, useSaveIntegration, useSendTest,
+  useIntegrations, useSaveAiConfig, useSaveIntegration, useSendTest, useTestAi,
   type Channel, type MaskedEmailConfig, type MaskedSmsConfig,
 } from '@/api/admin/integrations';
 import { buildIntegrationPatch, maskedLabel, type MaskedSecret } from '@/lib/integrationsForm';
@@ -219,6 +220,93 @@ function EmailCard({ saved }: { saved: MaskedEmailConfig }) {
   );
 }
 
+const aiSchema = z.object({
+  enabled: z.boolean(),
+  apiKey: z.string(),
+  model: z.string().trim().min(1, 'Enter the model id').max(100, 'At most 100 characters'),
+  concurrency: z.number({ invalid_type_error: 'Enter 1 to ' + AI_CONCURRENCY_MAX }).int('Whole number').min(1, 'At least 1').max(AI_CONCURRENCY_MAX, `At most ${AI_CONCURRENCY_MAX}`),
+  gradingInstructions: z.string().max(4000, 'At most 4,000 characters'),
+});
+
+function AiCard({ saved }: { saved: MaskedAiConfig }) {
+  const save = useSaveAiConfig();
+  const test = useTestAi();
+  const [clearKey, setClearKey] = useState(false);
+  const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm<z.infer<typeof aiSchema>>({
+    resolver: zodResolver(aiSchema),
+    defaultValues: { enabled: saved.enabled, apiKey: '', model: saved.model, concurrency: saved.concurrency, gradingInstructions: saved.gradingInstructions },
+  });
+  const typedKey = watch('apiKey').trim();
+  const onSubmit = handleSubmit((v) => {
+    // Blank keeps the stored key; '' is the explicit clear.
+    const apiKey = clearKey ? '' : typedKey !== '' ? typedKey : undefined;
+    const body: AiConfigInput = { enabled: v.enabled, model: v.model, concurrency: v.concurrency, gradingInstructions: v.gradingInstructions, ...(apiKey !== undefined ? { apiKey } : {}) };
+    save.mutate(body, { onSuccess: () => setClearKey(false) });
+  });
+  return (
+    <form noValidate onSubmit={onSubmit}>
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle>AI evaluation (OpenAI)</CardTitle>
+            <div className="flex items-center gap-2">
+              <Label htmlFor="ai-enabled">Enabled</Label>
+              <Switch id="ai-enabled" checked={watch('enabled')} onCheckedChange={(v) => setValue('enabled', v, { shouldDirty: true })} />
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Candidate answers (no names or academics) are sent to OpenAI to suggest marks. A person always confirms the marks.
+          </p>
+          <div className="space-y-1.5">
+            <Label htmlFor="ai-apiKey">API key</Label>
+            {saved.apiKey.set && !clearKey && (
+              <p className="text-xs text-muted-foreground">Saved: {maskedLabel(saved.apiKey)}. Leave blank to keep it, or type a new key to replace it.</p>
+            )}
+            {clearKey ? (
+              <div className="flex items-center gap-2">
+                <span className="flex h-10 flex-1 items-center rounded-lg border border-input bg-muted/30 px-3 text-sm text-muted-foreground">The saved key will be removed on Save</span>
+                <Button type="button" variant="outline" onClick={() => setClearKey(false)}>Undo</Button>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <Input id="ai-apiKey" type="password" autoComplete="off" placeholder={saved.apiKey.set ? 'Enter new key' : 'sk-…'} {...register('apiKey')} />
+                {saved.apiKey.set && <Button type="button" variant="outline" onClick={() => { setValue('apiKey', ''); setClearKey(true); }}>Clear key</Button>}
+              </div>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ai-model">Model</Label>
+            <Input id="ai-model" autoComplete="off" aria-describedby="ai-model-help" error={errors.model?.message} {...register('model')} />
+            <p id="ai-model-help" className="text-xs text-muted-foreground">The OpenAI model id to use.</p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ai-concurrency">Concurrency (1 to {AI_CONCURRENCY_MAX})</Label>
+            <Input id="ai-concurrency" type="number" min={1} max={AI_CONCURRENCY_MAX} className="w-28" error={errors.concurrency?.message} {...register('concurrency', { valueAsNumber: true })} />
+            <p className="text-xs text-muted-foreground">How many answers are graded at the same time. Lower it if OpenAI rate-limits you.</p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ai-instructions">Grading instructions</Label>
+            <Textarea id="ai-instructions" rows={4} placeholder="Optional extra instructions added to every grading request" {...register('gradingInstructions')} />
+            {errors.gradingInstructions && <p className="text-xs text-destructive">{errors.gradingInstructions.message}</p>}
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button type="submit" disabled={save.isPending}>{save.isPending ? 'Saving…' : 'Save'}</Button>
+            <Button type="button" variant="outline" disabled={test.isPending} onClick={() => test.mutate()}>{test.isPending ? 'Testing…' : 'Test connection'}</Button>
+            <div aria-live="polite" className="text-sm">
+              {save.isError && <span role="alert" className="text-destructive">{save.error.message}</span>}
+              {save.isSuccess && !save.isError && <span className="text-green-600">Saved. </span>}
+              {test.isError && <span role="alert" className="text-destructive">{test.error.message}</span>}
+              {test.isSuccess && <span className="text-green-600">Connection works (uses the saved settings).</span>}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </form>
+  );
+}
+
 export default function Integrations() {
   const { data, isPending, error } = useIntegrations();
   const smsOnlyRisk = data && data.sms.enabled && !data.email.enabled && data.candidatesWithoutMobile > 0;
@@ -244,6 +332,7 @@ export default function Integrations() {
         <div className="grid gap-4 xl:grid-cols-2">
           <SmsCard saved={data.sms} />
           <EmailCard saved={data.email} />
+          <AiCard saved={data.ai} />
         </div>
       )}
     </div>

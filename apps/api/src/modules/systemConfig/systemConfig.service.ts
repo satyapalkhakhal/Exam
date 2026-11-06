@@ -9,6 +9,7 @@ import { isSealed, open, seal } from '../../infrastructure/crypto/secretBox.js';
 export const SECRET_FIELDS: Record<string, readonly string[]> = {
   'sms.arihant': ['authToken', 'apiKey'],
   'email.zatpatmail': ['sendMailToken'],
+  'ai.openai': ['apiKey'],
 };
 
 const CACHE_TTL_MS = 60_000;

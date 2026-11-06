@@ -7,7 +7,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '@/lib/api';
 import type { SaPii } from './evaluation';
 import type { Paged } from './users';
-import type { CandidateDecisionBulkInput, CandidateDecisionBulkResultDto } from '@exam/shared';
+import type { LeaderboardSort, CandidateDecisionBulkInput, CandidateDecisionBulkResultDto } from '@exam/shared';
 
 export interface LeaderboardRow extends SaPii {
   rank: number;
@@ -18,18 +18,21 @@ export interface LeaderboardRow extends SaPii {
   totalMarks: number;
   maxMarks: number;
   percentage: number;
-  questionMarks: { order: number; marks: number | null; maxMarks: number }[];
+  questionMarks: { order: number; marks: number | null; aiMarks: number | null; maxMarks: number }[];
+  aiPercentage: number | null;
+  compositeScore: number | null;
+  compositeProvisional: boolean;
   flagCounts: Record<string, number>;
 }
 
 export type Decision = 'SHORTLISTED' | 'REJECTED';
 
-export function useLeaderboard(jobRoleId: string) {
+export function useLeaderboard(jobRoleId: string, sort: LeaderboardSort = 'human') {
   return useQuery({
-    queryKey: ['admin', 'leaderboard', jobRoleId],
+    queryKey: ['admin', 'leaderboard', jobRoleId, sort],
     enabled: Boolean(jobRoleId),
     queryFn: async () => {
-      const r = await apiFetch<Paged<LeaderboardRow> | LeaderboardRow[]>('admin', `/leaderboard?jobRoleId=${encodeURIComponent(jobRoleId)}`);
+      const r = await apiFetch<Paged<LeaderboardRow> | LeaderboardRow[]>('admin', `/leaderboard?jobRoleId=${encodeURIComponent(jobRoleId)}&sort=${sort}`);
       return Array.isArray(r) ? r : r.items;
     },
   });

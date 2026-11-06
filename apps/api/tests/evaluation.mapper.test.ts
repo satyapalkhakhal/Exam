@@ -49,6 +49,7 @@ const submission = {
   totalMarks: null,
   startIp: '203.0.113.7',
   evaluation: { status: 'DRAFT', evaluatorId: 'adm-1' },
+  questions: [],
   candidate,
   flags: { pasteAttempts: 1, bulkInsert: 0, ipChanges: 0, locationFlags: 2, excessiveTabSwitching: 0 },
   loginLogs: [{ latitude: 26.19, longitude: 91.69, ip: '203.0.113.7' }],
@@ -64,7 +65,8 @@ const marking = {
       maxMarksSnapshot: 10,
       question: { evaluatorGuidance: 'Mentions retries', email: 'leak@example.com' },
       answer: { text: 'An operation...', wordCount: 2, versions: [{ savedAt: t0, wordCount: 1, text: 'An', ip: '1.1.1.1' }] },
-      evaluation: { marks: 7.5, comment: 'Good', evaluatorId: 'adm-1' },
+      evaluation: { marks: 7.5, comment: 'Good', evaluatorId: 'adm-1', aiScoreId: null },
+      aiScores: [],
     },
   ],
   activity: [
@@ -104,6 +106,7 @@ test('submission view shape', () => {
     flagCounts: { pasteAttempts: 1, bulkInsert: 0, ipChanges: 0, locationFlags: 2, excessiveTabSwitching: 0 },
     evaluationStatus: 'DRAFT',
     totalMarks: null,
+    ai: { state: 'NONE', totalMarks: null, percentage: null, needsReview: false },
   });
 });
 
@@ -120,6 +123,8 @@ test('marking view: per-question answer, versions, integrity and evaluation', ()
       answer: { text: 'An operation...', wordCount: 2, versions: [{ savedAt: t0.toISOString(), wordCount: 1 }] },
       integrity: { pasteAttempts: 1, bulkInsert: [{ at: t1.toISOString(), grown: 400, typed: 3 }] },
       evaluation: { marks: 7.5, comment: 'Good' },
+      ai: null,
+      acceptedFromAi: false,
     },
   ]);
 });
@@ -153,4 +158,91 @@ test('timeline: whitelisted exam events in order, with question number and bulk 
     const json = JSON.stringify(out.timeline);
     assert.ok(!json.includes('203.0.113.7') && !json.includes('198.51.100.9'), 'IP addresses never reach the timeline');
   }
+});
+
+// ---- AI fields (docs/ai-evaluation.md §8) ---------------------------------------------
+
+const aiScore = (over: Record<string, unknown> = {}) => ({
+  id: 'ai-1',
+  status: 'DONE',
+  marks: 8,
+  maxMarks: 10,
+  rationale: 'Covers retries and keys.',
+  strengths: ['keys'],
+  improvements: ['examples'],
+  confidence: 'HIGH',
+  concerns: [],
+  model: 'gpt-test',
+  error: null,
+  completedAt: t1,
+  // would leak if the mapper spread rows
+  runId: 'run-1',
+  inputTokens: 100,
+  attemptQuestionId: 'aq-1',
+  ...over,
+});
+
+function withAi(scores: unknown[], evaluation: unknown = { marks: 8, comment: null, aiScoreId: null }) {
+  const m = marking as unknown as { questions: Record<string, unknown>[] };
+  return { ...marking, questions: [{ ...m.questions[0], aiScores: scores, evaluation }] } as unknown as MarkingSource;
+}
+
+test('an Evaluator gets the AI score and reasoning per question, whitelisted', () => {
+  const v = toMarkingView(withAi([aiScore({ concerns: ['OFF_TOPIC', 'MADE_UP'] })]), 'EVALUATOR');
+  assert.deepEqual(v.questions[0]!.ai, {
+    id: 'ai-1',
+    status: 'DONE',
+    marks: 8,
+    maxMarks: 10,
+    rationale: 'Covers retries and keys.',
+    strengths: ['keys'],
+    improvements: ['examples'],
+    confidence: 'HIGH',
+    concerns: ['OFF_TOPIC'],
+    model: 'gpt-test',
+    error: null,
+    completedAt: t1.toISOString(),
+  });
+  const keys = keysDeep(v.questions[0]!.ai);
+  for (const k of ['runId', 'inputTokens', 'attemptQuestionId', 'aiScoreId']) assert.ok(!keys.has(k), k);
+});
+
+test('an Evaluator never receives composite or academics, even with AI present', () => {
+  const sub = { ...(withAi([aiScore()]) as unknown as Record<string, unknown>), questions: [{ maxMarksSnapshot: 10, aiScores: [aiScore()] }] } as unknown as SubmissionSource;
+  for (const out of [toSubmissionView(sub, 'EVALUATOR'), toMarkingView(withAi([aiScore()]), 'EVALUATOR')]) {
+    const keys = keysDeep(out);
+    for (const k of ['compositeScore', 'composite', 'compositeProvisional', 'weights', 'xPercentage', 'xiiPercentage', 'majorCpi']) assert.ok(!keys.has(k), k);
+  }
+});
+
+test('the latest DONE score wins over a newer failed one; with no DONE the latest of any status shows', () => {
+  const failed = aiScore({ id: 'ai-2', status: 'FAILED', marks: null, error: 'Grading failed', completedAt: null });
+  const done = aiScore({ id: 'ai-1' });
+  assert.equal(toMarkingView(withAi([failed, done]), 'EVALUATOR').questions[0]!.ai?.id, 'ai-1');
+  const only = toMarkingView(withAi([failed]), 'EVALUATOR').questions[0]!.ai!;
+  assert.equal(only.id, 'ai-2');
+  assert.equal(only.status, 'FAILED');
+  assert.equal(only.marks, null);
+  assert.equal(only.error, 'Grading failed');
+});
+
+test('acceptedFromAi is true only while the stored mark still carries its AI provenance', () => {
+  assert.equal(toMarkingView(withAi([aiScore()], { marks: 8, comment: null, aiScoreId: 'ai-1' }), 'EVALUATOR').questions[0]!.acceptedFromAi, true);
+  assert.equal(toMarkingView(withAi([aiScore()], { marks: 8, comment: null, aiScoreId: null }), 'EVALUATOR').questions[0]!.acceptedFromAi, false);
+  assert.equal(toMarkingView(withAi([aiScore()], null), 'EVALUATOR').questions[0]!.acceptedFromAi, false);
+});
+
+test('submission AI roll-up: NONE, PARTIAL, DONE with totals, and needsReview', () => {
+  const rollup = (questions: { maxMarksSnapshot: number; aiScores: unknown[] }[]) =>
+    toSubmissionView({ ...submission, questions } as unknown as SubmissionSource, 'EVALUATOR').ai;
+  assert.equal(rollup([{ maxMarksSnapshot: 10, aiScores: [] }]).state, 'NONE');
+  assert.deepEqual(rollup([{ maxMarksSnapshot: 10, aiScores: [aiScore()] }, { maxMarksSnapshot: 10, aiScores: [] }]), {
+    state: 'PARTIAL', totalMarks: null, percentage: null, needsReview: false,
+  });
+  assert.deepEqual(rollup([{ maxMarksSnapshot: 10, aiScores: [aiScore()] }, { maxMarksSnapshot: 10, aiScores: [aiScore({ marks: 6.5 })] }]), {
+    state: 'DONE', totalMarks: 14.5, percentage: 72.5, needsReview: false,
+  });
+  assert.equal(rollup([{ maxMarksSnapshot: 10, aiScores: [aiScore({ confidence: 'LOW' })] }]).needsReview, true);
+  assert.equal(rollup([{ maxMarksSnapshot: 10, aiScores: [aiScore({ concerns: ['TOO_SHORT'] })] }]).needsReview, true);
+  assert.equal(rollup([{ maxMarksSnapshot: 10, aiScores: [aiScore({ status: 'FAILED', marks: null })] }]).state, 'PARTIAL');
 });

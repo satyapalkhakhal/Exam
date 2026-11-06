@@ -3,6 +3,7 @@
 // {set,last4}; a PUT omits a secret to keep the stored one.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import type { AiConfigInput, MaskedAiConfig } from '@exam/shared';
 import { apiFetch } from '@/lib/api';
 import type { MaskedSecret } from '@/lib/integrationsForm';
 
@@ -28,6 +29,7 @@ export interface MaskedEmailConfig {
 export interface IntegrationsResponse {
   sms: MaskedSmsConfig;
   email: MaskedEmailConfig;
+  ai: MaskedAiConfig;
   candidatesWithoutMobile: number;
 }
 
@@ -58,4 +60,18 @@ export function useSendTest(channel: Channel) {
         json: channel === 'sms' ? { mobile: target } : { email: target },
       }),
   });
+}
+
+/** apiKey: omitted keeps the stored key, '' clears it. */
+export function useSaveAiConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: AiConfigInput) => apiFetch<unknown>('admin', '/integrations/ai', { method: 'PUT', json: body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'integrations'] }),
+  });
+}
+
+/** One tiny model call with the saved settings; a provider failure arrives as an ApiError. */
+export function useTestAi() {
+  return useMutation({ mutationFn: () => apiFetch<unknown>('admin', '/integrations/ai/test', { method: 'POST', json: {} }) });
 }

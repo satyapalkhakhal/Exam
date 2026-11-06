@@ -1,5 +1,5 @@
 // index.ts
-// Process entry: starts the HTTP server, the auto-submit and email workers and the minute
+// Process entry: starts the HTTP server, the auto-submit, email and AI-evaluation workers and the minute
 // sweep (design §7.6), and shuts them down cleanly on SIGTERM/SIGINT.
 
 import { app } from './app.js';
@@ -11,6 +11,8 @@ import { closeAutoSubmitQueue } from './infrastructure/queue/autoSubmit.queue.js
 import { startAutoSubmitWorker } from './infrastructure/queue/autoSubmit.worker.js';
 import { closeEmailQueue } from './infrastructure/queue/email.queue.js';
 import { startEmailWorker } from './infrastructure/queue/email.worker.js';
+import { closeAiEvalQueue } from './infrastructure/queue/aiEval.queue.js';
+import { startAiEvalWorker } from './infrastructure/queue/aiEval.worker.js';
 import { startSweep } from './infrastructure/queue/sweep.js';
 
 const server = app.listen(env.PORT, () => {
@@ -36,13 +38,25 @@ Promise.all([getSmsConfig(), getEmailConfig()])
 
 const worker = startAutoSubmitWorker();
 const emailWorker = startEmailWorker();
+// Concurrency comes from the AI config at start; changing it needs an API restart.
+const aiWorker = startAiEvalWorker();
+aiWorker.catch((err: unknown) => {
+  logger.error('ai evaluation worker did not start', { message: err instanceof Error ? err.message : 'unknown' });
+});
 const sweep = startSweep();
 
 function shutdown(signal: string): void {
   logger.info('shutting down', { signal });
   clearInterval(sweep);
   server.close(() => {
-    Promise.allSettled([worker.close(), emailWorker.close(), closeAutoSubmitQueue(), closeEmailQueue()]).finally(() => process.exit(0));
+    Promise.allSettled([
+      worker.close(),
+      emailWorker.close(),
+      aiWorker.then((w) => w.close()),
+      closeAutoSubmitQueue(),
+      closeEmailQueue(),
+      closeAiEvalQueue(),
+    ]).finally(() => process.exit(0));
   });
   setTimeout(() => process.exit(1), 10_000).unref();
 }

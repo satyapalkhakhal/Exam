@@ -13,6 +13,9 @@
 import {
   EVALUATION_LOCK_MINUTES,
   type AdminRole,
+  type AiAcceptInput,
+  type AiAcceptResultDto,
+  type AiAcceptSkipReason,
   type EvaluationSaveInput,
   type LockDto,
   type MarkingViewDto,
@@ -22,7 +25,7 @@ import {
 } from '@exam/shared';
 import { AppError, badRequest, conflict, notFound } from '../../shared/errors.js';
 import { num, toMarkingView, toSubmissionView } from './evaluation.mapper.js';
-import type { EvaluationRepository, LockHolder } from './evaluation.repository.js';
+import type { EvaluationRepository, EvaluationTx, LockHolder } from './evaluation.repository.js';
 import { percentageOf, validateMarks } from './marks.js';
 
 export const LOCK_TTL_MS = EVALUATION_LOCK_MINUTES * 60_000;
@@ -39,6 +42,13 @@ export interface Actor {
   id: string;
   role: AdminRole;
   ip: string | null;
+}
+
+/** Thrown inside a bulk-accept transaction to roll one script back when its attempt was reset meanwhile. */
+class ScriptReset extends Error {
+  constructor(public readonly candidateCode: string) {
+    super('Attempt was reset');
+  }
 }
 
 export const evaluationLocked = (holder: LockHolder | null) =>
@@ -130,24 +140,123 @@ export function createEvaluationService(deps: EvaluationDeps) {
         return { evaluationStatus: 'DRAFT' as const };
       }
 
-      const marks = new Map((await tx.marks(attemptId)).map((m) => [m.attemptQuestionId, num(m.marks) ?? 0]));
-      // a comment-only row (null marks) still counts as unmarked
-      const missing = questions.filter((q) => !marks.has(q.id)).sort((a, b) => a.order - b.order);
-      if (missing.length > 0) {
-        throw badRequest('Every question needs marks before the evaluation can be submitted', 'VALIDATION_ERROR', {
-          missing: missing.map((q) => q.id),
-        });
-      }
-      const totalMarks = [...marks.values()].reduce((a, b) => a + b, 0);
-      const maxMarks = [...maxOf.values()].reduce((a, b) => a + b, 0);
-      const totals = { totalMarks, maxMarks, percentage: percentageOf(totalMarks, maxMarks) };
-      await tx.complete(attemptId, actor.id, at, totals);
-      if (!(await tx.transitionCandidate(attempt.candidateId, attemptId, 'EVALUATED', actor.id, null))) {
-        throw conflict('This attempt was reset while it was being marked.');
-      }
-      await tx.audit({ adminId: actor.id, action: 'EVALUATION_SUBMITTED', entity: ENTITY, entityId: attemptId, metadata: totals, ip: actor.ip });
+      const totals = await complete(tx, attempt, attemptId, questions, actor, at, {});
       return { evaluationStatus: 'SUBMITTED' as const, ...totals };
     });
+  }
+
+  /**
+   * The completion step shared by Submit and bulk accept: needs every question
+   * marked, writes totals, moves the candidate to EVALUATED (history) and audits.
+   */
+  async function complete(
+    tx: EvaluationTx,
+    attempt: { candidateId: string },
+    attemptId: string,
+    questions: { id: string; order?: number; maxMarksSnapshot: Parameters<typeof num>[0] }[],
+    actor: Actor,
+    at: Date,
+    auditExtra: Record<string, unknown>,
+  ): Promise<{ totalMarks: number; maxMarks: number; percentage: number }> {
+    const maxOf = new Map(questions.map((q) => [q.id, num(q.maxMarksSnapshot) ?? 0]));
+    const marks = new Map((await tx.marks(attemptId)).map((m) => [m.attemptQuestionId, num(m.marks) ?? 0]));
+    // a comment-only row (null marks) still counts as unmarked
+    const missing = questions.filter((q) => !marks.has(q.id)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    if (missing.length > 0) {
+      throw badRequest('Every question needs marks before the evaluation can be submitted', 'VALIDATION_ERROR', {
+        missing: missing.map((q) => q.id),
+      });
+    }
+    const totalMarks = [...marks.values()].reduce((a, b) => a + b, 0);
+    const maxMarks = [...maxOf.values()].reduce((a, b) => a + b, 0);
+    const totals = { totalMarks, maxMarks, percentage: percentageOf(totalMarks, maxMarks) };
+    await tx.complete(attemptId, actor.id, at, totals);
+    if (!(await tx.transitionCandidate(attempt.candidateId, attemptId, 'EVALUATED', actor.id, null))) {
+      throw conflict('This attempt was reset while it was being marked.');
+    }
+    await tx.audit({ adminId: actor.id, action: 'EVALUATION_SUBMITTED', entity: ENTITY, entityId: attemptId, metadata: { ...totals, ...auditExtra }, ip: actor.ip });
+    return totals;
+  }
+
+  /**
+   * Super Admin bulk accept of AI marks. Each script runs in its own
+   * transaction and is either accepted or skipped with a reason; one script's
+   * problem never blocks the rest. LOCKED means someone else holds a live lock.
+   * By role, only scripts whose evaluation is not yet submitted are considered;
+   * by attempt ids, an already submitted one is reported ALREADY_EVALUATED.
+   */
+  async function acceptAi(input: AiAcceptInput, actor: Actor): Promise<AiAcceptResultDto> {
+    const onlyClean = input.onlyClean !== false;
+    const attemptIds = input.jobRoleId ? await repo.openAttemptIdsForRole(input.jobRoleId) : (input.attemptIds ?? []);
+    const candidateOf = await repo.candidateIdsOf(attemptIds);
+    const flags = onlyClean ? await deps.flagCounts([...new Set(candidateOf.values())]) : new Map<string, Record<string, number>>();
+
+    const skipped: AiAcceptResultDto['skipped'] = [];
+    let accepted = 0;
+    for (const attemptId of attemptIds) {
+      const flagged = Object.values(flags.get(candidateOf.get(attemptId) ?? '') ?? {}).some((n) => n > 0);
+      let outcome: Awaited<ReturnType<typeof acceptOne>>;
+      try {
+        outcome = await repo.transaction((tx) => acceptOne(tx, attemptId, actor, onlyClean, flagged));
+      } catch (err) {
+        if (!(err instanceof ScriptReset)) throw err;
+        outcome = { ok: false, reason: 'NOT_SUBMITTED', candidateCode: err.candidateCode };
+      }
+      if (outcome.ok) accepted += 1;
+      else skipped.push({ attemptId, candidateCode: outcome.candidateCode, reason: outcome.reason });
+    }
+
+    const byReason: Record<string, number> = {};
+    for (const s of skipped) byReason[s.reason] = (byReason[s.reason] ?? 0) + 1;
+    await repo.recordAudit({
+      adminId: actor.id,
+      action: 'EVALUATIONS_BULK_ACCEPTED_AI',
+      entity: ENTITY,
+      metadata: { jobRoleId: input.jobRoleId ?? null, onlyClean, requested: attemptIds.length, accepted, skipped: skipped.length, byReason },
+      ip: actor.ip,
+    });
+    return { accepted, skipped };
+  }
+
+  async function acceptOne(
+    tx: EvaluationTx,
+    attemptId: string,
+    actor: Actor,
+    onlyClean: boolean,
+    flagged: boolean,
+  ): Promise<{ ok: true } | { ok: false; reason: AiAcceptSkipReason; candidateCode: string | null }> {
+    const attempt = await tx.attemptAny(attemptId);
+    if (!attempt) return { ok: false, reason: 'NOT_FOUND', candidateCode: null };
+    const code = attempt.candidate.candidateCode;
+    const skip = (reason: AiAcceptSkipReason) => ({ ok: false as const, reason, candidateCode: code });
+    if (attempt.status !== 'SUBMITTED' && attempt.status !== 'AUTO_SUBMITTED') return skip('NOT_SUBMITTED');
+
+    const at = now();
+    const ev = await tx.lockEvaluationRow(attemptId);
+    if (ev.status === 'SUBMITTED') return skip('ALREADY_EVALUATED');
+    if (ev.lockedById && ev.lockedById !== actor.id && ev.lockedAt && ev.lockedAt >= cutoffFrom(at)) return skip('LOCKED');
+
+    const questions = await tx.questionsWithAi(attemptId);
+    if (questions.length === 0 || questions.some((q) => !q.ai || q.ai.marks === null)) return skip('AI_INCOMPLETE');
+    if (onlyClean) {
+      if (questions.some((q) => (q.ai?.concerns.length ?? 0) > 0)) return skip('AI_CONCERNS');
+      if (questions.some((q) => q.ai?.confidence === 'LOW')) return skip('LOW_CONFIDENCE');
+      if (flagged) return skip('INTEGRITY_FLAGS');
+    }
+
+    for (const q of questions) {
+      const ai = q.ai!;
+      validateMarks(ai.marks!, q.maxMarks, q.id);
+      await tx.setMarkFromAi(q.id, ai.marks!, ai.id, actor.id);
+    }
+    try {
+      await complete(tx, attempt, attemptId, questions.map((q) => ({ id: q.id, maxMarksSnapshot: q.maxMarks })), actor, at, { viaAi: true });
+    } catch (err) {
+      // The attempt was reset while it was being accepted: roll this script back and skip it.
+      if (err instanceof AppError && err.statusCode === 409) throw new ScriptReset(code);
+      throw err;
+    }
+    return { ok: true };
   }
 
   async function reopen(attemptId: string, reason: string, actor: Actor): Promise<{ evaluationStatus: 'DRAFT'; candidateStatus: string }> {
@@ -170,7 +279,7 @@ export function createEvaluationService(deps: EvaluationDeps) {
     });
   }
 
-  return { list, marking, lock, unlock, save, reopen };
+  return { list, marking, lock, unlock, save, reopen, acceptAi };
 }
 
 export type EvaluationService = ReturnType<typeof createEvaluationService>;
