@@ -16,7 +16,7 @@ export const COMMON_EMAIL_PLACEHOLDERS = ['firstName', 'fullName', 'role', 'cand
 /** Extra placeholders per template. */
 export const EMAIL_TEMPLATE_PLACEHOLDERS: Record<EmailTemplateKey, readonly string[]> = {
   SUBMISSION_RECEIVED: [...COMMON_EMAIL_PLACEHOLDERS, 'submittedAt', 'answeredCount', 'questionCount'],
-  SHORTLISTED: [...COMMON_EMAIL_PLACEHOLDERS, 'roundName', 'scheduledAt', 'confirmBy', 'score', 'maxScore', 'percentage'],
+  SHORTLISTED: [...COMMON_EMAIL_PLACEHOLDERS, 'roundName', 'scheduledAt', 'confirmBy'],
   REJECTED: [...COMMON_EMAIL_PLACEHOLDERS],
 };
 

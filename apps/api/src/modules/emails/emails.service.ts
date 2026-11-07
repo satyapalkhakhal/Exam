@@ -75,8 +75,6 @@ export interface EmailCandidate {
     submitType: 'MANUAL' | 'AUTO' | null;
     answeredCount: number;
     questionCount: number;
-    /** Set only once marking is complete (the attempt's stored totals). */
-    score: { total: number; max: number; percentage: number } | null;
   } | null;
 }
 
@@ -221,7 +219,6 @@ export function createEmailsService(deps: EmailsDeps) {
       submitType: 'MANUAL',
       answeredCount: 8,
       questionCount: 10,
-      score: { total: 34.5, max: 50, percentage: 69 },
     };
     return buildShortlistEmail({ ...base, nextRound: toNextRound(input.nextRound), assessment: sample }, template);
   }
@@ -245,7 +242,7 @@ export function createEmailsService(deps: EmailsDeps) {
     if (key === 'SHORTLISTED') {
       const a = c.attempt;
       const assessment: AssessmentSummary | undefined = a
-        ? { startedAt: a.startedAt, submittedAt: a.submittedAt, submitType: a.submitType, answeredCount: a.answeredCount, questionCount: a.questionCount, score: a.score }
+        ? { startedAt: a.startedAt, submittedAt: a.submittedAt, submitType: a.submitType, answeredCount: a.answeredCount, questionCount: a.questionCount }
         : undefined;
       return buildShortlistEmail({ ...base, nextRound, assessment }, template);
     }

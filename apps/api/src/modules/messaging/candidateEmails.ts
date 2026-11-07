@@ -10,9 +10,9 @@
 // branded layout, details table, link button, instruction list and sign-off
 // are always added here. The template text and every substituted value are
 // HTML-escaped, so an admin cannot inject markup. A placeholder with no value
-// renders empty. Candidates never see rankings. Marks appear in one place only:
-// the Shortlisted email's "Your assessment" card, and only once marking is
-// complete (total and percentage, never per-question). Times are shown in IST.
+// renders empty. Candidates never see marks, scores or rankings in any email; the
+// Shortlisted email's "Your assessment" card shows submission details only.
+// Times are shown in IST.
 // The HTML is table-based with inline styles so it renders in Gmail/Outlook.
 //
 // Look (approved mockup 2026-11-05): Arihant Capital header with a purple-to-green
@@ -111,9 +111,6 @@ const oneLine = (subject: string): string => subject.replace(/\s*[\r\n]+\s*/g, '
 const firstName = (fullName: string): string => fullName.trim().split(/\s+/)[0] || 'Candidate';
 
 type Row = [label: string, value: string];
-
-/** "34.5", "40": at most one decimal, no trailing ".0". */
-const fmtNum = (n: number): string => (Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, ''));
 
 /** "52 min 30 s", "1 h 5 min", "40 s"; empty when either time is missing (same wording as the receipt page). */
 function timeTaken(startedAt: Date | null, submittedAt: Date | null): string {
@@ -384,15 +381,13 @@ export interface NextRoundDetails {
   confirmBy?: Date;
 }
 
-/** The candidate's submission and, once marking is complete, their score. */
+/** The candidate's submission details (never marks or a score). */
 export interface AssessmentSummary {
   startedAt: Date | null;
   submittedAt: Date | null;
   submitType: 'MANUAL' | 'AUTO' | null;
   answeredCount: number;
   questionCount: number;
-  /** Null until the evaluator completes marking. */
-  score: { total: number; max: number; percentage: number } | null;
 }
 
 export interface ShortlistEmailParams extends CommonParams {
@@ -415,33 +410,10 @@ function assessmentRows(p: ShortlistEmailParams): Row[] {
   return rows;
 }
 
-function scoreHtml(score: NonNullable<AssessmentSummary['score']>): string {
-  const pct = Math.min(100, Math.max(0, Math.round(score.percentage)));
-  const bar =
-    pct > 0
-      ? `<td width="${pct}%" style="height:8px;line-height:8px;font-size:0;background:${C.purple};background-image:linear-gradient(90deg,${C.purple},${C.primary})">&nbsp;</td>`
-      : '';
-  return (
-    `<tr><td style="padding:18px 18px 14px;background:${C.lav}">` +
-    '<table role="presentation" cellpadding="0" cellspacing="0" width="100%"><tr>' +
-    `<td valign="bottom"><div style="font-size:12px;color:${C.muted}">Score</div>` +
-    `<div style="font-size:30px;line-height:1.1;font-weight:bold;color:${C.primary}">${escapeHtml(fmtNum(score.total))}<span style="font-size:16px;color:${C.muted};font-weight:normal"> / ${escapeHtml(fmtNum(score.max))}</span></div></td>` +
-    `<td valign="bottom" align="right"><span style="display:inline-block;font-size:14px;font-weight:bold;color:${C.okInk};background:${C.okBg};border-radius:999px;padding:5px 12px">${escapeHtml(fmtNum(score.percentage))}%</span></td>` +
-    '</tr></table>' +
-    '<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin-top:12px;border-radius:999px;overflow:hidden"><tr>' +
-    bar +
-    `<td style="height:8px;line-height:8px;font-size:0;background:${C.lav2}">&nbsp;</td>` +
-    '</tr></table>' +
-    '</td></tr>'
-  );
-}
-
 function assessmentCardHtml(p: ShortlistEmailParams): string {
-  const score = p.assessment?.score;
   return (
     sectionLabelHtml('Your assessment') +
     `<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border:1px solid ${C.lav2};border-radius:12px;border-collapse:separate;overflow:hidden;margin:0 0 8px">` +
-    (score ? scoreHtml(score) : '') +
     `<tr><td style="padding:0"><table role="presentation" cellpadding="0" cellspacing="0" width="100%">${rowsHtml(assessmentRows(p))}</table></td></tr>` +
     '</table>'
   );
@@ -451,15 +423,11 @@ export function buildShortlistEmail(p: ShortlistEmailParams, template: EmailTemp
   const contact = p.contactEmail ?? DEFAULT_HR_CONTACT;
   const r = p.nextRound ?? {};
   const roundLabel = r.name?.trim() || 'next round';
-  const score = p.assessment?.score ?? null;
   const values = {
     ...commonValues(p, contact),
     roundName: roundLabel,
     scheduledAt: r.scheduledAt ? formatIst(r.scheduledAt) : '',
     confirmBy: r.confirmBy ? formatIst(r.confirmBy) : '',
-    score: score ? fmtNum(score.total) : '',
-    maxScore: score ? fmtNum(score.max) : '',
-    percentage: score ? fmtNum(score.percentage) : '',
   };
   const subject = oneLine(fillPlaceholders(template.subject, values));
   const paras = bodyParagraphs(fillPlaceholders(template.body, values));
@@ -521,7 +489,6 @@ export function buildShortlistEmail(p: ShortlistEmailParams, template: EmailTemp
   const text = [
     ...paras.flatMap((x) => [x, '']),
     'Your assessment:',
-    ...(score ? [`  Score: ${fmtNum(score.total)} / ${fmtNum(score.max)} (${fmtNum(score.percentage)}%)`] : []),
     detailsText(assessmentRows(p)),
     '',
     scheduled ? 'Next round:' : `What happens next: ${soonTitle}.`,

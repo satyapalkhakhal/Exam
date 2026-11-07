@@ -10,6 +10,7 @@ import {
   formatIst,
   unknownPlaceholders,
 } from '../src/modules/messaging/candidateEmails.js';
+import { EMAIL_TEMPLATE_PLACEHOLDERS } from '@exam/shared';
 
 const base = { fullName: 'Ajith K K', candidateCode: 'ARC-0042', jobRoleName: 'Backend Engineer' };
 
@@ -75,35 +76,23 @@ const assessment = {
   submitType: 'MANUAL' as const,
   answeredCount: 8,
   questionCount: 10,
-  score: { total: 34.5, max: 50, percentage: 69 },
 };
 
-test('shortlist email: assessment card with score, submission details and time taken', () => {
+test('shortlist email: assessment card shows submission details and time taken, never a score', () => {
   const e = buildShortlistEmail({ ...base, assessment });
   assert.match(e.html, /Your assessment/);
-  assert.match(e.html, />34\.5<span[^>]*> \/ 50</);
-  assert.match(e.html, />69%</);
-  assert.match(e.html, /width="69%"/);
   for (const part of [e.html, e.text]) {
     assert.match(part, /3 Nov 2026, 2:05 pm IST/);
     assert.match(part, /8 of 10/);
     assert.match(part, /52 min 30 s/);
     assert.match(part, /Submitted by you/);
+    assert.doesNotMatch(part, /score|marks|percent/i);
   }
-  assert.match(e.text, /Score: 34\.5 \/ 50 \(69%\)/);
+  assert.doesNotMatch(e.text, /%/);
 });
 
-test('shortlist email: no score before marking is complete', () => {
-  const e = buildShortlistEmail({ ...base, assessment: { ...assessment, score: null } });
-  assert.doesNotMatch(e.html, />Score</);
-  assert.doesNotMatch(e.text, /Score:/);
-  assert.match(e.html, /8 of 10/);
-});
-
-test('shortlist placeholders: score, maxScore and percentage', () => {
-  const t = { subject: 's', body: 'You scored {score} of {maxScore} ({percentage}%).' };
-  assert.match(buildShortlistEmail({ ...base, assessment }, t).text, /You scored 34\.5 of 50 \(69%\)\./);
-  assert.match(buildShortlistEmail({ ...base, assessment: { ...assessment, score: null } }, t).text, /You scored  of  \(%\)\./);
+test('shortlist placeholders: score tokens are not available', () => {
+  assert.deepEqual(unknownPlaceholders('{score} {maxScore} {percentage}', EMAIL_TEMPLATE_PLACEHOLDERS.SHORTLISTED), ['score', 'maxScore', 'percentage']);
 });
 
 test('shortlist email with a scheduled round shows the schedule and the confirm line, not "contact you soon"', () => {

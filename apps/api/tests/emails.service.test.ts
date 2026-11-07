@@ -28,7 +28,6 @@ const submitted = {
   submitType: 'MANUAL' as const,
   answeredCount: 2,
   questionCount: 3,
-  score: null as { total: number; max: number; percentage: number } | null,
 };
 const cand = (n: number, over: Partial<EmailCandidate> = {}): EmailCandidate => ({
   id: id(n),
