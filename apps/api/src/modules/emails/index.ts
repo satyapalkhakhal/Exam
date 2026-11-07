@@ -26,7 +26,6 @@ export const emails = createEmailsService({
   sendEmail,
   enqueue: enqueueEmails,
   newBatchId: () => crypto.randomUUID(),
-  assetBaseUrl: env.PUBLIC_WEB_URL,
 });
 
 export const emailDispatchProcessor = createDispatchProcessor({

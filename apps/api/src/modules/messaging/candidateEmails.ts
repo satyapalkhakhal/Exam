@@ -17,9 +17,9 @@
 //
 // Look (approved mockup 2026-11-05): Arihant Capital header with a purple-to-green
 // rule, purple headings and buttons, and on the two outcome emails a horizontal
-// ArihantPlus strip as the last row. The header is text only; the strip's ArihantPlus logo loads from
-// `assetBaseUrl` (the exam site's public URL); without it they are left out and
-// the text still reads correctly.
+// ArihantPlus strip as the last row. The header is text only. The strip's only
+// image is the ArihantPlus icon, hot-linked from arihantplus.com (PLUS_ICON_URL);
+// when an email app blocks images, its alt text and the name beside it still read.
 
 import type { EmailTemplateKey } from '@exam/shared';
 
@@ -58,6 +58,8 @@ const RISK_LINE = 'Investments in securities markets are subject to market risks
 const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.msf.acml';
 const APP_STORE_URL = 'https://apps.apple.com/in/app/arihant-plus/id1643484698';
 const WEB_TRADING_URL = 'https://web.arihantplus.com';
+/** Public 32x32 ArihantPlus icon (the A+ mark), hot-linked so the exam site needs no public image URL. */
+const PLUS_ICON_URL = 'https://www.arihantplus.com/favicon.ico?favicon.41oegf56223-1.ico';
 
 // ---- helpers ------------------------------------------------------------------
 
@@ -124,11 +126,6 @@ function timeTaken(startedAt: Date | null, submittedAt: Date | null): string {
   return `${sec} s`;
 }
 
-const assetUrl = (base: string | undefined, path: string): string | undefined => {
-  const b = base?.trim().replace(/\/+$/, '');
-  return b && /^https?:\/\//i.test(b) ? `${b}${path}` : undefined;
-};
-
 function rowsHtml(rows: Row[]): string {
   return rows
     .map(([label, value], i) => {
@@ -176,13 +173,13 @@ function storeButtonHtml(href: string, top: string, label: string): string {
   );
 }
 
-function plusStripHtml(assetBaseUrl: string | undefined): string {
-  // The official ArihantPlus logo (from web.arihantplus.com, rasterised to a transparent PNG at 3x).
-  // Without an asset URL the same name is spelled out in text.
-  const logo = assetUrl(assetBaseUrl, '/email/arihantplus-logo.png');
-  const brand = logo
-    ? `<img src="${escapeHtml(logo)}" width="150" height="25" alt="ArihantPlus" style="display:block;border:0;width:150px;height:25px">`
-    : `<span style="font-size:17px;font-weight:bold;color:${C.ink}">Arihant<span style="color:${C.green};font-size:13px;letter-spacing:1px;padding-left:2px">PLUS</span></span>`;
+function plusStripHtml(): string {
+  // Icon (A+ mark) beside the name spelled out in text, so it still reads with images blocked.
+  const brand =
+    '<table role="presentation" cellpadding="0" cellspacing="0"><tr>' +
+    `<td style="padding-right:10px"><img src="${PLUS_ICON_URL}" width="32" height="32" alt="ArihantPlus" style="display:block;border:0;width:32px;height:32px"></td>` +
+    `<td style="font-size:17px;font-weight:bold;color:${C.ink}">Arihant<span style="color:${C.green};font-size:13px;letter-spacing:1px;padding-left:2px">PLUS</span></td>` +
+    '</tr></table>';
   return (
     `<tr><td style="padding:20px 28px 18px;background:${C.lav};background-image:linear-gradient(100deg,#faf5ff 0%,#e7d4fa 100%);border-top:1px solid ${C.lav2}">` +
     '<table role="presentation" cellpadding="0" cellspacing="0" width="100%"><tr>' +
@@ -223,7 +220,6 @@ function layout(opts: {
   heading: string;
   bodyHtml: string;
   contact: string;
-  assetBaseUrl?: string;
   pill?: string;
   plusStrip?: boolean;
 }): string {
@@ -252,7 +248,7 @@ function layout(opts: {
     `Questions? Write to <a href="mailto:${escapeHtml(opts.contact)}" style="color:${C.primary}">${escapeHtml(opts.contact)}</a>.<br>` +
     `This is an automated message from the ${PRODUCT}. Please do not reply to this email.` +
     '</td></tr>' +
-    (opts.plusStrip ? plusStripHtml(opts.assetBaseUrl) : '') +
+    (opts.plusStrip ? plusStripHtml() : '') +
     '</table></td></tr></table></body></html>'
   );
 }
@@ -303,8 +299,6 @@ interface CommonParams {
   jobRoleName: string;
   /** HR contact shown in the footer; defaults to DEFAULT_HR_CONTACT. */
   contactEmail?: string;
-  /** Exam site's public URL, for the logo and app icon. Images are left out without it. */
-  assetBaseUrl?: string;
 }
 
 const commonValues = (p: CommonParams, contact: string): Record<string, string> => ({
@@ -351,7 +345,6 @@ export function buildSubmissionEmail(p: SubmissionEmailParams, template: EmailTe
     preheader: `Your ${p.jobRoleName} assessment was submitted on ${submittedAt}.`,
     heading: 'Submission received',
     contact,
-    assetBaseUrl: p.assetBaseUrl,
     bodyHtml:
       templateParagraphsHtml(paras) +
       detailsTableHtml(rows) +
@@ -477,7 +470,6 @@ export function buildShortlistEmail(p: ShortlistEmailParams, template: EmailTemp
     heading: 'Congratulations, you have been shortlisted',
     pill: 'Shortlisted',
     contact,
-    assetBaseUrl: p.assetBaseUrl,
     plusStrip: true,
     bodyHtml:
       templateParagraphsHtml(paras) +
@@ -522,7 +514,6 @@ export function buildRejectionEmail(p: CommonParams, template: EmailTemplate = D
     preheader: `An update on your application for the ${p.jobRoleName} role.`,
     heading: 'Update on your application',
     contact,
-    assetBaseUrl: p.assetBaseUrl,
     plusStrip: true,
     bodyHtml: templateParagraphsHtml(paras) + detailsTableHtml(rows) + paragraphsHtml([`Best wishes,<br>${SIGN_OFF_TEAM}`]),
   });

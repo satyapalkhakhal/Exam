@@ -126,8 +126,6 @@ export interface EmailsDeps {
   /** Adds one queue job per dispatch id. */
   enqueue: (dispatchIds: string[]) => Promise<void>;
   newBatchId: () => string;
-  /** Exam site's public URL; the emails load their logo and app icon from it. */
-  assetBaseUrl?: string;
 }
 
 const isCustom = (v: Partial<EmailTemplate>): v is EmailTemplate =>
@@ -208,7 +206,6 @@ export function createEmailsService(deps: EmailsDeps) {
       candidateCode: SAMPLE.candidateCode,
       jobRoleName: role ?? SAMPLE.fallbackRole,
       contactEmail: contactOf(cfg),
-      assetBaseUrl: deps.assetBaseUrl,
     };
     if (key === 'SUBMISSION_RECEIVED') return buildSubmissionEmail({ ...base, submittedAt: new Date(), submitType: 'MANUAL', answeredCount: 2, questionCount: 3 }, template);
     if (key === 'REJECTED') return buildRejectionEmail(base, template);
@@ -238,7 +235,7 @@ export function createEmailsService(deps: EmailsDeps) {
   }
 
   function render(key: EmailTemplateKey, c: EmailCandidate, template: EmailTemplate, contactEmail: string, nextRound: NextRoundDetails | undefined): EmailContent {
-    const base = { fullName: c.fullName, candidateCode: c.candidateCode, jobRoleName: c.jobRoleName, contactEmail, assetBaseUrl: deps.assetBaseUrl };
+    const base = { fullName: c.fullName, candidateCode: c.candidateCode, jobRoleName: c.jobRoleName, contactEmail };
     if (key === 'SHORTLISTED') {
       const a = c.attempt;
       const assessment: AssessmentSummary | undefined = a

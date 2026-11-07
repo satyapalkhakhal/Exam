@@ -119,12 +119,13 @@ test('ArihantPlus strip: on the outcome emails only, with store links and the ri
   assert.doesNotMatch(sub.html + sub.text, /SEBI Registration|INZ0|ARN-/);
 });
 
-test('header has no logo image; the ArihantPlus logo loads from assetBaseUrl, and without it no images are added', () => {
-  const withBase = buildShortlistEmail({ ...base, assetBaseUrl: 'https://exam.example.com/' });
-  assert.doesNotMatch(withBase.html, /arihant-capital-logo/);
-  assert.match(withBase.html, /src="https:\/\/exam\.example\.com\/email\/arihantplus-logo\.png"/);
-  assert.doesNotMatch(buildShortlistEmail(base).html, /<img/);
-  assert.doesNotMatch(buildShortlistEmail({ ...base, assetBaseUrl: 'javascript:alert(1)' }).html, /<img/);
+test('header has no logo image; the strip shows the hot-linked ArihantPlus icon with the name as text', () => {
+  const e = buildShortlistEmail(base);
+  assert.doesNotMatch(e.html, /arihant-capital-logo|arihantplus-logo\.png/);
+  assert.match(e.html, /<img src="https:\/\/www\.arihantplus\.com\/favicon\.ico\?favicon\.41oegf56223-1\.ico" width="32" height="32" alt="ArihantPlus"/);
+  assert.equal((e.html.match(/<img /g) ?? []).length, 1);
+  assert.match(e.html, />Arihant<span[^>]*>PLUS<\/span>/);
+  assert.doesNotMatch(buildSubmissionEmail(submission).html, /<img /);
 });
 
 test('shortlist email drops a non-https link', () => {
