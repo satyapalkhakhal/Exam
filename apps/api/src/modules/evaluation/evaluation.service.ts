@@ -34,7 +34,8 @@ const ENTITY = 'exam_attempt';
 export interface EvaluationDeps {
   repo: EvaluationRepository;
   /** Per-candidate flag breakdown (numbers only, no location detail). */
-  flagCounts: (candidateIds: string[]) => Promise<Map<string, Record<string, number>>>;
+  /** Per candidate: the numeric flag breakdown and the nearby-candidates count. */
+  flagCounts: (candidateIds: string[]) => Promise<Map<string, { counts: Record<string, number>; nearbyCount: number | null }>>;
   now?: () => Date;
 }
 
@@ -68,7 +69,10 @@ export function createEvaluationService(deps: EvaluationDeps) {
     const { rows, total } = await repo.listSubmissions(q, role === 'SUPER_ADMIN');
     const flags = await deps.flagCounts(rows.map((r) => r.candidate.id));
     return {
-      items: rows.map((r) => toSubmissionView({ ...r, attemptId: r.id, flags: flags.get(r.candidate.id) ?? {} }, role)),
+      items: rows.map((r) => {
+        const f = flags.get(r.candidate.id);
+        return toSubmissionView({ ...r, attemptId: r.id, flags: f?.counts ?? {}, nearbyCount: f?.nearbyCount ?? null }, role);
+      }),
       total,
       page: q.page,
       pageSize: q.pageSize,
@@ -80,7 +84,8 @@ export function createEvaluationService(deps: EvaluationDeps) {
     const a = await repo.marking(attemptId);
     if (!a) throw notFound('Submission not found');
     const flags = await deps.flagCounts([a.candidate.id]);
-    return toMarkingView({ ...a, attemptId: a.id, flags: flags.get(a.candidate.id) ?? {} }, role);
+    const f = flags.get(a.candidate.id);
+    return toMarkingView({ ...a, attemptId: a.id, flags: f?.counts ?? {}, nearbyCount: f?.nearbyCount ?? null }, role);
   }
 
   async function lock(attemptId: string, actor: Actor): Promise<LockDto> {
@@ -189,12 +194,15 @@ export function createEvaluationService(deps: EvaluationDeps) {
     const onlyClean = input.onlyClean !== false;
     const attemptIds = input.jobRoleId ? await repo.openAttemptIdsForRole(input.jobRoleId) : (input.attemptIds ?? []);
     const candidateOf = await repo.candidateIdsOf(attemptIds);
-    const flags = onlyClean ? await deps.flagCounts([...new Set(candidateOf.values())]) : new Map<string, Record<string, number>>();
+    // "Clean" means no integrity flags; the nearby-candidates count is informational, not a flag.
+    const flags = onlyClean
+      ? await deps.flagCounts([...new Set(candidateOf.values())])
+      : new Map<string, { counts: Record<string, number>; nearbyCount: number | null }>();
 
     const skipped: AiAcceptResultDto['skipped'] = [];
     let accepted = 0;
     for (const attemptId of attemptIds) {
-      const flagged = Object.values(flags.get(candidateOf.get(attemptId) ?? '') ?? {}).some((n) => n > 0);
+      const flagged = Object.values(flags.get(candidateOf.get(attemptId) ?? '')?.counts ?? {}).some((n) => n > 0);
       let outcome: Awaited<ReturnType<typeof acceptOne>>;
       try {
         outcome = await repo.transaction((tx) => acceptOne(tx, attemptId, actor, onlyClean, flagged));

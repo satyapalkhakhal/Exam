@@ -104,6 +104,7 @@ test('submission view shape', () => {
     timeTakenSec: 2730,
     submitType: 'AUTO',
     flagCounts: { pasteAttempts: 1, bulkInsert: 0, ipChanges: 0, locationFlags: 2, excessiveTabSwitching: 0 },
+    nearbyCount: null,
     evaluationStatus: 'DRAFT',
     totalMarks: null,
     ai: { state: 'NONE', totalMarks: null, percentage: null, needsReview: false },

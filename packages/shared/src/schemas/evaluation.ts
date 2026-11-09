@@ -112,6 +112,8 @@ export interface SubmissionViewDto extends Partial<CandidatePiiDto> {
   timeTakenSec: number | null;
   submitType: 'MANUAL' | 'AUTO' | null;
   flagCounts: Record<string, number>;
+  /** Other candidates who started within 100 m and ±2 h; null without a start location. */
+  nearbyCount: number | null;
   evaluationStatus: EvaluationState;
   totalMarks: number | null;
   /** AI roll-up (visible to Evaluators too: no candidate data). */
@@ -174,6 +176,7 @@ export interface LeaderboardRowDto extends CandidatePiiDto {
   /** The exam % inside the composite is the AI % (no submitted human evaluation yet). */
   compositeProvisional: boolean;
   flagCounts: Record<string, number>;
+  nearbyCount: number | null;
 }
 
 export interface DashboardRoleDto {

@@ -74,6 +74,8 @@ export interface SubmissionSource {
   evaluation: { status: 'DRAFT' | 'SUBMITTED'; evaluatorId: string | null } | null;
   candidate: CandidateSource;
   flags: Record<string, number>;
+  /** Omitted by older callers/tests: treated as no start location. */
+  nearbyCount?: number | null;
   questions: AiRollupQuestion[];
 }
 
@@ -195,6 +197,7 @@ export function toSubmissionView(row: SubmissionSource, viewerRole: AdminRole): 
     timeTakenSec: row.submittedAt ? Math.max(0, Math.round((row.submittedAt.getTime() - row.startedAt.getTime()) / 1000)) : null,
     submitType: row.submitType,
     flagCounts: Object.fromEntries(Object.entries(row.flags).map(([k, v]) => [k, finiteOr0(v)])),
+    nearbyCount: row.nearbyCount ?? null,
     evaluationStatus: evaluationState(row.evaluation),
     totalMarks: num(row.totalMarks),
     ai: toAiSummary(row.questions),

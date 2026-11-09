@@ -37,6 +37,8 @@ export interface CandidateExamDto {
   jobRole: { id: string; name: string };
   progress: CandidateExamProgress;
   selectedForNextRound: CandidateSelection;
+  /** Other candidates who started within 100 m and ±2 h of this one; null when no start location was shared. */
+  nearbyCount: number | null;
   locationExempt: boolean;
   durationMinutes: number;
   windowStart: string | null;

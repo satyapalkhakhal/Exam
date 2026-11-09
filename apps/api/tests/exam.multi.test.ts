@@ -76,6 +76,10 @@ function fixture(opts: { otherRunning?: boolean; apps?: FakeApp[] } = {}) {
     transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
     findCandidate: async (id: string) => ({ id, accountId: 'acc-1', eligible: true, locationExempt: true, jobRoleId: 'role-b', status: 'NOT_STARTED' }),
     findLiveAttempt: async () => null,
+    // No location rows: every application's nearbyCount is null.
+    locationRows: async () => [],
+    grantedStartsBetween: async () => [],
+    startIpCandidateCounts: async () => new Map(),
     listApplications: async (acc: string, appId?: string) => {
       calls.push([acc, appId]);
       return apps.filter((a) => !appId || a.id === appId).map((a) => structuredClone(a));

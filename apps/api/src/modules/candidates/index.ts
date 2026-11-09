@@ -19,6 +19,10 @@ export const candidates = createCandidatesService(candidatesRepository, {
   redis: getRedis,
   revokeSessions: (accountId) => revokeAllSessions('candidate', accountId),
   flagCounts: getFlagCounts,
+  flagSummary: async (ids) => {
+    const flags = await exam.getFlagsBatch(ids);
+    return new Map([...flags].map(([id, f]) => [id, { score: flagScore(f), nearbyCount: f.nearbyCount }]));
+  },
   getFlags: exam.getFlags,
   flagScore,
   audit: (entry) => audit.record(entry),

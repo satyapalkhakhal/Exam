@@ -228,6 +228,8 @@ export interface CandidatesDeps {
   revokeSessions: (accountId: string) => Promise<void>;
   /** The exam module's flag score per candidate. */
   flagCounts: (candidateIds: string[]) => Promise<Map<string, number>>;
+  /** Flag score and nearby-candidates count per candidate (one flags pass, for a list page). */
+  flagSummary: (candidateIds: string[]) => Promise<Map<string, { score: number; nearbyCount: number | null }>>;
   /** The exam module's flags for one candidate, and their score. */
   getFlags: (candidateId: string) => Promise<CandidateFlagsDto>;
   flagScore: (flags: CandidateFlagsDto) => number;
@@ -245,11 +247,12 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
 
   async function list(query: CandidateListQuery): Promise<Paginated<CandidateListItemDto>> {
     const { rows, total } = await repo.list(query, await flaggedRestriction(query));
-    const [scores, extras] = await Promise.all([deps.flagCounts(rows.map((r) => r.id)), repo.listExtras(rows)]);
+    const [summary, extras] = await Promise.all([deps.flagSummary(rows.map((r) => r.id)), repo.listExtras(rows)]);
     return {
       items: rows.map((r) => ({
         ...toRowDto(r),
-        flagCount: scores.get(r.id) ?? 0,
+        flagCount: summary.get(r.id)?.score ?? 0,
+        nearbyCount: summary.get(r.id)?.nearbyCount ?? null,
         exam: toExamStats(extras.exams.get(r.id)),
         otherApplications: (extras.others.get(r.accountId) ?? [])
           .filter((o) => o.id !== r.id)

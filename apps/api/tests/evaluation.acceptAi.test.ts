@@ -107,7 +107,7 @@ function setup(attempts: Att[], flags: Record<string, Record<string, number>> = 
   };
   const service = createEvaluationService({
     repo: repo as unknown as EvaluationRepository,
-    flagCounts: async (ids) => new Map(ids.map((id) => [id, flags[id] ?? {}])),
+    flagCounts: async (ids) => new Map(ids.map((id) => [id, { counts: flags[id] ?? {}, nearbyCount: null }])),
     now: () => NOW,
   });
   return { service, audits, transitions, byId };

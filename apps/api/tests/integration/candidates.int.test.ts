@@ -140,6 +140,7 @@ test('flagCount is the exam flag score and flagged=true/false filters on it', as
   assert.deepEqual(d.body.data.flags, {
     integrity: { pasteAttempts: 1, bulkInsert: 0, tabHidden: 3, blur: 1, ipChanges: 0 },
     location: [],
+    nearbyCount: null,
   });
 });
 
@@ -154,7 +155,7 @@ test('detail returns profile, extra, history and zero flags', async () => {
   assert.equal(d.status, 200);
   assert.equal(d.body.data.candidate.extra.hostel, 'Brahmaputra');
   assert.equal(d.body.data.attempt, null);
-  assert.deepEqual(d.body.data.flags, { integrity: { pasteAttempts: 0, bulkInsert: 0, tabHidden: 0, blur: 0, ipChanges: 0 }, location: [] });
+  assert.deepEqual(d.body.data.flags, { integrity: { pasteAttempts: 0, bulkInsert: 0, tabHidden: 0, blur: 0, ipChanges: 0 }, location: [], nearbyCount: null });
   assert.equal(d.body.data.activity.total, 0);
   assert.equal(d.body.data.candidate.result, null);
 });
@@ -724,4 +725,30 @@ test('saving a masked email back is refused; editing other fields without email/
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   const row = await prisma.candidate.findUniqueOrThrow({ where: { id: c.id } });
   assert.deepEqual({ email: row.email, mobile: row.mobile, name: row.fullName }, { email: 'mask.person@iitg.ac.in', mobile: '9123456780', name: 'Mask Person Two' });
+});
+
+// ---- nearby candidates count (2026-11-05) -----------------------------------------
+
+/** An EXAM_START location row (the only one the nearby rule reads). */
+const startAt = (candidateId: string, lat: number, lng: number, at: Date, permission: 'GRANTED' | 'DENIED' = 'GRANTED') =>
+  prisma.candidateLoginLog.create({
+    data: { candidateId, stage: 'EXAM_START', permission, latitude: lat, longitude: lng, createdAt: at, ip: '203.0.113.9', userAgent: 'ua', browser: 'x', os: 'x', deviceType: 'desktop' },
+  });
+
+test('list nearbyCount: others who started within 100 m and 2 h; 0 when alone; null without a start location', async () => {
+  const role = await prisma.jobRole.create({ data: { name: 'Nearby Role' } });
+  const t0 = new Date('2026-09-01T04:00:00Z').getTime();
+  const mk = (key: string) => createCandidate({ candidateCode: `NB-${key}`, fullName: `Nearby ${key}`, email: `nb-${key.toLowerCase()}@iitg.ac.in`, jobRoleId: role.id });
+  const [n1, n2, n3, far, late, denied, none] = await Promise.all(['N1', 'N2', 'N3', 'FAR', 'LATE', 'DENIED', 'NONE'].map(mk));
+  await startAt(n1!.id, 12.97160, 77.59460, new Date(t0));
+  await startAt(n2!.id, 12.97165, 77.59465, new Date(t0 + 30 * 60_000)); // ~8 m
+  await startAt(n3!.id, 12.97180, 77.59480, new Date(t0 + 60 * 60_000)); // ~30 m
+  await startAt(far!.id, 13.10000, 77.70000, new Date(t0)); // ~18 km
+  await startAt(late!.id, 12.97160, 77.59460, new Date(t0 + 5 * 3_600_000)); // same spot, 5 h later
+  await startAt(denied!.id, 12.97160, 77.59460, new Date(t0), 'DENIED');
+  const res = await sa.get(`/api/admin/candidates?jobRoleId=${role.id}&pageSize=100`);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  const by = Object.fromEntries((res.body.data.items as { candidateCode: string; nearbyCount: number | null }[]).map((i) => [i.candidateCode.replace('NB-', ''), i.nearbyCount]));
+  assert.deepEqual(by, { N1: 2, N2: 2, N3: 2, FAR: 0, LATE: 0, DENIED: null, NONE: null });
+  assert.ok(none);
 });

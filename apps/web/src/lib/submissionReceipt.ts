@@ -11,6 +11,8 @@ export interface ReceiptCandidate {
   candidateCode: string;
   jobRole: { name: string };
   selectedForNextRound: CandidateSelection;
+  /** Other candidates who started within 100 m and ±2 h; null when no start location was shared. */
+  nearbyCount: number | null;
 }
 
 const SELECTION_LABEL: Record<CandidateSelection, string> = { YES: 'Yes', NO: 'No', AWAITED: 'Result awaited' };
@@ -18,6 +20,11 @@ const SELECTION_LABEL: Record<CandidateSelection, string> = { YES: 'Yes', NO: 'N
 /** "Yes" once shortlisted, "No" once rejected, "Result awaited" until HR decides. */
 export function selectionLabel(s: CandidateSelection): string {
   return SELECTION_LABEL[s];
+}
+
+/** The nearby-candidates count, or "Not available" when no start location was shared. */
+export function nearbyLabel(count: number | null): string {
+  return count === null ? 'Not available' : String(count);
 }
 
 /** "52 min 30 s", "1 h 5 min", "40 s"; "-" when either time is missing. */
@@ -44,6 +51,7 @@ export function receiptRows(c: ReceiptCandidate, s: ExamSummaryDto): { label: st
     { label: 'Time taken', value: timeTaken(s.startedAt, s.submittedAt) },
     { label: 'Submission', value: auto ? 'Auto-submitted when time was up' : 'Submitted by you' },
     { label: 'Questions', value: `${s.answeredCount} of ${s.questionCount} answered` },
+    { label: 'Candidates near you', value: nearbyLabel(c.nearbyCount) },
     { label: 'Selected for next round', value: selectionLabel(c.selectedForNextRound) },
   ];
 }

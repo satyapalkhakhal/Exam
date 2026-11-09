@@ -13,6 +13,8 @@ export const TAB_HIDDEN_THRESHOLD = 3;
 export interface CandidateFlags {
   integrity: IntegrityCounts;
   location: LocationFlag[];
+  /** Other candidates who started within 100 m and ±2 h; null without a granted start location. Not part of the flag score. */
+  nearbyCount: number | null;
 }
 
 export type FlagBreakdown = {
@@ -23,7 +25,7 @@ export type FlagBreakdown = {
   excessiveTabSwitching: number;
 };
 
-export function flagBreakdown(f: CandidateFlags): FlagBreakdown {
+export function flagBreakdown(f: Pick<CandidateFlags, 'integrity' | 'location'>): FlagBreakdown {
   return {
     pasteAttempts: f.integrity.pasteAttempts,
     bulkInsert: f.integrity.bulkInsert,
@@ -33,6 +35,6 @@ export function flagBreakdown(f: CandidateFlags): FlagBreakdown {
   };
 }
 
-export function flagScore(f: CandidateFlags): number {
+export function flagScore(f: Pick<CandidateFlags, 'integrity' | 'location'>): number {
   return Object.values(flagBreakdown(f)).reduce((a, b) => a + b, 0);
 }

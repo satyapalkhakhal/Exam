@@ -503,3 +503,22 @@ test('/exams tells the candidate whether they were selected for the next round: 
   const detail = await agent.get(`/api/candidate/exams/${c.id}`);
   assert.equal(detail.body.data.exam.selectedForNextRound, 'NO');
 });
+
+test('/exams carries nearbyCount for the candidate: a number with a start location, null without', async () => {
+  const at = new Date('2026-09-02T04:00:00Z');
+  const near = await createCandidate({ candidateCode: 'NBC-1', fullName: 'Near One', email: 'near-one@int.test', jobRoleId: roleId });
+  const me = await createCandidate({ candidateCode: 'NBC-2', fullName: 'Near Two', email: 'near-two@int.test', jobRoleId: roleId });
+  for (const [id, lat] of [[near.id, 22.57260], [me.id, 22.57265]] as const) {
+    await prisma.candidateLoginLog.create({
+      data: { candidateId: id, stage: 'EXAM_START', permission: 'GRANTED', latitude: lat, longitude: 88.36390, createdAt: at, ip: '203.0.113.7', userAgent: 'ua', browser: 'x', os: 'x', deviceType: 'desktop' },
+    });
+  }
+  const { agent } = await signIn('near-two@int.test');
+  const list = await agent.get('/api/candidate/exams');
+  assert.equal(list.status, 200, JSON.stringify(list.body));
+  assert.equal(list.body.data.exams[0].nearbyCount, 1);
+  const lone = await createCandidate({ candidateCode: 'NBC-3', fullName: 'No Loc', email: 'no-loc@int.test', jobRoleId: roleId });
+  const other = await signIn('no-loc@int.test');
+  assert.equal((await other.agent.get('/api/candidate/exams')).body.data.exams[0].nearbyCount, null);
+  assert.ok(lone);
+});

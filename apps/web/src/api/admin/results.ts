@@ -23,6 +23,7 @@ export interface LeaderboardRow extends SaPii {
   compositeScore: number | null;
   compositeProvisional: boolean;
   flagCounts: Record<string, number>;
+  nearbyCount: number | null;
 }
 
 export type Decision = 'SHORTLISTED' | 'REJECTED';

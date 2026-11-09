@@ -48,7 +48,7 @@ export interface Actor {
   ip: string | null;
 }
 
-const EMPTY_FLAGS: CandidateFlags = { integrity: { pasteAttempts: 0, bulkInsert: 0, tabHidden: 0, blur: 0, ipChanges: 0 }, location: [] };
+const EMPTY_FLAGS: CandidateFlags = { integrity: { pasteAttempts: 0, bulkInsert: 0, tabHidden: 0, blur: 0, ipChanges: 0 }, location: [], nearbyCount: null };
 
 const STATUS_KEYS: Record<CandidateStatusValue, keyof DashboardRoleDto> = {
   NOT_STARTED: 'notStarted',
@@ -182,6 +182,7 @@ export function createResultsService(deps: ResultsDeps) {
         compositeScore: s.composite,
         compositeProvisional: s.provisional,
         flagCounts: flagBreakdown(flags.get(r.candidate.id) ?? EMPTY_FLAGS),
+        nearbyCount: (flags.get(r.candidate.id) ?? EMPTY_FLAGS).nearbyCount,
       })),
     };
   }
@@ -258,6 +259,7 @@ export function createResultsService(deps: ResultsDeps) {
         { header: 'Composite basis' },
         { header: 'Weights (exam/X/XII/CPI)' },
         ...FLAG_COLUMNS.map((f) => ({ header: f.header })),
+        { header: 'Nearby candidates' },
         { header: 'Flag score' },
         { header: 'Evaluator comments', width: 60 },
       ],
@@ -296,6 +298,7 @@ export function createResultsService(deps: ResultsDeps) {
           sc.composite === null ? null : sc.provisional ? 'AI (provisional)' : 'Human',
           weightsText,
           ...FLAG_COLUMNS.map((col) => breakdown[col.key]),
+          f.nearbyCount,
           flagScore(f),
           r.questions
             .filter((q) => evaluated && q.evaluation?.comment)

@@ -21,7 +21,7 @@ import type { ClientInfo } from '../../shared/utils/clientInfo.js';
 import { SAVE_GRACE_MS } from '../../infrastructure/queue/autoSubmit.queue.js';
 import { assessSave } from './integrity.js';
 import { flagScore, type CandidateFlags } from './flagScore.js';
-import { evaluateLocationFlags, LOCATION_FLAG_THRESHOLDS, type LocationFlag } from './locationFlags.js';
+import { evaluateLocationFlags, LOCATION_FLAG_THRESHOLDS, nearbyCountOf, type LocationFlag } from './locationFlags.js';
 import type { ActivityEntry, ExamRepository, LiveAttempt } from './exam.repository.js';
 
 /** A version row at most this often per answer (design §7.5). */
@@ -414,6 +414,7 @@ export function createExamService(deps: ExamServiceDeps) {
     }
     const settings = new Map<string, Awaited<ReturnType<ExamServiceDeps['getSettings']>>>();
     for (const roleId of new Set(apps.map((a) => a.jobRole.id))) settings.set(roleId, await deps.getSettings(roleId));
+    const location = await locationFor(apps.map((a) => a.id));
     return apps.map((a) => {
       const s = settings.get(a.jobRole.id) ?? null;
       const att = a.attempt;
@@ -424,6 +425,7 @@ export function createExamService(deps: ExamServiceDeps) {
         progress: a.status === 'NOT_STARTED' ? 'NOT_STARTED' : a.status === 'IN_PROGRESS' ? 'IN_PROGRESS' : SUBMITTED_LIKE.has(a.status) ? 'SUBMITTED' : 'NOT_STARTED',
         locationExempt: a.locationExempt,
         selectedForNextRound: a.result === 'SHORTLISTED' ? 'YES' : a.result === 'REJECTED' ? 'NO' : 'AWAITED',
+        nearbyCount: ((l) => (l ? nearbyCountOf(l.flags, l.hasStart) : null))(location.get(a.id)),
         durationMinutes: s?.durationMinutes ?? 60,
         windowStart: s?.windowStart?.toISOString() ?? null,
         windowEnd: s?.windowEnd?.toISOString() ?? null,
@@ -471,7 +473,8 @@ export function createExamService(deps: ExamServiceDeps) {
     return out;
   }
 
-  async function locationFlagsFor(candidateIds: string[]): Promise<Map<string, LocationFlag[]>> {
+  /** Location flags per candidate, and whether it has a granted start location at all. */
+  async function locationFor(candidateIds: string[]): Promise<Map<string, { flags: LocationFlag[]; hasStart: boolean }>> {
     const rows = await repo.locationRows(candidateIds);
     const per = new Map<string, typeof rows>();
     for (const r of rows) per.set(r.candidateId, [...(per.get(r.candidateId) ?? []), r]);
@@ -497,40 +500,49 @@ export function createExamService(deps: ExamServiceDeps) {
         : [];
     const ipCounts = await repo.startIpCandidateCounts([...new Set([...own.values()].flatMap((o) => o.ips))]);
 
-    const out = new Map<string, LocationFlag[]>();
+    const out = new Map<string, { flags: LocationFlag[]; hasStart: boolean }>();
     for (const [id, o] of own) {
       const others = o.start
         ? nearbyPool
             .filter((p) => p.candidateId !== id && Math.abs(p.createdAt.getTime() - o.start!.at.getTime()) <= NEARBY_WINDOW_MS)
             .map((p) => ({ candidateId: p.candidateId, lat: p.lat, lng: p.lng }))
         : [];
-      out.set(
-        id,
-        evaluateLocationFlags(
+      out.set(id, {
+        hasStart: o.start !== null,
+        flags: evaluateLocationFlags(
           { login: o.login, start: o.start ? { lat: o.start.lat, lng: o.start.lng } : null },
           others,
           o.ips.map((ip) => ({ ip, count: ipCounts.get(ip) ?? 0 })),
           LOCATION_FLAG_THRESHOLDS,
         ),
-      );
+      });
     }
     return out;
+  }
+
+  async function locationFlagsFor(candidateIds: string[]): Promise<Map<string, LocationFlag[]>> {
+    const loc = await locationFor(candidateIds);
+    return new Map([...loc].map(([id, l]) => [id, l.flags]));
   }
 
   async function computeLocationFlags(candidateId: string): Promise<LocationFlag[]> {
     return (await locationFlagsFor([candidateId])).get(candidateId) ?? [];
   }
 
-  async function getFlags(candidateId: string): Promise<{ integrity: IntegrityCounts; location: LocationFlag[] }> {
-    const [integrity, location] = await Promise.all([integrityFor([candidateId]), locationFlagsFor([candidateId])]);
-    return { integrity: integrity.get(candidateId) ?? zeroCounts(), location: location.get(candidateId) ?? [] };
+  async function getFlags(candidateId: string): Promise<CandidateFlags> {
+    return (await getFlagsBatch([candidateId])).get(candidateId)!;
   }
 
-  /** Integrity counts and location flags for many candidates in one pass. */
+  /** Integrity counts, location flags and the nearby-candidates count for many candidates in one pass. */
   async function getFlagsBatch(candidateIds: string[]): Promise<Map<string, CandidateFlags>> {
     const ids = [...new Set(candidateIds)];
-    const [integrity, location] = await Promise.all([integrityFor(ids), locationFlagsFor(ids)]);
-    return new Map(ids.map((id) => [id, { integrity: integrity.get(id) ?? zeroCounts(), location: location.get(id) ?? [] }]));
+    const [integrity, location] = await Promise.all([integrityFor(ids), locationFor(ids)]);
+    return new Map(
+      ids.map((id) => {
+        const l = location.get(id) ?? { flags: [], hasStart: false };
+        return [id, { integrity: integrity.get(id) ?? zeroCounts(), location: l.flags, nearbyCount: nearbyCountOf(l.flags, l.hasStart) }];
+      }),
+    );
   }
 
   /** flagCount per candidate: flagScore of its flags. */

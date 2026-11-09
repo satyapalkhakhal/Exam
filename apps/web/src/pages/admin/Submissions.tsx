@@ -42,7 +42,7 @@ export default function Submissions() {
     setSelected([]);
   };
   const activeCount = [f.jobRoleId, f.evaluation, f.ai, f.search].filter(Boolean).length;
-  const cols = isSa ? 12 : 7;
+  const cols = isSa ? 13 : 9;
   const rowsIds = data?.items.map((s) => s.attemptId) ?? [];
   const allSelected = rowsIds.length > 0 && rowsIds.every((id) => selected.includes(id));
   const toggle = (id: string) => setSelected((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
@@ -84,6 +84,7 @@ export default function Submissions() {
               <TableHead>Submitted</TableHead>
               <TableHead>Time taken</TableHead>
               <TableHead>Flags</TableHead>
+              <TableHead title="Other candidates who started the exam within 100 m and 2 hours">Nearby</TableHead>
               <TableHead>
                 <span className="inline-flex items-center gap-1.5">
                   Evaluation
@@ -139,6 +140,7 @@ export default function Submissions() {
                 </TableCell>
                 <TableCell>{formatDuration(s.timeTakenSec)}</TableCell>
                 <TableCell title={flagTitle(s.flagCounts)}>{totalFlags(s.flagCounts) > 0 ? <Badge variant="default">{totalFlags(s.flagCounts)}</Badge> : '-'}</TableCell>
+                <TableCell>{s.nearbyCount ?? '-'}</TableCell>
                 <TableCell><Badge variant={s.evaluationStatus === 'SUBMITTED' ? 'default' : 'outline'}>{EVAL_LABEL[s.evaluationStatus]}</Badge></TableCell>
                 <TableCell><Badge variant={aiStateBadge(s.ai).variant}>{aiStateBadge(s.ai).label}</Badge></TableCell>
                 <TableCell>{s.ai.percentage ?? '-'}</TableCell>

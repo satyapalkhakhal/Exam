@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { receiptRows, selectionLabel, timeTaken } from '../src/lib/submissionReceipt.js';
+import { nearbyLabel, receiptRows, selectionLabel, timeTaken } from '../src/lib/submissionReceipt.js';
 
 const candidate = {
   fullName: 'Aswajith K K',
@@ -8,6 +8,7 @@ const candidate = {
   candidateCode: 'ARH-EX-000123',
   jobRole: { name: 'AI & ML Engineer' },
   selectedForNextRound: 'AWAITED' as const,
+  nearbyCount: 3 as number | null,
 };
 const summary = {
   status: 'SUBMITTED' as const,
@@ -55,4 +56,14 @@ test('timeTaken formats hours and never goes negative', () => {
   assert.equal(timeTaken('2026-11-01T09:00:00Z', '2026-11-01T10:05:00Z'), '1 h 5 min');
   assert.equal(timeTaken('2026-11-01T09:00:00Z', '2026-11-01T09:00:40Z'), '40 s');
   assert.equal(timeTaken('2026-11-01T09:00:00Z', '2026-11-01T08:00:00Z'), '0 s');
+});
+
+test('candidates near you: the count, or Not available without a shared start location', () => {
+  assert.equal(nearbyLabel(0), '0');
+  assert.equal(nearbyLabel(3), '3');
+  assert.equal(nearbyLabel(null), 'Not available');
+  const rows = Object.fromEntries(receiptRows(candidate, summary).map((r) => [r.label, r.value]));
+  assert.equal(rows['Candidates near you'], '3');
+  const none = Object.fromEntries(receiptRows({ ...candidate, nearbyCount: null }, summary).map((r) => [r.label, r.value]));
+  assert.equal(none['Candidates near you'], 'Not available');
 });

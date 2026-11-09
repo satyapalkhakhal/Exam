@@ -636,3 +636,18 @@ test('Super Admin views mask the candidate email (submissions, marking, leaderbo
   for (const row of board.body.data.items) assert.match(row.email, masked);
   assert.ok(!JSON.stringify([subs.body, view.body, board.body]).includes(full));
 });
+
+test('nearbyCount on submissions, marking view and leaderboard; results.xlsx has a Nearby candidates column', async () => {
+  const subs = await agents.sa.get(`/api/admin/submissions?search=${encodeURIComponent(`EV-${RUN}-m`)}`);
+  assert.equal(typeof subs.body.data.items[0].nearbyCount, 'number', 'm has a granted start location');
+  const evView = await agents.a.get(`/api/admin/submissions/${attemptId}`);
+  assert.equal(typeof evView.body.data.nearbyCount, 'number', 'evaluators see the count too (not PII)');
+  const board = await agents.sa.get(`/api/admin/leaderboard?jobRoleId=${boardRoleId}`);
+  for (const row of board.body.data.items) assert.equal(row.nearbyCount, null, 'board candidates have no start location');
+  const res = await binary(agents.sa.get(`/api/admin/exports/results.xlsx?jobRoleId=${roleId}`));
+  const ws = (await workbook(res)).worksheets[0]!;
+  const header = (ws.getRow(1).values as unknown[]).slice(1);
+  assert.ok(header.includes('Nearby candidates'));
+  const mRow = [2, 3].map((r) => ws.getRow(r)).find((row) => row.getCell(header.indexOf('Candidate code') + 1).value === `EV-${RUN}-m`)!;
+  assert.equal(typeof mRow.getCell(header.indexOf('Nearby candidates') + 1).value, 'number');
+});

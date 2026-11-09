@@ -180,6 +180,8 @@ export interface CandidateExamStatsDto {
 
 export interface CandidateListItemDto extends CandidateRowDto {
   exam: CandidateExamStatsDto | null;
+  /** Other candidates who started within 100 m and ±2 h; null without a start location. */
+  nearbyCount: number | null;
   /** The same person's other applications (other job profiles). */
   otherApplications: { jobRoleName: string; status: CandidateStatus; result: CandidateResult | null }[];
 }
@@ -213,6 +215,8 @@ export interface CandidateFlagsDto {
     | { code: 'NEARBY_CANDIDATES'; withCandidateIds: string[]; meters: number }
     | { code: 'SHARED_IP'; ip: string; count: number }
   )[];
+  /** Other candidates who started within 100 m and ±2 h; null without a granted start location. */
+  nearbyCount: number | null;
 }
 
 export interface CandidateDetailDto {
