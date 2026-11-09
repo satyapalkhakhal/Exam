@@ -58,6 +58,9 @@ const RISK_LINE = 'Investments in securities markets are subject to market risks
 const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.msf.acml';
 const APP_STORE_URL = 'https://apps.apple.com/in/app/arihant-plus/id1643484698';
 const WEB_TRADING_URL = 'https://web.arihantplus.com';
+/** Where candidates sign in to see their result (both outcome emails link to it). */
+const RESULT_PORTAL_URL = 'https://onlineexam.arihantplus.com/login';
+const RESULT_PORTAL_LINE = 'You can now check your result by logging in to the portal using your registered email ID and OTP.';
 /** Public 32x32 ArihantPlus icon (the A+ mark), hot-linked so the exam site needs no public image URL. */
 const PLUS_ICON_URL = 'https://www.arihantplus.com/favicon.ico?favicon.41oegf56223-1.ico';
 
@@ -155,6 +158,18 @@ const sectionLabelHtml = (t: string): string =>
 function buttonHtml(href: string, label: string): string {
   return `<p style="margin:4px 0 22px"><a href="${escapeHtml(href)}" style="display:inline-block;background:${C.primary};color:#ffffff;text-decoration:none;font-size:14px;font-weight:bold;padding:12px 24px;border-radius:8px">${escapeHtml(label)}</a></p>`;
 }
+
+/** Fixed block on both outcome emails, so it stays even when HR edits the template text. */
+function resultPortalHtml(): string {
+  return (
+    `<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background:${C.lav};border:1px solid ${C.lav2};border-radius:10px;margin:4px 0 20px"><tr><td style="padding:14px 16px">` +
+    `<div style="font-size:14px;line-height:1.6;color:${C.ink}">${escapeHtml(RESULT_PORTAL_LINE)}</div>` +
+    `<div style="font-size:14px;line-height:1.6;color:${C.ink};margin-top:6px"><b>Result Portal:</b> <a href="${RESULT_PORTAL_URL}" style="color:${C.primary};font-weight:bold">${RESULT_PORTAL_URL}</a></div>` +
+    '</td></tr></table>'
+  );
+}
+
+const resultPortalText = (): string => `${RESULT_PORTAL_LINE}\n\nResult Portal: ${RESULT_PORTAL_URL}`;
 
 // ---- ArihantPlus strip (last row of the outcome emails) ------------------------
 
@@ -475,6 +490,7 @@ export function buildShortlistEmail(p: ShortlistEmailParams, template: EmailTemp
       templateParagraphsHtml(paras) +
       assessmentCardHtml(p) +
       nextHtml +
+      resultPortalHtml() +
       paragraphsHtml(['Congratulations once again. We look forward to speaking with you.', `Warm regards,<br>${SIGN_OFF_TEAM}`]),
   });
 
@@ -489,6 +505,8 @@ export function buildShortlistEmail(p: ShortlistEmailParams, template: EmailTemp
     ...(link ? [`${linkLabel}: ${link}`] : []),
     ...(instructionLines.length ? ['Before the round:', ...instructionLines.map((l) => `  - ${l}`)] : []),
     ...(scheduled ? [confirmLine] : []),
+    '',
+    resultPortalText(),
     '',
     'Congratulations once again. We look forward to speaking with you.',
     '',
@@ -515,8 +533,17 @@ export function buildRejectionEmail(p: CommonParams, template: EmailTemplate = D
     heading: 'Update on your application',
     contact,
     plusStrip: true,
-    bodyHtml: templateParagraphsHtml(paras) + detailsTableHtml(rows) + paragraphsHtml([`Best wishes,<br>${SIGN_OFF_TEAM}`]),
+    bodyHtml: templateParagraphsHtml(paras) + detailsTableHtml(rows) + resultPortalHtml() + paragraphsHtml([`Best wishes,<br>${SIGN_OFF_TEAM}`]),
   });
-  const text = [...paras.flatMap((x) => [x, '']), detailsText(rows), '', `Best wishes,\n${SIGN_OFF_TEAM}`, '', textFooter(contact, true)].join('\n');
+  const text = [
+    ...paras.flatMap((x) => [x, '']),
+    detailsText(rows),
+    '',
+    resultPortalText(),
+    '',
+    `Best wishes,\n${SIGN_OFF_TEAM}`,
+    '',
+    textFooter(contact, true),
+  ].join('\n');
   return { subject, html, text };
 }

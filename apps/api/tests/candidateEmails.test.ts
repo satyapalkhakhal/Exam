@@ -203,3 +203,16 @@ test('rejection email escapes interpolated values', () => {
   const e = buildRejectionEmail({ ...base, fullName: '<b>x</b>' });
   assert.doesNotMatch(e.html, /<b>x<\/b>/);
 });
+
+test('result portal line and link are on both outcome emails, not on the submission email', () => {
+  for (const e of [buildShortlistEmail(base), buildRejectionEmail(base)]) {
+    for (const part of [e.html, e.text]) {
+      assert.match(part, /You can now check your result by logging in to the portal using your registered email ID and OTP\./);
+      assert.match(part, /Result Portal:/);
+      assert.match(part, /https:\/\/onlineexam\.arihantplus\.com\/login/);
+    }
+    assert.match(e.html, /<a href="https:\/\/onlineexam\.arihantplus\.com\/login"/);
+  }
+  const sub = buildSubmissionEmail(submission);
+  assert.doesNotMatch(sub.html + sub.text, /Result Portal|onlineexam\.arihantplus\.com/);
+});
