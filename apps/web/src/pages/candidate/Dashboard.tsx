@@ -9,7 +9,7 @@ import { Link } from 'react-router';
 import { MapPinOff } from 'lucide-react';
 import type { CandidateExamDto } from '@exam/shared';
 import { ArihantPlusStrip } from '@/components/auth/ArihantPlusBanner';
-import { CandidateSignOut } from '@/components/layout/CandidateSignOut';
+import { CandidateNavBar } from '@/components/layout/CandidateNavBar';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { useCandidateExams } from '@/api/candidate/exam';
@@ -76,18 +76,7 @@ export default function CandidateDashboard() {
 
   return (
     <div className="min-h-screen bg-background">
-      <header className="border-b bg-card">
-        <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-4 py-3">
-          <img src="/logo-light.svg" alt="Arihant Capital" className="h-8 w-auto" />
-          <div className="flex items-center gap-4">
-            <p className="hidden text-right text-sm text-muted-foreground sm:block">
-              <span className="block font-medium text-foreground">{candidate.fullName}</span>
-              {candidate.email}
-            </p>
-            <CandidateSignOut />
-          </div>
-        </div>
-      </header>
+      <CandidateNavBar />
 
       <main className="mx-auto max-w-3xl space-y-6 px-4 py-6">
         <h1 className="text-xl font-semibold">My exams</h1>

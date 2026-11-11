@@ -9,7 +9,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import { Link, Navigate, useNavigate, useParams } from 'react-router';
 import { ArrowLeft, MapPinOff } from 'lucide-react';
 import { ArihantPlusStrip } from '@/components/auth/ArihantPlusBanner';
-import { CandidateSignOut } from '@/components/layout/CandidateSignOut';
+import { CandidateNavBar } from '@/components/layout/CandidateNavBar';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -176,15 +176,7 @@ export default function CandidateExamDetail() {
 
   return (
     <div className="min-h-screen bg-background">
-      <header className="border-b bg-card">
-        <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-4 py-3">
-          <img src="/logo-light.svg" alt="Arihant Capital" className="h-8 w-auto" />
-          <div className="flex items-center gap-4">
-            <p className="hidden text-sm text-muted-foreground sm:block">Recruitment Assessment</p>
-            <CandidateSignOut />
-          </div>
-        </div>
-      </header>
+      <CandidateNavBar />
 
       <main className="mx-auto max-w-3xl space-y-4 px-4 py-6">
         <Link to="/dashboard" className="inline-flex items-center gap-1 text-sm text-primary hover:underline">

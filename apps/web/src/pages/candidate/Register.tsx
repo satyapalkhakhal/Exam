@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { Link, Navigate, useNavigate } from 'react-router';
 import { normalizeMobile } from '@exam/shared';
 import { AuthPageShell, ServerErrorNotice } from '@/components/auth/AuthPageShell';
+import { CandidateNavBar } from '@/components/layout/CandidateNavBar';
 import { OtpForm } from '@/components/auth/OtpForm';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -84,7 +85,7 @@ export default function CandidateRegister() {
   if (details) {
     const masked = `${details.mobile.slice(0, 2)}******${details.mobile.slice(-2)}`;
     return (
-      <AuthPageShell title="Verify your mobile" subtitle={`If your details match, a code has been sent by SMS to ${masked}.`}>
+      <AuthPageShell nav={<CandidateNavBar />} title="Verify your mobile" subtitle={`If your details match, a code has been sent by SMS to ${masked}.`}>
         <OtpForm onSubmit={submitCode} onResend={resend} submitting={verify.isPending} error={otpError} />
         <p className="mt-4 text-center text-sm text-muted-foreground">
           No SMS within 2 minutes? Check your email and roll number, or contact HR.
@@ -99,7 +100,7 @@ export default function CandidateRegister() {
   }
 
   return (
-    <AuthPageShell title="Register your mobile" subtitle="First time here? Link your mobile number to sign in.">
+    <AuthPageShell nav={<CandidateNavBar />} title="Register your mobile" subtitle="First time here? Link your mobile number to sign in.">
       <form className="space-y-4" onSubmit={handleSubmit(submitDetails)} noValidate>
         {request.isError && <ServerErrorNotice message={message(request.error)} />}
         <div className="space-y-1.5">

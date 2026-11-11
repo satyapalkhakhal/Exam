@@ -5,6 +5,7 @@
 // below the card on phones, so the sign-in form always comes first on small screens.
 // `brand="plus"` swaps the Arihant Capital logo and name above the card for ArihantPlus
 // (candidate login only); the SEBI footer stays, as it names the registered broker.
+// `nav` (candidate pages only: the ArihantPlus-style navigation bar) sits above everything.
 
 import type { ReactNode } from 'react';
 
@@ -13,14 +14,19 @@ export function AuthPageShell({
   subtitle,
   aside,
   brand = 'capital',
+  nav,
   children,
 }: {
   title: string;
   subtitle: string;
   aside?: ReactNode;
   brand?: 'capital' | 'plus';
+  nav?: ReactNode;
   children: ReactNode;
 }) {
+  // With a nav bar on top, the page body fills the rest of the screen instead of all of it.
+  const screen = nav ? 'flex-1' : 'min-h-screen';
+  const withNav = (body: ReactNode) => (nav ? <div className="flex min-h-screen flex-col bg-background">{nav}{body}</div> : body);
   const signIn = (
     <>
       {/* Background gradient orbs */}
@@ -90,20 +96,20 @@ export function AuthPageShell({
   );
 
   if (!aside) {
-    return (
-      <div className="min-h-screen bg-background flex items-center justify-center relative overflow-hidden">
+    return withNav(
+      <div className={`${screen} bg-background flex items-center justify-center relative overflow-hidden`}>
         {signIn}
-      </div>
+      </div>,
     );
   }
 
-  return (
-    <div className="min-h-screen bg-background flex flex-col lg:grid lg:grid-cols-[minmax(0,1.08fr)_minmax(0,1fr)]">
-      <div className="relative overflow-hidden flex items-center justify-center py-10 lg:order-2 lg:min-h-screen">
+  return withNav(
+    <div className={`${screen} bg-background flex flex-col lg:grid lg:grid-cols-[minmax(0,1.08fr)_minmax(0,1fr)]`}>
+      <div className={`relative overflow-hidden flex items-center justify-center py-10 lg:order-2 ${nav ? '' : 'lg:min-h-screen'}`}>
         {signIn}
       </div>
       <div className="lg:order-1">{aside}</div>
-    </div>
+    </div>,
   );
 }
 
