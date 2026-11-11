@@ -9,7 +9,6 @@ import { z } from 'zod';
 import { Link, Navigate, useNavigate } from 'react-router';
 import { ArihantPlusBanner } from '@/components/auth/ArihantPlusBanner';
 import { AuthPageShell, ServerErrorNotice } from '@/components/auth/AuthPageShell';
-import { CandidateNavBar } from '@/components/layout/CandidateNavBar';
 import { OtpForm } from '@/components/auth/OtpForm';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -78,7 +77,7 @@ export default function CandidateLogin() {
 
   if (identifier) {
     return (
-      <AuthPageShell nav={<CandidateNavBar />} title="Enter your code" subtitle="If you're registered, a code has been sent." brand="plus" aside={<ArihantPlusBanner />}>
+      <AuthPageShell title="Enter your code" subtitle="If you're registered, a code has been sent." brand="plus" aside={<ArihantPlusBanner />}>
         <OtpForm onSubmit={submitCode} onResend={resend} submitting={verify.isPending} error={otpError} />
         {/* The response is the same whether or not a code went out (no account probing), so
             a delivery failure reaches the candidate only through this line; HR sees it in the log. */}
@@ -88,7 +87,7 @@ export default function CandidateLogin() {
   }
 
   return (
-    <AuthPageShell nav={<CandidateNavBar />} title="Candidate sign in" subtitle="Arihant Plus — Recruitment Assessment" brand="plus" aside={<ArihantPlusBanner />}>
+    <AuthPageShell title="Candidate sign in" subtitle="Arihant Plus — Recruitment Assessment" brand="plus" aside={<ArihantPlusBanner />}>
       <form className="space-y-4" onSubmit={handleSubmit(submitId)} noValidate>
         {request.isError && <ServerErrorNotice message={message(request.error)} />}
         <div className="space-y-1.5">
