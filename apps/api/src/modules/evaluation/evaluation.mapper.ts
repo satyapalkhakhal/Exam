@@ -12,7 +12,7 @@
 
 import { maskEmail } from '../../shared/utils/piiMask.js';
 import { percentageOf } from './marks.js';
-import { AI_CONCERNS } from '@exam/shared';
+import { AI_CONCERNS, driveDisplayName, type JobProfileType } from '@exam/shared';
 import type {
   AdminRole,
   AiAttemptSummaryDto,
@@ -40,7 +40,9 @@ export interface CandidateSource {
   majorCpi: Num;
   programme: string | null;
   discipline: string | null;
-  jobRole: { name: string };
+  jobRole: { name: string; type: JobProfileType };
+  /** College and batch reach a Super Admin only (as the drive name); never an Evaluator. */
+  drive: { batch: string; round: { roundNumber: number }; college: { shortCode: string } };
 }
 
 /** One ai_question_scores row, as selected for display. */
@@ -61,6 +63,8 @@ export interface AiScoreSource {
 
 /** What the AI roll-up needs per question; scores are newest first. */
 export interface AiRollupQuestion {
+  /** Omitted by older callers/tests: treated as WRITTEN. MCQs are never AI-graded. */
+  typeSnapshot?: 'WRITTEN' | 'MCQ';
   maxMarksSnapshot: Num;
   aiScores: AiScoreSource[];
 }
@@ -71,6 +75,9 @@ export interface SubmissionSource {
   submittedAt: Date | null;
   submitType: 'MANUAL' | 'AUTO' | null;
   totalMarks: Num;
+  /** Omitted by older callers/tests: no MCQs. */
+  mcqMarks?: Num;
+  mcqMaxMarks?: Num;
   evaluation: { status: 'DRAFT' | 'SUBMITTED'; evaluatorId: string | null } | null;
   candidate: CandidateSource;
   flags: Record<string, number>;
@@ -83,8 +90,12 @@ export interface MarkingQuestionSource extends AiRollupQuestion {
   id: string;
   order: number;
   textSnapshot: string;
+  /** MCQ snapshot (shown order); omitted/empty for written questions. */
+  optionsSnapshot?: string[];
+  correctSnapshot?: number | null;
+  autoMarks?: Num;
   question: { evaluatorGuidance: string | null };
-  answer: { text: string; wordCount: number; versions: { savedAt: Date; wordCount: number }[] } | null;
+  answer: { text: string; wordCount: number; selectedOption?: number | null; versions: { savedAt: Date; wordCount: number }[] } | null;
   evaluation: { marks: Num; comment: string | null; aiScoreId: string | null } | null;
 }
 
@@ -133,7 +144,7 @@ export function evaluationState(e: SubmissionSource['evaluation']): EvaluationSt
   return e.evaluatorId ? 'DRAFT' : 'PENDING';
 }
 
-export function toCandidatePii(c: CandidateSource): CandidatePiiDto {
+export function toCandidatePii(c: Omit<CandidateSource, 'jobRole' | 'drive'>): CandidatePiiDto {
   return {
     candidateId: c.id,
     fullName: c.fullName,
@@ -175,7 +186,8 @@ export function toAiScoreDto(s: AiScoreSource | null): AiQuestionScoreDto | null
 }
 
 /** NONE = never run; DONE = every question has a DONE score; otherwise PARTIAL. */
-export function toAiSummary(questions: AiRollupQuestion[]): AiAttemptSummaryDto {
+export function toAiSummary(all: AiRollupQuestion[]): AiAttemptSummaryDto {
+  const questions = all.filter((q) => q.typeSnapshot !== 'MCQ');
   if (!questions.some((q) => q.aiScores.length > 0)) return { state: 'NONE', totalMarks: null, percentage: null, needsReview: false };
   const picks = questions.map((q) => pickAiScore(q.aiScores));
   const done = picks.filter((p): p is AiScoreSource => p?.status === 'DONE');
@@ -193,24 +205,41 @@ export function toSubmissionView(row: SubmissionSource, viewerRole: AdminRole): 
     attemptId: row.attemptId,
     candidateCode: row.candidate.candidateCode,
     jobRole: row.candidate.jobRole.name,
+    jobProfileType: row.candidate.jobRole.type,
+    roundNumber: row.candidate.drive.round.roundNumber,
     submittedAt: row.submittedAt?.toISOString() ?? null,
     timeTakenSec: row.submittedAt ? Math.max(0, Math.round((row.submittedAt.getTime() - row.startedAt.getTime()) / 1000)) : null,
     submitType: row.submitType,
+    mcqMarks: num(row.mcqMarks ?? null),
+    mcqMaxMarks: num(row.mcqMaxMarks ?? null) ?? 0,
     flagCounts: Object.fromEntries(Object.entries(row.flags).map(([k, v]) => [k, finiteOr0(v)])),
     nearbyCount: row.nearbyCount ?? null,
     evaluationStatus: evaluationState(row.evaluation),
     totalMarks: num(row.totalMarks),
     ai: toAiSummary(row.questions),
   };
-  return viewerRole === 'SUPER_ADMIN' ? { ...base, ...toCandidatePii(row.candidate) } : base;
+  if (viewerRole !== 'SUPER_ADMIN') return base;
+  const c = row.candidate;
+  return {
+    ...base,
+    ...toCandidatePii(c),
+    driveDisplayName: driveDisplayName({ jobRoleName: c.jobRole.name, roundNumber: c.drive.round.roundNumber, collegeShortCode: c.drive.college.shortCode, batch: c.drive.batch }),
+  };
 }
 
 function toMarkingQuestion(q: MarkingQuestionSource, activity: ActivitySource[]): MarkingQuestionDto {
   const mine = activity.filter((a) => a.questionId === q.id);
+  const mcq = q.typeSnapshot === 'MCQ';
   return {
     attemptQuestionId: q.id,
     order: q.order,
+    type: mcq ? 'MCQ' : 'WRITTEN',
     text: q.textSnapshot,
+    // MCQ: read-only for the evaluator (auto-marked at submit).
+    options: mcq ? [...(q.optionsSnapshot ?? [])] : [],
+    selectedOption: mcq ? (q.answer?.selectedOption ?? null) : null,
+    correctOption: mcq ? (q.correctSnapshot ?? null) : null,
+    autoMarks: mcq ? num(q.autoMarks ?? null) : null,
     maxMarks: num(q.maxMarksSnapshot) ?? 0,
     evaluatorGuidance: q.question.evaluatorGuidance,
     answer: {

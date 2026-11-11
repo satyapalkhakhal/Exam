@@ -41,7 +41,8 @@ export const emailsRepository: EmailsRepository & DispatchRepository = {
         eligible: true,
         status: true,
         result: true,
-        jobRole: { select: { name: true } },
+        jobRole: { select: { name: true, type: true, _count: { select: { rounds: true } } } },
+        drive: { select: { round: { select: { roundNumber: true } } } },
         attempts: {
           where: { status: { not: 'RESET' } },
           take: 1,
@@ -61,6 +62,8 @@ export const emailsRepository: EmailsRepository & DispatchRepository = {
         status: r.status,
         result: r.result,
         jobRoleName: r.jobRole.name,
+        jobProfileType: r.jobRole.type,
+        roundNumber: r.jobRole._count.rounds > 1 ? r.drive.round.roundNumber : null,
         attempt: a
           ? {
               status: a.status,

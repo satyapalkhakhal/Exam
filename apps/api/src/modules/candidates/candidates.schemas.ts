@@ -5,7 +5,7 @@ export {
   CandidateCreateSchema,
   CandidateUpdateSchema,
   CandidateEligibilitySchema,
-  CandidateBulkJobRoleSchema,
+  CandidateMoveToDriveSchema,
   CandidateLocationExemptSchema,
   CandidateResetSchema,
   CandidateListQuerySchema,

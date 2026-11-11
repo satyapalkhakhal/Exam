@@ -43,6 +43,9 @@ export const seedData = {
   ],
   demo: {
     roleName: 'Backend Engineer',
+    /** Demo candidates sit in Round 1 of the role at this college, in this batch. */
+    college: { name: 'Demo College', shortCode: 'DEMO' },
+    batch: 'Demo',
     candidates: [
       { candidateCode: 'DEMO001', fullName: 'Demo Candidate One', email: 'demo1@example.com', mobile: '9000000001' },
       { candidateCode: 'DEMO002', fullName: 'Demo Candidate Two', email: 'demo2@example.com', mobile: '9000000002' },
@@ -58,6 +61,21 @@ export const seedData = {
         text: 'Describe how you would find and fix a slow PostgreSQL query in production.',
         maxMarks: 10,
         evaluatorGuidance: 'Look for EXPLAIN ANALYZE, indexing, and lock awareness.',
+      },
+    ],
+    /** Multiple choice (spec 2026-11-10 MCQ): 4 options A–D, correctOption is the index. */
+    mcqQuestions: [
+      {
+        text: 'Which HTTP method is idempotent by definition?',
+        maxMarks: 2,
+        options: ['POST', 'PUT', 'PATCH', 'CONNECT'],
+        correctOption: 1,
+      },
+      {
+        text: 'Which PostgreSQL command shows the actual run time of each step of a query plan?',
+        maxMarks: 2,
+        options: ['EXPLAIN', 'EXPLAIN ANALYZE', 'VACUUM', 'ANALYZE'],
+        correctOption: 1,
       },
     ],
   },

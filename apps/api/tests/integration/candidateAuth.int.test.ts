@@ -10,7 +10,7 @@ import { prisma } from '../../src/infrastructure/db/prisma.js';
 import { getRedis } from '../../src/infrastructure/redis/redis.js';
 import { createApp } from '../../src/app.js';
 import crypto from 'node:crypto';
-import { createApplication, createCandidate } from './helpers.js';
+import { createApplication, createCandidate, createDrive } from './helpers.js';
 import {
   CANDIDATE_OTP_IP_LIMIT,
   CANDIDATE_VERIFY_ID_LIMIT,
@@ -22,6 +22,11 @@ const MASKED_EMAIL = 'c****d@int.test';
 let app: Express;
 let candidateId = '';
 let roleId = '';
+/** jobRoleId -> its test drive id (spec 2026-11-10: candidates belong to a drive). */
+const drv: Record<string, string> = {};
+const withDrive = async (jobRoleId: string, opts: Parameters<typeof createDrive>[1] = {}) => {
+  drv[jobRoleId] = (await createDrive(jobRoleId, opts)).driveId;
+};
 const REG_EMAIL = 'reg@int.test';
 let regId = '';
 
@@ -29,17 +34,15 @@ before(async () => {
   assert.match(env.DATABASE_URL, /\/exam_test(\?|$)/);
   assert.match(env.REDIS_URL, /\/15$/);
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE candidate_login_logs, activity_logs, admin_audit_logs, candidate_accounts, candidates, exam_settings, job_roles RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE candidate_login_logs, activity_logs, admin_audit_logs, candidate_accounts, candidates, drives, colleges, exam_rounds, job_roles RESTART IDENTITY CASCADE',
   );
   const role = await prisma.jobRole.create({ data: { name: 'Analyst' } });
   roleId = role.id;
-  await prisma.examSetting.create({
-    data: { jobRoleId: role.id, durationMinutes: 45, instructions: 'Be honest.', isOpen: true, windowEnd: new Date('2030-01-01T00:00:00Z') },
-  });
-  const c = await createCandidate({ candidateCode: 'C-001', fullName: 'Asha Rao', email: EMAIL, mobile: '9876543210', jobRoleId: role.id });
+  await withDrive(role.id, { durationMinutes: 45, instructions: 'Be honest.', isOpen: true, windowEnd: new Date('2030-01-01T00:00:00Z') });
+  const c = await createCandidate({ candidateCode: 'C-001', fullName: 'Asha Rao', email: EMAIL, mobile: '9876543210', driveId: drv[role.id]! });
   candidateId = c.id;
-  await createCandidate({ candidateCode: 'C-002', fullName: 'Not Eligible', email: 'no@int.test', mobile: '9000000002', jobRoleId: role.id, eligible: false });
-  const r = await createCandidate({ candidateCode: 'C-003', fullName: 'Ravi Nair', email: REG_EMAIL, rollNumber: 'R-003', jobRoleId: role.id });
+  await createCandidate({ candidateCode: 'C-002', fullName: 'Not Eligible', email: 'no@int.test', mobile: '9000000002', driveId: drv[role.id]!, eligible: false });
+  const r = await createCandidate({ candidateCode: 'C-003', fullName: 'Ravi Nair', email: REG_EMAIL, rollNumber: 'R-003', driveId: drv[role.id]! });
   regId = r.id;
   app = createApp();
 });
@@ -248,10 +251,11 @@ test('the old /exam/info and /exam/* routes are gone', async () => {
 
 test('/exams lists the eligible applications of the account ordered by role name; ineligible ones are hidden; the detail is owned', async () => {
   const role2 = await prisma.jobRole.create({ data: { name: 'Auditor' } });
-  await prisma.examSetting.create({ data: { jobRoleId: role2.id, durationMinutes: 30, instructions: 'Audit.', isOpen: false } });
+  await withDrive(role2.id, { durationMinutes: 30, instructions: 'Audit.', isOpen: false });
   const role3 = await prisma.jobRole.create({ data: { name: 'Zoologist' } });
-  const second = await createApplication(candidateId, { candidateCode: 'C-101', fullName: 'Asha Rao', jobRoleId: role2.id, locationExempt: true });
-  await createApplication(candidateId, { candidateCode: 'C-102', fullName: 'Asha Rao', jobRoleId: role3.id, eligible: false });
+  await withDrive(role3.id);
+  const second = await createApplication(candidateId, { candidateCode: 'C-101', fullName: 'Asha Rao', driveId: drv[role2.id]!, locationExempt: true });
+  await createApplication(candidateId, { candidateCode: 'C-102', fullName: 'Asha Rao', driveId: drv[role3.id]!, eligible: false });
   try {
     const { agent } = await signIn();
     const list = await agent.get('/api/candidate/exams');
@@ -290,7 +294,8 @@ test('/exams lists the eligible applications of the account ordered by role name
 
 test('login by mobile and by email reach the same account, and LOGIN location is stored per eligible application', async () => {
   const role2 = await prisma.jobRole.create({ data: { name: 'Banker' } });
-  await createApplication(candidateId, { candidateCode: 'C-201', fullName: 'Asha Rao', jobRoleId: role2.id });
+  await withDrive(role2.id);
+  await createApplication(candidateId, { candidateCode: 'C-201', fullName: 'Asha Rao', driveId: drv[role2.id]! });
   try {
     const byMobile = await signIn('9876543210');
     assert.equal(byMobile.verify.body.data.candidate.id, candidateId);
@@ -488,7 +493,7 @@ test('register-mobile/request is limited to 5 per email per window', async () =>
 
 test('/exams tells the candidate whether they were selected for the next round: YES, NO or AWAITED', async () => {
   const email = 'selection@int.test';
-  const c = await createCandidate({ candidateCode: 'SEL-1', fullName: 'Sel Person', email, jobRoleId: roleId, status: 'EVALUATED' });
+  const c = await createCandidate({ candidateCode: 'SEL-1', fullName: 'Sel Person', email, driveId: drv[roleId]!, status: 'EVALUATED' });
   const { agent } = await signIn(email);
   const selection = async () => {
     const r = await agent.get('/api/candidate/exams');
@@ -506,8 +511,8 @@ test('/exams tells the candidate whether they were selected for the next round: 
 
 test('/exams carries nearbyCount for the candidate: a number with a start location, null without', async () => {
   const at = new Date('2026-09-02T04:00:00Z');
-  const near = await createCandidate({ candidateCode: 'NBC-1', fullName: 'Near One', email: 'near-one@int.test', jobRoleId: roleId });
-  const me = await createCandidate({ candidateCode: 'NBC-2', fullName: 'Near Two', email: 'near-two@int.test', jobRoleId: roleId });
+  const near = await createCandidate({ candidateCode: 'NBC-1', fullName: 'Near One', email: 'near-one@int.test', driveId: drv[roleId]! });
+  const me = await createCandidate({ candidateCode: 'NBC-2', fullName: 'Near Two', email: 'near-two@int.test', driveId: drv[roleId]! });
   for (const [id, lat] of [[near.id, 22.57260], [me.id, 22.57265]] as const) {
     await prisma.candidateLoginLog.create({
       data: { candidateId: id, stage: 'EXAM_START', permission: 'GRANTED', latitude: lat, longitude: 88.36390, createdAt: at, ip: '203.0.113.7', userAgent: 'ua', browser: 'x', os: 'x', deviceType: 'desktop' },
@@ -517,7 +522,7 @@ test('/exams carries nearbyCount for the candidate: a number with a start locati
   const list = await agent.get('/api/candidate/exams');
   assert.equal(list.status, 200, JSON.stringify(list.body));
   assert.equal(list.body.data.exams[0].nearbyCount, 1);
-  const lone = await createCandidate({ candidateCode: 'NBC-3', fullName: 'No Loc', email: 'no-loc@int.test', jobRoleId: roleId });
+  const lone = await createCandidate({ candidateCode: 'NBC-3', fullName: 'No Loc', email: 'no-loc@int.test', driveId: drv[roleId]! });
   const other = await signIn('no-loc@int.test');
   assert.equal((await other.agent.get('/api/candidate/exams')).body.data.exams[0].nearbyCount, null);
   assert.ok(lone);

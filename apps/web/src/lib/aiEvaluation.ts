@@ -60,8 +60,14 @@ export function summariseSkips(skipped: { reason: AiAcceptSkipReason }[]): { rea
 /** Friendly copy for the API errors this feature adds; null falls back to the server message. */
 export function aiErrorMessage(code: string | undefined): { text: string; linkToIntegrations: boolean } | null {
   if (code === 'AI_NOT_CONFIGURED') return { text: 'AI evaluation is not set up yet. Add the OpenAI key and model in', linkToIntegrations: true };
-  if (code === 'EXAM_NOT_OVER') return { text: "This role's exam is still open or someone is still taking it.", linkToIntegrations: false };
+  if (code === 'EXAM_NOT_OVER') return { text: 'This drive is still open or someone is still taking it.', linkToIntegrations: false };
+  if (code === 'MIXED_DRIVES') return { text: 'Select submissions from one drive.', linkToIntegrations: false };
   return null;
+}
+
+/** True when the chosen rows come from more than one drive (spec 2026-11-10: AI runs and bulk accept are per drive). */
+export function selectionSpansDrives(driveNames: Array<string | undefined>): boolean {
+  return new Set(driveNames.filter((n): n is string => Boolean(n))).size > 1;
 }
 
 interface DraftLike {

@@ -12,7 +12,7 @@ import type { CandidatesService } from './candidates.service.js';
 import {
   CandidateDetailQuerySchema,
   CandidateEligibilitySchema,
-  CandidateBulkJobRoleSchema,
+  CandidateMoveToDriveSchema,
   CandidateListQuerySchema,
   CandidateLocationExemptSchema,
   CandidateResetSchema,
@@ -36,7 +36,7 @@ export function createCandidatesRouter(service: CandidatesService): Router {
   r.get('/:id', validate({ params: IdParamsSchema, query: CandidateDetailQuerySchema }), c.detail);
   r.get('/:id/contact', validate({ params: IdParamsSchema }), c.contact);
   r.patch('/:id', validate({ params: IdParamsSchema, body: CandidateUpdateSchema }), c.update);
-  r.post('/bulk/job-role', validate({ body: CandidateBulkJobRoleSchema }), c.bulkJobRole);
+  r.post('/bulk/move', validate({ body: CandidateMoveToDriveSchema }), c.moveToDrive);
   r.patch('/:id/eligibility', validate({ params: IdParamsSchema, body: CandidateEligibilitySchema }), c.eligibility);
   r.patch('/:id/location-exempt', validate({ params: IdParamsSchema, body: CandidateLocationExemptSchema }), c.locationExempt);
   r.post('/:id/reset-attempt', validate({ params: IdParamsSchema, body: CandidateResetSchema }), c.reset);

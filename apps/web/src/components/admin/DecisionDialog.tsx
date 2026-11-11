@@ -28,7 +28,7 @@ export function DecisionDialog({
   open,
   decision,
   candidateIds,
-  jobProfileCount = 1,
+  driveCount = 1,
   onClose,
   onDone,
 }: {
@@ -36,7 +36,8 @@ export function DecisionDialog({
   decision: CandidateResult;
   candidateIds: string[];
   /** Distinct job profiles in the selection; a line warns when it is more than one. */
-  jobProfileCount?: number;
+  /** Distinct drives in the selection; above 1 the dialog warns (results are usually decided per drive). */
+  driveCount?: number;
   onClose: () => void;
   /** Called after a successful decision so the page can clear its selection. */
   onDone?: () => void;
@@ -100,9 +101,9 @@ export function DecisionDialog({
             </div>
           ) : (
             <>
-              {jobProfileCount > 1 && (
+              {driveCount > 1 && (
                 <p className="rounded-md border border-border bg-muted p-3 text-sm" role="status">
-                  Selection covers {jobProfileCount} job profiles.
+                  Selection covers {driveCount} drives (different colleges, rounds or job profiles).
                 </p>
               )}
               <div className="space-y-1.5">

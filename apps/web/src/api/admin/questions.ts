@@ -1,7 +1,7 @@
 // src/api/admin/questions.ts
-// Why: question CRUD, ordering, lock/unlock and CSV/XLSX import (plan Task 8). The
-// Question DTO field names are assumed: questionText, maxMarks, evaluatorGuidance,
-// displayOrder, active (they mirror the template columns).
+// Why: question CRUD, ordering, lock/unlock and CSV/XLSX import, per round (spec
+// 2026-11-10: the question bank belongs to a round of a job profile, shared by
+// every college's drive of that round).
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '@/lib/api';
@@ -9,57 +9,49 @@ import type { Paged } from './users';
 import type { ImportPreview, ImportResult } from '@/lib/importState';
 import { rolesKey } from './roles';
 
-export interface Question {
-  id: string;
-  jobRoleId: string;
-  questionText: string;
-  maxMarks: number;
-  evaluatorGuidance: string | null;
-  displayOrder: number;
-  active: boolean;
-}
+import type { QuestionDto } from '@exam/shared';
+import type { QuestionPayload } from '@/lib/mcqForm';
 
-export interface QuestionInput {
-  questionText: string;
-  maxMarks: number;
-  evaluatorGuidance: string | null;
-}
+/** type, options (A–D) and the correct one come from the API for admins only. */
+export type Question = QuestionDto;
+
+export type QuestionInput = QuestionPayload;
 
 export const QUESTION_TEMPLATE_URL = '/api/admin/questions/template.csv';
 export const QUESTION_SAMPLE_URL = '/api/admin/questions/sample.csv';
 
-const key = (jobRoleId: string) => ['admin', 'questions', jobRoleId] as const;
+const key = (roundId: string) => ['admin', 'questions', roundId] as const;
 
-export function useQuestions(jobRoleId: string) {
+export function useQuestions(roundId: string) {
   return useQuery({
-    queryKey: key(jobRoleId),
+    queryKey: key(roundId),
     queryFn: async () =>
-      (await apiFetch<Paged<Question>>('admin', `/questions?jobRoleId=${encodeURIComponent(jobRoleId)}&pageSize=500`)).items,
-    enabled: jobRoleId !== '',
+      (await apiFetch<Paged<Question>>('admin', `/questions?roundId=${encodeURIComponent(roundId)}&pageSize=500`)).items,
+    enabled: roundId !== '',
   });
 }
 
-function useInvalidate(jobRoleId: string) {
+function useInvalidate(roundId: string) {
   const qc = useQueryClient();
   return () => {
-    void qc.invalidateQueries({ queryKey: key(jobRoleId) });
+    void qc.invalidateQueries({ queryKey: key(roundId) });
     void qc.invalidateQueries({ queryKey: rolesKey });
   };
 }
 
-export function useSaveQuestion(jobRoleId: string) {
-  const done = useInvalidate(jobRoleId);
+export function useSaveQuestion(roundId: string) {
+  const done = useInvalidate(roundId);
   return useMutation({
     mutationFn: ({ id, ...body }: QuestionInput & { id?: string }) =>
       id
         ? apiFetch<Question>('admin', `/questions/${id}`, { method: 'PATCH', json: body })
-        : apiFetch<Question>('admin', '/questions', { method: 'POST', json: { jobRoleId, ...body } }),
+        : apiFetch<Question>('admin', '/questions', { method: 'POST', json: { roundId, ...body } }),
     onSuccess: done,
   });
 }
 
-export function useSetQuestionActive(jobRoleId: string) {
-  const done = useInvalidate(jobRoleId);
+export function useSetQuestionActive(roundId: string) {
+  const done = useInvalidate(roundId);
   return useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>
       apiFetch<Question>('admin', `/questions/${id}/active`, { method: 'PATCH', json: { active } }),
@@ -67,31 +59,31 @@ export function useSetQuestionActive(jobRoleId: string) {
   });
 }
 
-export function useReorderQuestions(jobRoleId: string) {
+export function useReorderQuestions(roundId: string) {
   const qc = useQueryClient();
-  const done = useInvalidate(jobRoleId);
+  const done = useInvalidate(roundId);
   return useMutation({
     mutationFn: (ids: string[]) =>
-      apiFetch<unknown>('admin', `/roles/${jobRoleId}/questions/order`, { method: 'PATCH', json: { ids } }),
+      apiFetch<unknown>('admin', `/rounds/${roundId}/questions/order`, { method: 'PATCH', json: { ids } }),
     onSuccess: done,
     // Put the server's order back if the save was refused (e.g. 423 locked).
-    onError: () => void qc.invalidateQueries({ queryKey: key(jobRoleId) }),
+    onError: () => void qc.invalidateQueries({ queryKey: key(roundId) }),
   });
 }
 
-export function useUnlockQuestions(jobRoleId: string) {
-  const done = useInvalidate(jobRoleId);
+export function useUnlockQuestions(roundId: string) {
+  const done = useInvalidate(roundId);
   return useMutation({
     mutationFn: (reason: string) =>
-      apiFetch<unknown>('admin', `/roles/${jobRoleId}/questions/unlock`, { method: 'POST', json: { reason } }),
+      apiFetch<unknown>('admin', `/rounds/${roundId}/questions/unlock`, { method: 'POST', json: { reason } }),
     onSuccess: done,
   });
 }
 
-export function previewQuestionImport(file: File, jobRoleId: string): Promise<ImportPreview<Record<string, unknown>>> {
+export function previewQuestionImport(file: File, roundId: string): Promise<ImportPreview<Record<string, unknown>>> {
   const body = new FormData();
   body.append('file', file);
-  body.append('jobRoleId', jobRoleId);
+  body.append('roundId', roundId);
   return apiFetch('admin', '/questions/import/preview', { method: 'POST', body });
 }
 

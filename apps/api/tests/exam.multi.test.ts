@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import type { NextFunction, Request, Response } from 'express';
 import { AppError } from '../src/shared/errors.js';
 import { resolveApplication } from '../src/shared/middleware/resolveApplication.js';
-import { createExamService, type ExamServiceDeps } from '../src/modules/exam/exam.service.js';
+import { createExamService, type DriveExamSettings, type ExamServiceDeps } from '../src/modules/exam/exam.service.js';
 import type { ExamRepository } from '../src/modules/exam/exam.repository.js';
 import type { ClientInfo } from '../src/shared/utils/clientInfo.js';
 
@@ -32,7 +32,10 @@ test('resolveApplication: an application that is not the account\'s own or not e
   assert.equal(allowed.req.applicationId, 'app-9');
 });
 
-const settings = { durationMinutes: 60, isOpen: true, windowStart: null, windowEnd: null, instructions: 'Read.' };
+const settings: DriveExamSettings = {
+  durationMinutes: 60, isOpen: true, windowStart: null, windowEnd: null, instructions: 'Read.',
+  roundId: 'round-b', roundNumber: 1, roundCount: 1, jobProfileType: 'PLACEMENT', mcqNegativeMarks: 0,
+};
 
 interface FakeApp {
   id: string;
@@ -40,25 +43,30 @@ interface FakeApp {
   status: string;
   locationExempt: boolean;
   jobRole: { id: string; name: string };
+  driveId: string;
   attempt: null | {
     id: string; status: 'IN_PROGRESS' | 'SUBMITTED' | 'AUTO_SUBMITTED' | 'RESET'; submitType: 'MANUAL' | 'AUTO' | null;
     startedAt: Date; endsAt: Date; submittedAt: Date | null; questionCount: number; answeredCount: number;
   };
 }
 
-function fixture(opts: { otherRunning?: boolean; apps?: FakeApp[] } = {}) {
+function fixture(opts: { otherRunning?: boolean; heldNegative?: number; apps?: FakeApp[]; settings?: Partial<DriveExamSettings> | ((driveId: string) => Partial<DriveExamSettings>) } = {}) {
   const created: string[] = [];
+  const createdInputs: { startedAt: Date; endsAt: Date; negativeMarks?: number }[] = [];
+  const settingsFor = (driveId: string) => ({ ...settings, ...(typeof opts.settings === 'function' ? opts.settings(driveId) : (opts.settings ?? {})) });
   const apps = opts.apps ?? [];
   const calls: Array<[string, string | undefined]> = [];
   const tx = {
     lockAccount: async () => true,
-    holdRoleLocked: async () => true,
-    lockCandidate: async () => ({ jobRoleId: 'role-b', status: 'NOT_STARTED', eligible: true }),
+    // The round row as read under its lock (the value the attempt must freeze).
+    holdRoundLocked: async () => ({ mcqNegativeMarks: opts.heldNegative ?? 0 }),
+    lockCandidate: async () => ({ driveId: 'drive-b', roundId: 'round-b', status: 'NOT_STARTED', eligible: true }),
     findLiveAttempt: async () => null,
     hasOtherRunningAttempt: async () => opts.otherRunning ?? false,
     activeQuestions: async () => [{ id: 'q1', text: 'Q', maxMarks: 10 }],
-    createAttempt: async () => {
+    createAttempt: async (input: { startedAt: Date; endsAt: Date; negativeMarks?: number }) => {
       created.push('attempt');
+      createdInputs.push(input);
       return 'att-new';
     },
     setCandidateStatus: async () => {},
@@ -71,10 +79,11 @@ function fixture(opts: { otherRunning?: boolean; apps?: FakeApp[] } = {}) {
     },
     candidateStatus: async () => 'IN_PROGRESS',
     writeFinalVersions: async () => {},
+    markMcqs: async () => ({ mcqMarks: 0, mcqMaxMarks: 0, autoEvaluated: false }),
   };
   const repo = {
     transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
-    findCandidate: async (id: string) => ({ id, accountId: 'acc-1', eligible: true, locationExempt: true, jobRoleId: 'role-b', status: 'NOT_STARTED' }),
+    findCandidate: async (id: string) => ({ id, accountId: 'acc-1', eligible: true, locationExempt: true, driveId: 'drive-b', roundId: 'round-b', status: 'NOT_STARTED' }),
     findLiveAttempt: async () => null,
     // No location rows: every application's nearbyCount is null.
     locationRows: async () => [],
@@ -88,13 +97,13 @@ function fixture(opts: { otherRunning?: boolean; apps?: FakeApp[] } = {}) {
   } as unknown as ExamRepository;
   const deps: ExamServiceDeps = {
     repo,
-    getSettings: async () => settings,
+    getDriveSettings: async (driveId: string) => settingsFor(driveId),
     recordStartLocation: async () => {},
     queue: { enqueue: async () => {}, remove: async () => {} },
     bindFamily: async () => {},
     now: () => NOW,
   };
-  return { service: createExamService(deps), created, calls };
+  return { service: createExamService(deps), created, createdInputs, calls };
 }
 
 test('start while another application of the account has a running attempt is 409 ANOTHER_EXAM_IN_PROGRESS and creates nothing', async () => {
@@ -119,7 +128,7 @@ const attempt = (id: string, status: 'IN_PROGRESS' | 'SUBMITTED' | 'AUTO_SUBMITT
   submittedAt: status === 'IN_PROGRESS' ? null : NOW, questionCount: 3, answeredCount: answered,
 });
 const fakeApp = (id: string, role: string, status: string, att: FakeApp['attempt'] = null): FakeApp => ({
-  id, candidateCode: `C-${id}`, status, locationExempt: false, jobRole: { id: `r-${role}`, name: role }, attempt: att,
+  id, candidateCode: `C-${id}`, status, locationExempt: false, jobRole: { id: `r-${role}`, name: role }, driveId: `d-${role}`, attempt: att,
 });
 
 test('the exam list maps every post-submit status to SUBMITTED and keeps the repository order', async () => {
@@ -160,4 +169,47 @@ test('getExam returns one application, and notFound when the account has no such
   const f = fixture({ apps: [fakeApp('a', 'Analyst', 'NOT_STARTED')] });
   assert.equal((await f.service.getExam('acc-1', 'a')).exam.applicationId, 'a');
   await assert.rejects(f.service.getExam('acc-1', 'zzz'), (e: unknown) => e instanceof AppError && e.statusCode === 404);
+});
+
+test('availability comes from the drive, duration from the round', async () => {
+  const closed = fixture({ settings: { isOpen: false } });
+  await assert.rejects(
+    closed.service.start(auth, 'app-b', { location: { permission: 'DENIED' } }, client),
+    (e: unknown) => e instanceof AppError && e.statusCode === 403 && e.code === 'EXAM_NOT_OPEN',
+  );
+  assert.deepEqual(closed.created, []);
+  const open = fixture({ settings: { isOpen: true, durationMinutes: 45 } });
+  await open.service.start(auth, 'app-b', { location: { permission: 'DENIED' } }, client);
+  const made = open.createdInputs[0]!;
+  assert.equal(made.endsAt.getTime() - made.startedAt.getTime(), 45 * 60_000);
+});
+
+test('the start is refused when the entry moved to a drive of another round meanwhile', async () => {
+  const moved = fixture({ settings: { roundId: 'round-other' } });
+  await assert.rejects(
+    moved.service.start(auth, 'app-b', { location: { permission: 'DENIED' } }, client),
+    (e: unknown) => e instanceof AppError && e.statusCode === 409,
+  );
+});
+
+test('roundNumber null with one round, 2 with two; type and window come from the drive', async () => {
+  const f = fixture({
+    apps: [fakeApp('a', 'Analyst', 'NOT_STARTED'), fakeApp('b', 'Backend', 'NOT_STARTED')],
+    settings: (driveId) =>
+      driveId === 'd-Backend'
+        ? { roundNumber: 2, roundCount: 2, jobProfileType: 'INTERNSHIP', windowStart: new Date('2026-11-04T04:00:00Z') }
+        : { roundNumber: 1, roundCount: 1 },
+  });
+  const list = await f.service.listExams('acc-1');
+  assert.deepEqual(
+    list.exams.map((e) => [e.jobRole.name, e.roundNumber, e.jobProfileType, e.windowStart]),
+    [['Analyst', null, 'PLACEMENT', null], ['Backend', 2, 'INTERNSHIP', '2026-11-04T04:00:00.000Z']],
+  );
+});
+
+test('start freezes the negative marking read under the round lock, not the earlier settings read (review I1)', async () => {
+  // Settings were read before the transaction (0); HR changed it to 0.5 before the round lock was taken.
+  const f = fixture({ settings: { mcqNegativeMarks: 0 }, heldNegative: 0.5 });
+  await f.service.start(auth, 'app-b', { location: { permission: 'DENIED' } }, client);
+  assert.equal(f.createdInputs[0]!.negativeMarks, 0.5);
 });

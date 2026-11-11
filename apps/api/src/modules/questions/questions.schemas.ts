@@ -10,6 +10,7 @@ export {
   QuestionListQuerySchema,
   ImportPreviewBodySchema,
   ImportConfirmSchema,
+  CopyQuestionsSchema,
 } from '@exam/shared';
 
 export const IdParamsSchema = z.object({ id: z.string().uuid() });

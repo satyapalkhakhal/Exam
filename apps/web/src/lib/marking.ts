@@ -32,3 +32,35 @@ export function validateMarksClient(marks: number, max: number): string | null {
   if (!Number.isInteger(marks * 2)) return 'Use steps of 0.5';
   return null;
 }
+
+// ---- MCQ questions (spec 2026-11-10) ------------------------------------------
+// MCQs are auto-marked at submit: the evaluator never sends marks for them (the API
+// refuses), so drafts, completeness and the items sent cover written questions only.
+
+export interface MarkableQuestion {
+  attemptQuestionId: string;
+  type: 'WRITTEN' | 'MCQ';
+  maxMarks: number;
+}
+
+/** Written questions with their parsed draft marks (blank = null), in the given order. */
+export function writtenRows<Q extends MarkableQuestion>(questions: readonly Q[], drafts: Readonly<Record<string, { marks: string; comment?: string } | undefined>>): { q: Q; marks: number | null }[] {
+  return questions
+    .filter((q) => q.type !== 'MCQ')
+    .map((q) => {
+      const s = drafts[q.attemptQuestionId]?.marks ?? '';
+      return { q, marks: s.trim() === '' ? null : Number(s) };
+    });
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/** Running total shown while marking: written drafts + MCQ subtotal, floored at 0 like the server. */
+export function markingTotal(rows: readonly { marks: number | null }[], writtenMax: number, mcqMarks: number | null, mcqMaxMarks: number): { total: number; max: number } {
+  return { total: Math.max(0, round2(sumMarks(rows) + (mcqMarks ?? 0))), max: round2(writtenMax + mcqMaxMarks) };
+}
+
+/** Submissions / leaderboard "MCQ" column. */
+export function mcqCell(r: { mcqMarks: number | null; mcqMaxMarks: number }): string {
+  return r.mcqMaxMarks > 0 && r.mcqMarks !== null ? `${r.mcqMarks} / ${r.mcqMaxMarks}` : '-';
+}

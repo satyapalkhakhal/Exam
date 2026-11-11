@@ -26,6 +26,7 @@ import { SendEmailDialog } from '@/components/admin/SendEmailDialog';
 import { ResultBadge } from '@/components/admin/ResultBadge';
 import { EmailDispatchTable } from '@/components/admin/EmailDispatchTable';
 import { useRoles } from '@/api/admin/roles';
+import { allDrives } from '@/lib/drivePicker';
 import {
   useCandidate,
   useEditCandidate,
@@ -80,7 +81,7 @@ const profileSchema = z.object({
   majorCpi: optNum(0, 10, 'CPI'),
   discipline: z.string().trim(),
   programme: z.string().trim(),
-  jobRoleId: z.string().min(1),
+  driveId: z.string().min(1),
 });
 type PValues = z.infer<typeof profileSchema>;
 // While email and mobile are still masked they are read-only and never sent, so they are not validated.
@@ -107,10 +108,14 @@ function ProfileForm({ c }: { c: CandidateDetailProfile }) {
       majorCpi: c.majorCpi?.toString() ?? '',
       discipline: c.discipline ?? '',
       programme: c.programme ?? '',
-      jobRoleId: c.jobRoleId,
+      driveId: c.driveId,
     },
   });
-  const roleLocked = c.status !== 'NOT_STARTED';
+  // Spec 2026-11-10: any drive while not started; once started only drives of the same round (same questions).
+  const started = c.status !== 'NOT_STARTED';
+  const drives = allDrives(roles.data ?? []);
+  const currentRound = drives.find((d) => d.id === c.driveId)?.roundId;
+  const driveChoices = drives.filter((d) => d.id === c.driveId || (d.active && (!started || d.roundId === currentRound)));
   const field = (id: keyof PValues, label: string, type = 'text') => (
     <div className="space-y-1.5">
       <Label htmlFor={`cd-${id}`}>{label}</Label>
@@ -132,8 +137,8 @@ function ProfileForm({ c }: { c: CandidateDetailProfile }) {
           majorCpi: num(v.majorCpi),
           discipline: txt(v.discipline),
           programme: txt(v.programme),
-          // Only sent when it changed: the server rejects any role change after the exam started.
-          ...(v.jobRoleId !== c.jobRoleId ? { jobRoleId: v.jobRoleId } : {}),
+          // Only sent when it changed: after the start the server allows only drives of the same round.
+          ...(v.driveId !== c.driveId ? { driveId: v.driveId } : {}),
         };
         edit.mutate(body, {
           onSuccess: () => {
@@ -185,13 +190,13 @@ function ProfileForm({ c }: { c: CandidateDetailProfile }) {
         {field('discipline', 'Discipline')}
         {field('programme', 'Programme')}
         <div className="space-y-1.5">
-          <Label htmlFor="cd-jobRoleId">Job role</Label>
-          <Select id="cd-jobRoleId" disabled={roleLocked} {...register('jobRoleId')}>
-            {(roles.data ?? [{ id: c.jobRoleId, name: c.jobRoleName }]).map((r) => (
-              <option key={r.id} value={r.id}>{r.name}</option>
+          <Label htmlFor="cd-driveId">Drive</Label>
+          <Select id="cd-driveId" {...register('driveId')}>
+            {(driveChoices.length > 0 ? driveChoices : [{ id: c.driveId, displayName: c.driveDisplayName }]).map((d) => (
+              <option key={d.id} value={d.id}>{d.displayName}</option>
             ))}
           </Select>
-          {roleLocked && <p className="text-xs text-muted-foreground">The role can only change before the candidate starts.</p>}
+          {started && <p className="text-xs text-muted-foreground">Started: can only move to another college's drive of the same round.</p>}
         </div>
       </div>
       {Object.keys(c.extra).length > 0 && (
@@ -282,7 +287,7 @@ export default function CandidateDetail() {
         <div>
           <h1 className="text-xl font-semibold text-foreground">{c.fullName}</h1>
           <p className="text-sm text-muted-foreground">
-            <span className="font-mono">{c.candidateCode}</span> · {c.jobRoleName} · <Badge variant="outline">{statusText(c.status)}</Badge>
+            <span className="font-mono">{c.candidateCode}</span> · {c.driveDisplayName}{c.jobProfileType === 'INTERNSHIP' && <> <Badge variant="secondary">Internship</Badge></>} · <Badge variant="outline">{statusText(c.status)}</Badge>
             {c.result && <> <ResultBadge result={c.result} /></>}
             {attempt && <> · attempt {statusText(attempt.status)}</>}
           </p>
@@ -301,13 +306,13 @@ export default function CandidateDetail() {
         </div>
       </div>
       {otherApplications.length > 0 && (
-        <section aria-label="Other applications" className="rounded-lg border border-border bg-card p-3 text-sm">
-          <h2 className="mb-1 font-medium">Other applications by this person</h2>
+        <section aria-label="Other entries" className="rounded-lg border border-border bg-card p-3 text-sm">
+          <h2 className="mb-1 font-medium">Other entries by this person</h2>
           <ul className="space-y-1">
             {otherApplications.map((o) => (
               <li key={o.id}>
                 <Link to={`/admin/candidates/${o.id}`} className="text-primary hover:underline">
-                  <span className="font-mono">{o.candidateCode}</span> · {o.jobRole.name}
+                  <span className="font-mono">{o.candidateCode}</span> · {o.driveDisplayName}
                 </Link>{' '}
                 <Badge variant="outline">{statusText(o.status)}</Badge> <ResultBadge result={o.result ?? null} />
               </li>

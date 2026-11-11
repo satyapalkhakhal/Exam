@@ -1,53 +1,53 @@
 // src/pages/admin/Roles.tsx
-// Why: Super Admin edits each role's exam settings (design §4): duration, start window,
-// instructions and the open switch; and adds, renames and deactivates roles (a deactivated
-// role keeps its candidates and results, it just drops out of HR's active list). Window times are typed and shown in IST and sent as
-// ISO UTC; the server enforces windowEnd > windowStart too, this just fails fast.
+// Why: Super Admin sets up hiring (spec 2026-11-10): job profiles (Placement or
+// Internship) -> rounds (duration, score weights, question lock; the question
+// bank is shared by every college) -> drives (one college + batch: window, open
+// switch, instructions). A deactivated job profile or drive keeps its
+// candidates and results; it only drops out of the active lists.
 
 import { useState } from 'react';
-import { Controller, useForm } from 'react-hook-form';
+import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import { Lock } from 'lucide-react';
+import { examAvailability, JOB_PROFILE_TYPES, JOB_PROFILE_TYPE_LABELS, type DriveDto, type ExamAvailability, type JobProfileType, type RoundDto } from '@exam/shared';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
-import { Textarea } from '@/components/ui/textarea';
+import { Select } from '@/components/ui/select';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { useRoles, useSaveRole, useUpdateSettings, type JobRole } from '@/api/admin/roles';
-import { examAvailability, type ExamAvailability } from '@exam/shared';
+import { DriveFormDialog } from '@/components/admin/DriveFormDialog';
+import { CopyQuestionsDialog } from '@/components/admin/CopyQuestionsDialog';
+import { useRoles, useSaveRole, type JobRole } from '@/api/admin/roles';
+import { useAddRound, useSaveDrive, useUpdateRound } from '@/api/admin/drives';
 import { WEIGHT_KEYS, parseWeights, weightsError, weightsSum } from '@/lib/aiEvaluation';
-import { formatIst, isoToIstInput, istInputToIso } from '@/lib/istTime';
+import { jobProfileLabel } from '@/lib/drivePicker';
+import { formatIst } from '@/lib/istTime';
 
-const schema = z
-  .object({
-    durationMinutes: z.number({ invalid_type_error: 'Enter minutes' }).int('Whole minutes').min(10, 'At least 10').max(240, 'At most 240'),
-    windowStart: z.string(),
-    windowEnd: z.string(),
-    instructions: z.string().max(10000, 'At most 10,000 characters'),
-    isOpen: z.boolean(),
-    weights: z.object({ exam: z.number(), x: z.number(), xii: z.number(), cpi: z.number() }),
-  })
-  .refine((v) => !weightsError(v.weights), { path: ['weights'], message: 'Fix the composite weights' })
-  .refine((v) => !v.windowStart || !v.windowEnd || v.windowEnd > v.windowStart, {
-    path: ['windowEnd'],
-    message: 'End must be after start',
-  });
-type Values = z.infer<typeof schema>;
+const AVAIL: Record<ExamAvailability, string> = {
+  OPEN: 'Open now',
+  NOT_OPEN: 'Closed',
+  BEFORE_WINDOW: 'Opens later',
+  AFTER_WINDOW: 'Window ended',
+};
 
-const nameSchema = z.object({ name: z.string().trim().min(1, 'Enter a role name').max(120, 'At most 120 characters') });
-type NameValues = z.infer<typeof nameSchema>;
+// ---- job profile: add / rename / type ----------------------------------------------
 
-/** Add (role === 'new') or rename a role. */
-function RoleNameDialog({ role, onClose }: { role: JobRole | 'new' | null; onClose: () => void }) {
+const roleSchema = z.object({
+  name: z.string().trim().min(1, 'Enter a job profile name').max(120, 'At most 120 characters'),
+  type: z.enum(JOB_PROFILE_TYPES),
+});
+type RoleValues = z.infer<typeof roleSchema>;
+
+function RoleDialog({ role, onClose }: { role: JobRole | 'new' | null; onClose: () => void }) {
   const save = useSaveRole();
   const existing = role !== null && role !== 'new' ? role : null;
-  const { register, handleSubmit, reset, formState: { errors } } = useForm<NameValues>({
-    resolver: zodResolver(nameSchema),
-    values: { name: existing?.name ?? '' },
+  const { register, handleSubmit, reset, formState: { errors } } = useForm<RoleValues>({
+    resolver: zodResolver(roleSchema),
+    values: { name: existing?.name ?? '', type: existing?.type ?? 'PLACEMENT' },
   });
   const close = () => {
     reset();
@@ -58,26 +58,37 @@ function RoleNameDialog({ role, onClose }: { role: JobRole | 'new' | null; onClo
     <Dialog open={role !== null} onOpenChange={(o) => !o && close()}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>{existing ? `Rename ${existing.name}` : 'Add role'}</DialogTitle>
+          <DialogTitle>{existing ? `Edit ${existing.name}` : 'Add job profile'}</DialogTitle>
           <DialogDescription>
-            {existing ? 'Candidates, questions and results stay with the role.' : 'The role starts closed, with default exam settings.'}
+            {existing ? 'Rounds, drives, questions and results stay with the job profile.' : 'Round 1 is created with it. Add a drive per college to run it.'}
           </DialogDescription>
         </DialogHeader>
         <form
           className="flex min-h-0 flex-1 flex-col"
           noValidate
           onSubmit={handleSubmit((v) => {
-            save.mutate(existing ? { id: existing.id, name: v.name } : { name: v.name }, { onSuccess: close });
+            save.mutate(existing ? { id: existing.id, name: v.name, type: v.type } : { name: v.name, type: v.type }, { onSuccess: close });
           })}
         >
-          <div className="space-y-1.5 px-6 pb-4">
-            <Label htmlFor="role-name">Role name</Label>
-            <Input id="role-name" autoComplete="off" error={errors.name?.message} {...register('name')} />
+          <div className="space-y-3 px-6 pb-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="role-name">Job profile name</Label>
+              <Input id="role-name" autoComplete="off" error={errors.name?.message} {...register('name')} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="role-type">Type</Label>
+              <Select id="role-type" {...register('type')}>
+                {JOB_PROFILE_TYPES.map((t) => (
+                  <option key={t} value={t}>{JOB_PROFILE_TYPE_LABELS[t]}</option>
+                ))}
+              </Select>
+              <p className="text-xs text-muted-foreground">Placement and internship are ranked separately. The same name can exist once for each.</p>
+            </div>
             {save.isError && <p role="alert" className="text-sm text-destructive">{save.error.message}</p>}
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={close}>Cancel</Button>
-            <Button type="submit" disabled={save.isPending}>{save.isPending ? 'Saving…' : existing ? 'Rename' : 'Add role'}</Button>
+            <Button type="submit" disabled={save.isPending}>{save.isPending ? 'Saving…' : existing ? 'Save' : 'Add job profile'}</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -85,27 +96,27 @@ function RoleNameDialog({ role, onClose }: { role: JobRole | 'new' | null; onClo
   );
 }
 
-const AVAIL: Record<ExamAvailability, string> = {
-  OPEN: 'Open now',
-  NOT_OPEN: 'Closed',
-  BEFORE_WINDOW: 'Opens later',
-  AFTER_WINDOW: 'Window ended',
-};
+// ---- round settings -------------------------------------------------------------------
 
-function SettingsDialog({ role, onClose }: { role: JobRole | null; onClose: () => void }) {
-  const save = useUpdateSettings();
-  const { register, control, handleSubmit, reset, watch, formState: { errors } } = useForm<Values>({
-    resolver: zodResolver(schema),
-    values: role
-      ? {
-          durationMinutes: role.settings.durationMinutes,
-          windowStart: isoToIstInput(role.settings.windowStart),
-          windowEnd: isoToIstInput(role.settings.windowEnd),
-          instructions: role.settings.instructions,
-          isOpen: role.settings.isOpen,
-          weights: { ...role.settings.weights },
-        }
-      : undefined,
+const roundSchema = z
+  .object({
+    name: z.string().trim().max(60, 'At most 60 characters'),
+    durationMinutes: z.number({ invalid_type_error: 'Enter minutes' }).int('Whole minutes').min(10, 'At least 10').max(240, 'At most 240'),
+    mcqNegativeMarks: z
+      .number({ invalid_type_error: 'Enter 0 for no negative marking' })
+      .min(0, 'At least 0')
+      .max(50, 'At most 50')
+      .refine((n) => Number.isInteger(n * 4), 'Use steps of 0.25'),
+    weights: z.object({ exam: z.number(), x: z.number(), xii: z.number(), cpi: z.number() }),
+  })
+  .refine((v) => !weightsError(v.weights), { path: ['weights'], message: 'Fix the composite weights' });
+type RoundValues = z.infer<typeof roundSchema>;
+
+function RoundDialog({ round, label, onClose }: { round: RoundDto | null; label: string; onClose: () => void }) {
+  const save = useUpdateRound();
+  const { register, handleSubmit, reset, watch, formState: { errors } } = useForm<RoundValues>({
+    resolver: zodResolver(roundSchema),
+    values: round ? { name: round.name ?? '', durationMinutes: round.durationMinutes, mcqNegativeMarks: round.mcqNegativeMarks, weights: { ...round.weights } } : undefined,
   });
   const weights = watch('weights');
   const wError = weights ? weightsError(weights) : null;
@@ -115,25 +126,24 @@ function SettingsDialog({ role, onClose }: { role: JobRole | null; onClose: () =
     onClose();
   };
   return (
-    <Dialog open={role !== null} onOpenChange={(o) => !o && close()}>
+    <Dialog open={round !== null} onOpenChange={(o) => !o && close()}>
       <DialogContent className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>Exam settings: {role?.name}</DialogTitle>
-          <DialogDescription>Times are in IST (Asia/Kolkata). Candidates can only start inside the window.</DialogDescription>
+          <DialogTitle>Round settings: {label}</DialogTitle>
+          <DialogDescription>The same for every college's drive of this round. Window and open switch are set per drive.</DialogDescription>
         </DialogHeader>
         <form
           className="flex min-h-0 flex-1 flex-col"
           noValidate
           onSubmit={handleSubmit((v) => {
-            if (!role) return;
+            if (!round) return;
             save.mutate(
               {
-                id: role.id,
+                id: round.id,
+                name: v.name.trim() || null,
                 durationMinutes: v.durationMinutes,
-                windowStart: istInputToIso(v.windowStart),
-                windowEnd: istInputToIso(v.windowEnd),
-                instructions: v.instructions,
-                isOpen: v.isOpen,
+                // Locked with the questions once candidates have started: never sent then.
+                ...(round.questionsLocked ? {} : { mcqNegativeMarks: v.mcqNegativeMarks }),
                 weights: parseWeights(v.weights),
               },
               { onSuccess: close },
@@ -141,34 +151,35 @@ function SettingsDialog({ role, onClose }: { role: JobRole | null; onClose: () =
           })}
         >
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-6 pb-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="rs-duration">Duration (minutes)</Label>
-              <Input id="rs-duration" type="number" min={10} max={240} error={errors.durationMinutes?.message} {...register('durationMinutes', { valueAsNumber: true })} />
-            </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label htmlFor="rs-start">Window start (IST)</Label>
-                <Input id="rs-start" type="datetime-local" error={errors.windowStart?.message} {...register('windowStart')} />
+                <Label htmlFor="rd-name">Label (optional)</Label>
+                <Input id="rd-name" placeholder="Aptitude" error={errors.name?.message} {...register('name')} />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="rs-end">Window end (IST)</Label>
-                <Input id="rs-end" type="datetime-local" error={errors.windowEnd?.message} {...register('windowEnd')} />
+                <Label htmlFor="rd-duration">Duration (minutes)</Label>
+                <Input id="rd-duration" type="number" min={10} max={240} error={errors.durationMinutes?.message} {...register('durationMinutes', { valueAsNumber: true })} />
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="rs-instr">Instructions shown before Start</Label>
-              <Textarea id="rs-instr" rows={8} {...register('instructions')} />
-              {errors.instructions && <p className="text-xs text-destructive">{errors.instructions.message}</p>}
-            </div>
-            <div className="flex items-center gap-3">
-              <Controller
-                control={control}
-                name="isOpen"
-                render={({ field }) => (
-                  <Switch id="rs-open" checked={field.value} onCheckedChange={field.onChange} aria-label="Exam open" />
-                )}
+              <Label htmlFor="rd-negative">Negative marking per wrong MCQ answer</Label>
+              <Input
+                id="rd-negative"
+                type="number"
+                min={0}
+                max={50}
+                step={0.25}
+                className="max-w-[10rem]"
+                disabled={round?.questionsLocked}
+                aria-describedby="rd-negative-note"
+                error={errors.mcqNegativeMarks?.message}
+                {...register('mcqNegativeMarks', { valueAsNumber: true })}
               />
-              <Label htmlFor="rs-open">Exam is open for this role</Label>
+              <p id="rd-negative-note" className="text-xs text-muted-foreground">
+                {round?.questionsLocked
+                  ? 'Locked because candidates have started this round. Unlock the questions to change it.'
+                  : 'Marks taken off for each wrong MCQ answer. 0 = no negative marking; unanswered questions never lose marks. It can’t be more than the smallest MCQ’s marks.'}
+              </p>
             </div>
             <fieldset className="space-y-2 rounded-lg border border-border p-3">
               <legend className="px-1 text-sm font-medium">Composite score weights (%)</legend>
@@ -178,12 +189,12 @@ function SettingsDialog({ role, onClose }: { role: JobRole | null; onClose: () =
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {WEIGHT_KEYS.map((k) => (
                   <div key={k} className="space-y-1.5">
-                    <Label htmlFor={`rs-w-${k}`}>{k === 'exam' ? 'Exam' : k === 'cpi' ? 'CPI' : k.toUpperCase()}</Label>
-                    <Input id={`rs-w-${k}`} type="number" min={0} max={100} step={1} aria-describedby="rs-w-sum" {...register(`weights.${k}`, { valueAsNumber: true })} />
+                    <Label htmlFor={`rd-w-${k}`}>{k === 'exam' ? 'Exam' : k === 'cpi' ? 'CPI' : k.toUpperCase()}</Label>
+                    <Input id={`rd-w-${k}`} type="number" min={0} max={100} step={1} aria-describedby="rd-w-sum" {...register(`weights.${k}`, { valueAsNumber: true })} />
                   </div>
                 ))}
               </div>
-              <p id="rs-w-sum" aria-live="polite" className={wError ? 'text-xs text-destructive' : 'text-xs text-muted-foreground'}>
+              <p id="rd-w-sum" aria-live="polite" className={wError ? 'text-xs text-destructive' : 'text-xs text-muted-foreground'}>
                 {weights ? `Total ${weightsSum(weights)} / 100` : ''}{wError ? `. ${wError}` : ''}
               </p>
             </fieldset>
@@ -191,7 +202,7 @@ function SettingsDialog({ role, onClose }: { role: JobRole | null; onClose: () =
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={close}>Cancel</Button>
-            <Button type="submit" disabled={save.isPending || Boolean(wError)}>{save.isPending ? 'Saving…' : 'Save settings'}</Button>
+            <Button type="submit" disabled={save.isPending || Boolean(wError)}>{save.isPending ? 'Saving…' : 'Save round'}</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -199,91 +210,184 @@ function SettingsDialog({ role, onClose }: { role: JobRole | null; onClose: () =
   );
 }
 
+// ---- one round: settings line + its drives --------------------------------------------
+
+interface RoundActions {
+  editRound: (round: RoundDto, label: string) => void;
+  copyInto: (round: RoundDto, label: string) => void;
+  addDrive: (round: RoundDto, label: string) => void;
+  editDrive: (drive: DriveDto, round: RoundDto, label: string) => void;
+}
+
+function RoundSection({ role, round, actions }: { role: JobRole; round: RoundDto; actions: RoundActions }) {
+  const toggle = useSaveDrive();
+  const label = `${jobProfileLabel(role)} · Round ${round.roundNumber}`;
+  const drives = round.drives ?? [];
+  const now = new Date();
+  return (
+    <section className="space-y-2 rounded-lg border border-border p-3" aria-label={label}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="font-medium">Round {round.roundNumber}{round.name ? ` · ${round.name}` : ''}</span>
+          <span className="text-muted-foreground">
+            {round.durationMinutes} min · {round.counts.questions} questions{round.mcqNegativeMarks > 0 ? ` · −${round.mcqNegativeMarks} per wrong MCQ` : ''}
+          </span>
+          {round.questionsLocked && (
+            <Badge variant="outline" className="gap-1"><Lock className="h-3 w-3" aria-hidden /> Questions locked</Badge>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" onClick={() => actions.editRound(round, label)}>Round settings</Button>
+          <Button size="sm" variant="outline" disabled={round.questionsLocked} onClick={() => actions.copyInto(round, label)}>Copy questions…</Button>
+          <Button size="sm" onClick={() => actions.addDrive(round, label)}>Add drive</Button>
+        </div>
+      </div>
+      {drives.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No drives yet. Add one per college (and batch) that takes this round.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>College</TableHead>
+                <TableHead>Batch</TableHead>
+                <TableHead>Window (IST)</TableHead>
+                <TableHead>Availability</TableHead>
+                <TableHead>Candidates</TableHead>
+                <TableHead className="w-48"><span className="sr-only">Actions</span></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {drives.map((d) => {
+                const avail = examAvailability(d, now);
+                return (
+                  <TableRow key={d.id}>
+                    <TableCell className="font-medium" title={d.college.name}>
+                      {d.college.shortCode} {!d.active && <Badge variant="outline">Inactive</Badge>}
+                    </TableCell>
+                    <TableCell>{d.batch}</TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {d.windowStart || d.windowEnd ? `${formatIst(d.windowStart)} to ${formatIst(d.windowEnd)}` : 'No window'}
+                    </TableCell>
+                    <TableCell><Badge variant={avail === 'OPEN' ? 'default' : 'outline'}>{AVAIL[avail]}</Badge></TableCell>
+                    <TableCell>{d.counts.candidates} ({d.counts.started} started)</TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-2">
+                        <Button size="sm" variant="outline" onClick={() => actions.editDrive(d, round, label)}>Edit</Button>
+                        <Button size="sm" variant="outline" disabled={toggle.isPending} onClick={() => toggle.mutate({ id: d.id, active: !d.active })}>
+                          {d.active ? 'Deactivate' : 'Activate'}
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+      {toggle.isError && <p role="alert" className="text-sm text-destructive">{toggle.error.message}</p>}
+    </section>
+  );
+}
+
+// ---- page ---------------------------------------------------------------------------------
+
+type DriveDialogState = { roundId: string; label: string; drive: DriveDto | null } | null;
+
 export default function Roles() {
   const { data, isPending, error } = useRoles();
-  const [editing, setEditing] = useState<JobRole | null>(null);
+  const toggle = useSaveRole();
+  const addRound = useAddRound();
   const [naming, setNaming] = useState<JobRole | 'new' | null>(null);
   const [toggling, setToggling] = useState<JobRole | null>(null);
-  const toggle = useSaveRole();
-  const now = new Date();
+  const [round, setRound] = useState<{ round: RoundDto; label: string } | null>(null);
+  const [copyTarget, setCopyTarget] = useState<{ roundId: string; label: string } | null>(null);
+  const [driveDialog, setDriveDialog] = useState<DriveDialogState>(null);
+  const [typeFilter, setTypeFilter] = useState<JobProfileType | ''>('');
+
+  const actions: RoundActions = {
+    editRound: (r, label) => setRound({ round: r, label }),
+    copyInto: (r, label) => setCopyTarget({ roundId: r.id, label }),
+    addDrive: (r, label) => setDriveDialog({ roundId: r.id, label, drive: null }),
+    editDrive: (d, r, label) => setDriveDialog({ roundId: r.id, label, drive: d }),
+  };
   const closeToggle = () => {
     toggle.reset();
     setToggling(null);
   };
+  const roles = (data ?? []).filter((r) => !typeFilter || r.type === typeFilter);
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-semibold text-foreground">Exam Settings</h1>
-        <Button size="sm" onClick={() => setNaming('new')}>Add role</Button>
+        <div>
+          <h1 className="text-xl font-semibold text-foreground">Job profiles & drives</h1>
+          <p className="text-sm text-muted-foreground">Questions and duration are set per round; each college's date and window per drive.</p>
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="w-40">
+            <Label htmlFor="jp-type" className="sr-only">Type</Label>
+            <Select id="jp-type" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value as JobProfileType | '')}>
+              <option value="">All types</option>
+              {JOB_PROFILE_TYPES.map((t) => <option key={t} value={t}>{JOB_PROFILE_TYPE_LABELS[t]}</option>)}
+            </Select>
+          </div>
+          <Button size="sm" onClick={() => setNaming('new')}>Add job profile</Button>
+        </div>
       </div>
       {error && <p className="text-sm text-destructive" role="alert">{error.message}</p>}
-      <div className="overflow-x-auto rounded-lg border border-border bg-card">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Role</TableHead>
-              <TableHead>Duration</TableHead>
-              <TableHead>Window (IST)</TableHead>
-              <TableHead>Availability</TableHead>
-              <TableHead>Questions</TableHead>
-              <TableHead>Candidates</TableHead>
-              <TableHead className="w-64"><span className="sr-only">Actions</span></TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {isPending && <TableRow><TableCell colSpan={7} className="text-muted-foreground">Loading…</TableCell></TableRow>}
-            {data?.map((r) => (
-              <TableRow key={r.id}>
-                <TableCell className="font-medium">
-                  {r.name} {!r.active && <Badge variant="outline">Inactive</Badge>}
-                </TableCell>
-                <TableCell>{r.settings.durationMinutes} min</TableCell>
-                <TableCell className="text-muted-foreground">
-                  {r.settings.windowStart || r.settings.windowEnd
-                    ? `${formatIst(r.settings.windowStart)} to ${formatIst(r.settings.windowEnd)}`
-                    : 'No window'}
-                </TableCell>
-                <TableCell>
-                  <Badge variant={examAvailability(r.settings, now) === 'OPEN' ? 'default' : 'outline'}>
-                    {AVAIL[examAvailability(r.settings, now)]}
-                  </Badge>
-                </TableCell>
-                <TableCell>{r.counts.questions}</TableCell>
-                <TableCell>{r.counts.candidates}</TableCell>
-                <TableCell>
-                  <div className="flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" onClick={() => setEditing(r)}>Edit</Button>
-                    <Button size="sm" variant="outline" onClick={() => setNaming(r)}>Rename</Button>
-                    {r.active ? (
-                      <Button size="sm" variant="outline" onClick={() => setToggling(r)}>Deactivate</Button>
-                    ) : (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={toggle.isPending}
-                        onClick={() => toggle.mutate({ id: r.id, active: true })}
-                      >
-                        Activate
-                      </Button>
-                    )}
-                  </div>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-      {toggle.isError && toggling === null && <p className="text-sm text-destructive" role="alert">{toggle.error.message}</p>}
-      <SettingsDialog role={editing} onClose={() => setEditing(null)} />
-      <RoleNameDialog role={naming} onClose={() => setNaming(null)} />
+      {isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
+      {data && roles.length === 0 && <p className="text-sm text-muted-foreground">No job profiles yet.</p>}
+
+      {roles.map((r) => (
+        <article key={r.id} className="space-y-3 rounded-lg border border-border bg-card p-4" aria-label={jobProfileLabel(r)}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-base font-semibold">{r.name}</h2>
+              <Badge variant={r.type === 'INTERNSHIP' ? 'secondary' : 'outline'}>{JOB_PROFILE_TYPE_LABELS[r.type]}</Badge>
+              {!r.active && <Badge variant="outline">Inactive</Badge>}
+              <span className="text-sm text-muted-foreground">{r.counts.candidates} candidates</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={() => setNaming(r)}>Edit</Button>
+              <Button size="sm" variant="outline" disabled={addRound.isPending} onClick={() => addRound.mutate({ jobRoleId: r.id })}>
+                Add round {r.rounds.length + 1}
+              </Button>
+              {r.active ? (
+                <Button size="sm" variant="outline" onClick={() => setToggling(r)}>Deactivate</Button>
+              ) : (
+                <Button size="sm" variant="outline" disabled={toggle.isPending} onClick={() => toggle.mutate({ id: r.id, active: true })}>Activate</Button>
+              )}
+            </div>
+          </div>
+          {[...r.rounds].sort((a, b) => a.roundNumber - b.roundNumber).map((round) => (
+            <RoundSection key={round.id} role={r} round={round} actions={actions} />
+          ))}
+        </article>
+      ))}
+      {(addRound.isError || (toggle.isError && toggling === null)) && (
+        <p className="text-sm text-destructive" role="alert">{(addRound.error ?? toggle.error)?.message}</p>
+      )}
+
+      <RoleDialog role={naming} onClose={() => setNaming(null)} />
+      <RoundDialog round={round?.round ?? null} label={round?.label ?? ''} onClose={() => setRound(null)} />
+      <CopyQuestionsDialog target={copyTarget} onClose={() => setCopyTarget(null)} />
+      <DriveFormDialog
+        open={driveDialog !== null}
+        roundId={driveDialog?.roundId ?? ''}
+        roundLabel={driveDialog?.label ?? ''}
+        drive={driveDialog?.drive ?? null}
+        onClose={() => setDriveDialog(null)}
+      />
       <ConfirmDialog
         open={toggling !== null}
         onOpenChange={(o) => !o && closeToggle()}
-        title={`Deactivate ${toggling?.name ?? 'role'}?`}
+        title={`Deactivate ${toggling?.name ?? 'job profile'}?`}
         description={
           <>
-            It drops out of the active role list. Its candidates, questions and results are kept, and you can activate it again.
-            Close the exam for this role in Edit if candidates must not start.
+            It drops out of the active list. Its rounds, drives, candidates and results are kept, and you can activate it again.
+            Close its drives if candidates must not start.
             {toggle.isError && <span className="mt-2 block text-destructive" role="alert">{toggle.error.message}</span>}
           </>
         }

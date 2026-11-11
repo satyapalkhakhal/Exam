@@ -8,6 +8,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router';
 import {
   LayoutDashboard, Users, FileQuestion, Settings, ClipboardCheck, Trophy, Mail, UserCog, Plug, ScrollText, LogOut, Menu, X,
   type LucideIcon,
+  School,
 } from 'lucide-react';
 import { AdminRole } from '@exam/shared';
 import { apiFetch } from '@/lib/api';
@@ -29,7 +30,8 @@ export const ADMIN_NAV: NavItem[] = [
   { label: 'Dashboard', to: '/admin', icon: LayoutDashboard, roles: ALL, end: true },
   { label: 'Candidates', to: '/admin/candidates', icon: Users, roles: SA },
   { label: 'Questions', to: '/admin/questions', icon: FileQuestion, roles: SA },
-  { label: 'Exam Settings', to: '/admin/settings', icon: Settings, roles: SA },
+  { label: 'Job profiles & drives', to: '/admin/settings', icon: Settings, roles: SA },
+  { label: 'Colleges', to: '/admin/colleges', icon: School, roles: SA },
   { label: 'Submissions', to: '/admin/submissions', icon: ClipboardCheck, roles: ALL },
   { label: 'Leaderboard', to: '/admin/leaderboard', icon: Trophy, roles: SA },
   { label: 'Email templates', to: '/admin/email-templates', icon: Mail, roles: SA },

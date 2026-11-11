@@ -39,3 +39,19 @@ test('demo data is 3 candidates and 2 questions for Backend Engineer', () => {
   assert.equal(seedData.demo.candidates.length, 3);
   assert.equal(seedData.demo.questions.length, 2);
 });
+
+test('demo data goes into a DEMO college drive, batch "Demo" (spec 2026-11-10)', () => {
+  assert.deepEqual(seedData.demo.college, { name: 'Demo College', shortCode: 'DEMO' });
+  assert.equal(seedData.demo.batch, 'Demo');
+});
+
+test('demo data adds 2 MCQs (4 different options, one correct) to Backend Engineer Round 1 (spec 2026-11-10 MCQ)', () => {
+  const mcqs = seedData.demo.mcqQuestions;
+  assert.equal(mcqs.length, 2);
+  for (const q of mcqs) {
+    assert.equal(q.options.length, 4);
+    assert.equal(new Set(q.options.map((o) => o.toLowerCase())).size, 4);
+    assert.ok(Number.isInteger(q.correctOption) && q.correctOption >= 0 && q.correctOption <= 3);
+    assert.ok(q.text.length >= 10);
+  }
+});

@@ -17,6 +17,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { LocationHelp } from '@/components/location/LocationHelp';
 import { useCandidateExam, useCandidateExams, useResumeExam, useStartExam } from '@/api/candidate/exam';
 import { ApiError } from '@/lib/api';
+import { examTitle } from '@/lib/submissionReceipt';
 import { currentUa } from '@/lib/browserInfo';
 import { examAvailability } from '@exam/shared';
 import { requestLocation, watchPermission } from '@/lib/geolocation';
@@ -25,6 +26,7 @@ import { useRecordLocation } from '@/api/candidate/location';
 import { formatIst } from '@/lib/istTime';
 import { createServerClock } from '@/lib/serverClock';
 import { examPaths } from '@/lib/examSections';
+import { negativeMarkingText } from '@/lib/examMcq';
 import { useCandidateAuth } from '@/stores/candidateAuth';
 
 const ANOTHER_EXAM_MESSAGE = 'You already have another exam in progress. Finish and submit it before starting this one.';
@@ -208,7 +210,7 @@ export default function CandidateExamDetail() {
               <dt className="text-muted-foreground">Candidate code</dt>
               <dd className="font-medium">{exam?.candidateCode ?? '…'}</dd>
               <dt className="text-muted-foreground">Role</dt>
-              <dd className="font-medium">{exam?.jobRole.name ?? '…'}</dd>
+              <dd className="font-medium">{exam ? examTitle(exam) : '…'}</dd>
               <dt className="text-muted-foreground">Duration</dt>
               <dd className="font-medium">{exam ? `${exam.durationMinutes} minutes` : '…'}</dd>
               <dt className="text-muted-foreground">Exam window</dt>
@@ -249,6 +251,9 @@ export default function CandidateExamDetail() {
               {RULES.map((r) => (
                 <li key={r}>{r}</li>
               ))}
+              {exam && negativeMarkingText(exam.mcqNegativeMarks) && (
+                <li className="font-medium text-foreground">{negativeMarkingText(exam.mcqNegativeMarks)}</li>
+              )}
             </ul>
           </CardContent>
         </Card>
@@ -272,7 +277,7 @@ export default function CandidateExamDetail() {
           {otherInProgress && (
             <p className="mt-1 text-sm">
               <Link to={examPaths.detail(otherInProgress.applicationId)} className="text-primary underline">
-                Go to your exam in progress ({otherInProgress.jobRole.name})
+                Go to your exam in progress ({examTitle(otherInProgress)})
               </Link>
             </p>
           )}

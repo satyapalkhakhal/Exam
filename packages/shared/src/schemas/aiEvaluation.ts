@@ -55,22 +55,23 @@ export type AiGradeOutput = z.infer<typeof AiGradeOutputSchema>;
 /** Either a whole role (only once its exam is over) or chosen submitted attempts. */
 export const AiRunStartSchema = z
   .object({
-    jobRoleId: uuid.optional(),
+    driveId: uuid.optional(),
     attemptIds: z.array(uuid).min(1).max(1_000).optional(),
     /** Re-grade questions that already have a DONE AI score. */
     force: z.boolean().optional(),
   })
-  .refine((v) => (v.jobRoleId ? 1 : 0) + (v.attemptIds ? 1 : 0) === 1, { message: 'Give either jobRoleId or attemptIds' });
+  .refine((v) => (v.driveId ? 1 : 0) + (v.attemptIds ? 1 : 0) === 1, { message: 'Give either driveId or attemptIds' });
 export type AiRunStartInput = z.infer<typeof AiRunStartSchema>;
 
-export const AiRunListQuerySchema = z.object({ jobRoleId: uuid.optional() });
+export const AiRunListQuerySchema = z.object({ driveId: uuid.optional() });
 export const AiRunIdParamsSchema = z.object({ runId: uuid });
 
 export type AiRunStatus = 'RUNNING' | 'DONE' | 'CANCELLED';
 
 export interface AiRunDto {
   id: string;
-  jobRole: { id: string; name: string } | null;
+  /** The whole drive graded; null for a run on chosen submissions. */
+  drive: { id: string; displayName: string } | null;
   model: string;
   promptVersion: string;
   status: AiRunStatus;
@@ -128,12 +129,12 @@ export interface AiAttemptSummaryDto {
 
 export const AiAcceptSchema = z
   .object({
-    jobRoleId: uuid.optional(),
+    driveId: uuid.optional(),
     attemptIds: z.array(uuid).min(1).max(1_000).optional(),
     /** Default true: skip scripts with AI concerns, LOW confidence or integrity flags. */
     onlyClean: z.boolean().default(true),
   })
-  .refine((v) => (v.jobRoleId ? 1 : 0) + (v.attemptIds ? 1 : 0) === 1, { message: 'Give either jobRoleId or attemptIds' });
+  .refine((v) => (v.driveId ? 1 : 0) + (v.attemptIds ? 1 : 0) === 1, { message: 'Give either driveId or attemptIds' });
 export type AiAcceptInput = z.input<typeof AiAcceptSchema>;
 
 export type AiAcceptSkipReason =

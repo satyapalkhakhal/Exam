@@ -2,7 +2,7 @@
 // Why: the rows of the candidate's submission receipt (who, what, when, how many answered, and
 // whether HR selected them for the next round). Pure so it is unit tested; never marks or answers.
 
-import type { CandidateSelection, ExamSummaryDto } from '@exam/shared';
+import type { CandidateSelection, ExamSummaryDto, JobProfileType } from '@exam/shared';
 import { formatIst } from '@/lib/istTime';
 
 export interface ReceiptCandidate {
@@ -10,9 +10,21 @@ export interface ReceiptCandidate {
   email: string;
   candidateCode: string;
   jobRole: { name: string };
+  /** Spec 2026-11-10: internships are labelled; the round shows only when the job profile has several. */
+  jobProfileType?: JobProfileType;
+  roundNumber?: number | null;
   selectedForNextRound: CandidateSelection;
   /** Other candidates who started within 100 m and ±2 h; null when no start location was shared. */
   nearbyCount: number | null;
+}
+
+/**
+ * How a candidate sees an exam's name: "Quant Analyst", "Quant Analyst (Internship)",
+ * "Quant Analyst · Round 2". The college is never shown to candidates.
+ */
+export function examTitle(e: { jobRole: { name: string }; jobProfileType?: JobProfileType; roundNumber?: number | null }): string {
+  const name = e.jobProfileType === 'INTERNSHIP' ? `${e.jobRole.name} (Internship)` : e.jobRole.name;
+  return e.roundNumber ? `${name} · Round ${e.roundNumber}` : name;
 }
 
 const SELECTION_LABEL: Record<CandidateSelection, string> = { YES: 'Yes', NO: 'No', AWAITED: 'Result awaited' };
@@ -45,7 +57,7 @@ export function receiptRows(c: ReceiptCandidate, s: ExamSummaryDto): { label: st
     { label: 'Name', value: c.fullName },
     { label: 'Email', value: c.email },
     { label: 'Exam code', value: c.candidateCode },
-    { label: 'Job profile', value: c.jobRole.name },
+    { label: 'Job profile', value: examTitle(c) },
     { label: 'Started at', value: formatIst(s.startedAt) },
     { label: 'Submitted at', value: formatIst(s.submittedAt) },
     { label: 'Time taken', value: timeTaken(s.startedAt, s.submittedAt) },

@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { env } from '../../src/infrastructure/config/env.js';
 import { prisma } from '../../src/infrastructure/db/prisma.js';
-import { createCandidate } from './helpers.js';
+import { createCandidate, createDrive } from './helpers.js';
 
 const MIGRATION = path.resolve(import.meta.dirname, '../../prisma/migrations/20261105091000_candidate_result/migration.sql');
 const RUN = crypto.randomBytes(3).toString('hex');
@@ -26,10 +26,12 @@ function backfillSql(): string[] {
 }
 
 let roleId = '';
+let driveId = '';
 
 before(async () => {
   assert.match(env.DATABASE_URL, /\/exam_test(\?|$)/);
   roleId = (await prisma.jobRole.create({ data: { name: `Backfill ${RUN}` } })).id;
+  driveId = (await createDrive(roleId)).driveId;
 });
 
 after(async () => {
@@ -38,7 +40,7 @@ after(async () => {
 
 test('back-fill SQL moves decided statuses into result', async () => {
   const admin = await prisma.adminUser.create({ data: { email: `bf-${RUN}@x.test`, name: 'BF', passwordHash: 'x', role: 'SUPER_ADMIN' } });
-  const base = (key: string) => ({ candidateCode: `BF-${RUN}-${key}`, fullName: `BF ${key}`, email: `bf-${key}-${RUN}@x.test`, jobRoleId: roleId });
+  const base = (key: string) => ({ candidateCode: `BF-${RUN}-${key}`, fullName: `BF ${key}`, email: `bf-${key}-${RUN}@x.test`, jobRoleId: roleId, driveId });
   const shortlisted = await createCandidate({ ...base('s'), status: 'SHORTLISTED' });
   const rejected = await createCandidate({ ...base('r'), status: 'REJECTED' });
   const evaluated = await createCandidate({ ...base('e'), status: 'EVALUATED' });

@@ -4,7 +4,7 @@
 // run inside `transaction`, whose methods take the row locks the service
 // relies on:
 // - start locks the candidate account row (one exam at a time per person),
-//   then the role's exam_settings row, then the application's candidate row, so
+//   then the round's exam_rounds row, then the application's candidate row, so
 //   two starts (or a start and a role change) serialise;
 // - a save holds the attempt FOR SHARE and its answer FOR UPDATE, so two saves
 //   of one answer apply in order and a submit cannot interleave with a save;
@@ -15,6 +15,9 @@
 import crypto from 'node:crypto';
 import { prisma } from '../../infrastructure/db/prisma.js';
 import type { Prisma } from '../../generated/prisma/client.js';
+import type { ActiveQuestion, AttemptQuestionInput } from './mcqShuffle.js';
+import { mcqSubtotal } from './mcqMarks.js';
+import { percentageOf } from '../evaluation/marks.js';
 
 type Tx = Prisma.TransactionClient;
 export type CandidateStatusValue = 'NOT_STARTED' | 'IN_PROGRESS' | 'SUBMITTED' | 'AUTO_SUBMITTED' | 'EVALUATED' | 'SHORTLISTED' | 'REJECTED';
@@ -57,26 +60,38 @@ const activityData = (e: ActivityEntry): Prisma.ActivityLogCreateManyInput => ({
 function txMethods(tx: Tx) {
   return {
     /**
-     * Holds the role's exam_settings row so question writes (which take it FOR
+     * Holds the round's exam_rounds row so question writes (which take it FOR
      * UPDATE in the questions module) serialise with starts, and makes sure
-     * questions_locked is true. Once the role is locked, starts only take it FOR
-     * SHARE and run in parallel; only the first start(s) of a role take the
-     * exclusive lock, through the guarded UPDATE, and never upgrade a share lock
-     * they already hold. Returns false when the role has no settings row.
+     * questions_locked is true. The round is shared by every college's drive,
+     * so the first start in any drive locks the questions for all of them.
+     * Once locked, starts only take it FOR SHARE and run in parallel; only the
+     * first start(s) take the exclusive lock, through the guarded UPDATE, and
+     * never upgrade a share lock they already hold. False when the round does
+     * not exist.
      */
-    async holdRoleLocked(jobRoleId: string): Promise<boolean> {
+    /**
+     * Locks the round's questions (first start) or holds the lock (later starts), and returns
+     * the negative marking read while the row is held: the value this attempt must freeze
+     * (review I1: never the settings read before the transaction). Null when the round is gone.
+     */
+    async holdRoundLocked(roundId: string): Promise<{ mcqNegativeMarks: number } | null> {
       const plain = await tx.$queryRaw<{ questions_locked: boolean }[]>`
-        SELECT questions_locked FROM exam_settings WHERE job_role_id = ${jobRoleId}::uuid`;
-      if (!plain[0]) return false;
+        SELECT questions_locked FROM exam_rounds WHERE id = ${roundId}::uuid`;
+      if (!plain[0]) return null;
+      type Held = { questions_locked: boolean; mcq_negative_marks: Prisma.Decimal };
       if (plain[0].questions_locked) {
-        const held = await tx.$queryRaw<{ questions_locked: boolean }[]>`
-          SELECT questions_locked FROM exam_settings WHERE job_role_id = ${jobRoleId}::uuid FOR SHARE`;
-        if (held[0]?.questions_locked) return true;
+        const held = await tx.$queryRaw<Held[]>`
+          SELECT questions_locked, mcq_negative_marks FROM exam_rounds WHERE id = ${roundId}::uuid FOR SHARE`;
+        if (held[0]?.questions_locked) return { mcqNegativeMarks: Number(held[0].mcq_negative_marks) };
       }
       await tx.$executeRaw`
-        UPDATE exam_settings SET questions_locked = true, updated_at = now()
-        WHERE job_role_id = ${jobRoleId}::uuid AND questions_locked = false`;
-      return true;
+        UPDATE exam_rounds SET questions_locked = true, updated_at = now()
+        WHERE id = ${roundId}::uuid AND questions_locked = false`;
+      // Held to commit (our own updated row, or a share lock if another start locked it first):
+      // a negative-marking change takes FOR UPDATE on this row, so it waits and then sees "locked".
+      const held = await tx.$queryRaw<Held[]>`
+        SELECT questions_locked, mcq_negative_marks FROM exam_rounds WHERE id = ${roundId}::uuid FOR SHARE`;
+      return held[0] ? { mcqNegativeMarks: Number(held[0].mcq_negative_marks) } : null;
     },
 
     /** The account row FOR UPDATE: a person's starts serialise here. False when it does not exist. */
@@ -95,22 +110,24 @@ function txMethods(tx: Tx) {
     },
 
     async lockCandidate(id: string) {
-      const rows = await tx.$queryRaw<{ job_role_id: string; status: CandidateStatusValue; eligible: boolean }[]>`
-        SELECT job_role_id::text, status::text AS status, eligible FROM candidates WHERE id = ${id}::uuid FOR UPDATE`;
+      const rows = await tx.$queryRaw<{ drive_id: string; round_id: string; status: CandidateStatusValue; eligible: boolean }[]>`
+        SELECT c.drive_id::text, d.round_id::text, c.status::text AS status, c.eligible
+        FROM candidates c JOIN drives d ON d.id = c.drive_id
+        WHERE c.id = ${id}::uuid FOR UPDATE OF c`;
       const r = rows[0];
-      return r ? { jobRoleId: r.job_role_id, status: r.status, eligible: r.eligible } : null;
+      return r ? { driveId: r.drive_id, roundId: r.round_id, status: r.status, eligible: r.eligible } : null;
     },
 
     findLiveAttempt: (candidateId: string): Promise<LiveAttempt | null> =>
       tx.examAttempt.findFirst({ where: { candidateId, status: { not: 'RESET' } }, select: liveSelect }),
 
-    async activeQuestions(jobRoleId: string) {
+    async activeQuestions(roundId: string): Promise<ActiveQuestion[]> {
       const rows = await tx.question.findMany({
-        where: { jobRoleId, active: true },
+        where: { roundId, active: true },
         orderBy: [{ displayOrder: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-        select: { id: true, text: true, maxMarks: true },
+        select: { id: true, type: true, text: true, maxMarks: true, options: true, correctOption: true },
       });
-      return rows.map((q) => ({ id: q.id, text: q.text, maxMarks: Number(q.maxMarks) }));
+      return rows.map((q) => ({ id: q.id, type: q.type, text: q.text, maxMarks: Number(q.maxMarks), options: q.options, correctOption: q.correctOption }));
     },
 
     /** Creates the attempt, its question snapshots and one empty answer per question. */
@@ -121,9 +138,13 @@ function txMethods(tx: Tx) {
       sessionId: string;
       ip: string;
       userAgent: string;
-      questions: { id: string; text: string; maxMarks: number }[];
+      /** Built by buildAttemptQuestions: MCQs first (shuffled), written after. */
+      questions: AttemptQuestionInput[];
+      /** The round's negative marking at start, copied onto every MCQ. */
+      negativeMarks: number;
     }): Promise<string> {
       const maxMarks = input.questions.reduce((s, q) => s + q.maxMarks, 0);
+      const mcqMaxMarks = input.questions.filter((q) => q.type === 'MCQ').reduce((s, q) => s + q.maxMarks, 0);
       const attempt = await tx.examAttempt.create({
         data: {
           candidateId: input.candidateId,
@@ -134,16 +155,21 @@ function txMethods(tx: Tx) {
           startIp: input.ip,
           userAgent: input.userAgent,
           maxMarks,
+          mcqMaxMarks,
         },
         select: { id: true },
       });
       const aqs = input.questions.map((q, i) => ({
         id: crypto.randomUUID(),
         attemptId: attempt.id,
-        questionId: q.id,
+        questionId: q.questionId,
         order: i + 1,
+        typeSnapshot: q.type,
         textSnapshot: q.text,
         maxMarksSnapshot: q.maxMarks,
+        optionsSnapshot: q.options,
+        correctSnapshot: q.correct,
+        negativeMarksSnapshot: q.type === 'MCQ' ? input.negativeMarks : 0,
       }));
       await tx.attemptQuestion.createMany({ data: aqs });
       await tx.answer.createMany({ data: aqs.map((aq) => ({ attemptQuestionId: aq.id, lastSavedAt: input.startedAt })) });
@@ -175,9 +201,9 @@ function txMethods(tx: Tx) {
     /** The attempt (FOR SHARE) and the answer (FOR UPDATE) behind one attempt question. */
     async lockForSave(attemptQuestionId: string) {
       const attempts = await tx.$queryRaw<
-        { id: string; candidate_id: string; status: AttemptStatusValue; ends_at: Date; active_session_id: string }[]
+        { id: string; candidate_id: string; status: AttemptStatusValue; ends_at: Date; active_session_id: string; question_type: 'WRITTEN' | 'MCQ' }[]
       >`
-        SELECT a.id::text, a.candidate_id::text, a.status::text AS status, a.ends_at, a.active_session_id
+        SELECT a.id::text, a.candidate_id::text, a.status::text AS status, a.ends_at, a.active_session_id, q.type_snapshot::text AS question_type
         FROM exam_attempts a JOIN attempt_questions q ON q.attempt_id = a.id
         WHERE q.id = ${attemptQuestionId}::uuid
         FOR SHARE OF a`;
@@ -189,6 +215,7 @@ function txMethods(tx: Tx) {
       if (!ans) return null;
       return {
         attempt: { id: a.id, candidateId: a.candidate_id, status: a.status, endsAt: a.ends_at, activeSessionId: a.active_session_id },
+        questionType: a.question_type,
         answer: { id: ans.id, text: ans.text, clientSeq: ans.client_seq },
       };
     },
@@ -207,6 +234,20 @@ function txMethods(tx: Tx) {
           ...(data.markedForReview !== undefined ? { markedForReview: data.markedForReview } : {}),
           ...(data.visited !== undefined ? { visited: data.visited } : {}),
           ...(data.flagged ? { bulkInsertFlags: { increment: 1 } } : {}),
+        },
+      });
+    },
+
+    /** An MCQ choice (null clears it); no versions, no paste checks. */
+    async updateChoice(answerId: string, data: { selectedOption: number | null; clientSeq: number; savedAt: Date; markedForReview?: boolean; visited?: boolean }) {
+      await tx.answer.update({
+        where: { id: answerId },
+        data: {
+          selectedOption: data.selectedOption,
+          clientSeq: data.clientSeq,
+          lastSavedAt: data.savedAt,
+          ...(data.markedForReview !== undefined ? { markedForReview: data.markedForReview } : {}),
+          ...(data.visited !== undefined ? { visited: data.visited } : {}),
         },
       });
     },
@@ -230,10 +271,56 @@ function txMethods(tx: Tx) {
       return tx.examAttempt.findUnique({ where: { id: attemptId }, select: liveSelect });
     },
 
+    /**
+     * Auto-marks the attempt's MCQs at submit / auto-submit (same transaction as
+     * finish): each MCQ's auto mark and the attempt's MCQ subtotal. An attempt with
+     * no written questions is also evaluated here (no evaluator): evaluation
+     * SUBMITTED by nobody, totals (floored at 0), candidate EVALUATED with history.
+     */
+    async markMcqs(attemptId: string, candidateId: string, at: Date): Promise<{ mcqMarks: number; mcqMaxMarks: number; autoEvaluated: boolean }> {
+      const qs = await tx.attemptQuestion.findMany({
+        where: { attemptId },
+        select: { id: true, typeSnapshot: true, maxMarksSnapshot: true, correctSnapshot: true, negativeMarksSnapshot: true, answer: { select: { selectedOption: true } } },
+      });
+      const mcqs = qs.filter((q) => q.typeSnapshot === 'MCQ');
+      const sub = mcqSubtotal(
+        mcqs.map((q) => ({
+          maxMarks: Number(q.maxMarksSnapshot),
+          correct: q.correctSnapshot ?? -1,
+          negative: Number(q.negativeMarksSnapshot),
+          selected: q.answer?.selectedOption ?? null,
+        })),
+      );
+      for (const [i, q] of mcqs.entries()) await tx.attemptQuestion.update({ where: { id: q.id }, data: { autoMarks: sub.marks[i]! } });
+      const hasWritten = qs.some((q) => q.typeSnapshot === 'WRITTEN');
+      if (mcqs.length > 0) {
+        await tx.examAttempt.update({ where: { id: attemptId }, data: { mcqMarks: sub.total, mcqMaxMarks: sub.max } });
+      }
+      if (hasWritten || mcqs.length === 0) return { mcqMarks: sub.total, mcqMaxMarks: sub.max, autoEvaluated: false };
+      const totalMarks = Math.max(0, sub.total);
+      const attempt = await tx.examAttempt.update({
+        where: { id: attemptId },
+        data: { totalMarks, percentage: percentageOf(totalMarks, sub.max) },
+        select: { maxMarks: true },
+      });
+      void attempt;
+      await tx.attemptEvaluation.upsert({
+        where: { attemptId },
+        create: { attemptId, status: 'SUBMITTED', submittedAt: at },
+        update: { status: 'SUBMITTED', submittedAt: at, evaluatorId: null, lockedById: null, lockedAt: null },
+      });
+      const c = await tx.candidate.findUniqueOrThrow({ where: { id: candidateId }, select: { status: true, result: true } });
+      await tx.candidate.update({ where: { id: candidateId }, data: { status: 'EVALUATED' } });
+      await tx.candidateStatusHistory.create({
+        data: { candidateId, fromStatus: c.status, toStatus: 'EVALUATED', fromResult: c.result, toResult: c.result, comment: 'Auto-marked (MCQ only)' },
+      });
+      return { mcqMarks: sub.total, mcqMaxMarks: sub.max, autoEvaluated: true };
+    },
+
     /** The "plus the final one" version (design §7.5): every saved answer whose latest version differs. */
     async writeFinalVersions(attemptId: string, now: Date) {
       const answers = await tx.answer.findMany({
-        where: { attemptQuestion: { attemptId }, clientSeq: { gt: 0 } },
+        where: { attemptQuestion: { attemptId, typeSnapshot: 'WRITTEN' }, clientSeq: { gt: 0 } },
         select: { id: true, text: true, wordCount: true, versions: { orderBy: { savedAt: 'desc' }, take: 1, select: { text: true } } },
       });
       const missing = answers.filter((a) => a.versions[0]?.text !== a.text);
@@ -258,8 +345,8 @@ export const examRepository = {
   findCandidate(id: string) {
     return prisma.candidate.findUnique({
       where: { id },
-      select: { id: true, accountId: true, eligible: true, locationExempt: true, jobRoleId: true, status: true },
-    });
+      select: { id: true, accountId: true, eligible: true, locationExempt: true, driveId: true, status: true, drive: { select: { roundId: true } } },
+    }).then((r) => (r ? { id: r.id, accountId: r.accountId, eligible: r.eligible, locationExempt: r.locationExempt, driveId: r.driveId, roundId: r.drive.roundId, status: r.status } : null));
   },
 
   /** True when the application exists, is eligible and belongs to the account. */
@@ -272,7 +359,7 @@ export const examRepository = {
   async listApplications(accountId: string, applicationId?: string) {
     const rows = await prisma.candidate.findMany({
       where: { accountId, eligible: true, ...(applicationId ? { id: applicationId } : {}) },
-      orderBy: [{ jobRole: { name: 'asc' } }, { id: 'asc' }],
+      orderBy: [{ jobRole: { name: 'asc' } }, { drive: { round: { roundNumber: 'asc' } } }, { id: 'asc' }],
       select: {
         id: true,
         candidateCode: true,
@@ -280,6 +367,7 @@ export const examRepository = {
         result: true,
         locationExempt: true,
         jobRole: { select: { id: true, name: true } },
+        driveId: true,
         attempts: {
           where: { status: { not: 'RESET' } },
           take: 1,
@@ -290,7 +378,7 @@ export const examRepository = {
     const attemptIds = rows.flatMap((r) => r.attempts.map((a) => a.id));
     const counts = attemptIds.length
       ? await prisma.$queryRaw<{ attempt_id: string; total: bigint; answered: bigint }[]>`
-          SELECT q.attempt_id::text AS attempt_id, COUNT(*) AS total, COUNT(*) FILTER (WHERE a.word_count > 0) AS answered
+          SELECT q.attempt_id::text AS attempt_id, COUNT(*) AS total, COUNT(*) FILTER (WHERE a.word_count > 0 OR a.selected_option IS NOT NULL) AS answered
           FROM attempt_questions q LEFT JOIN answers a ON a.attempt_question_id = q.id
           WHERE q.attempt_id = ANY(${attemptIds}::uuid[])
           GROUP BY q.attempt_id`
@@ -305,6 +393,7 @@ export const examRepository = {
         result: r.result,
         locationExempt: r.locationExempt,
         jobRole: r.jobRole,
+        driveId: r.driveId,
         attempt: a ? { ...a, ...(byAttempt.get(a.id) ?? { questionCount: 0, answeredCount: 0 }) } : null,
       };
     });
@@ -327,9 +416,12 @@ export const examRepository = {
           select: {
             id: true,
             order: true,
+            typeSnapshot: true,
             textSnapshot: true,
             maxMarksSnapshot: true,
-            answer: { select: { text: true, wordCount: true, clientSeq: true, markedForReview: true, visited: true, lastSavedAt: true } },
+            optionsSnapshot: true,
+            negativeMarksSnapshot: true,
+            answer: { select: { text: true, wordCount: true, selectedOption: true, clientSeq: true, markedForReview: true, visited: true, lastSavedAt: true } },
           },
         },
       },
@@ -340,7 +432,7 @@ export const examRepository = {
     const [attempt, questionCount, answeredCount] = await Promise.all([
       prisma.examAttempt.findUnique({ where: { id: attemptId }, select: { status: true, submitType: true, startedAt: true, submittedAt: true } }),
       prisma.attemptQuestion.count({ where: { attemptId } }),
-      prisma.answer.count({ where: { attemptQuestion: { attemptId }, wordCount: { gt: 0 } } }),
+      prisma.answer.count({ where: { attemptQuestion: { attemptId }, OR: [{ wordCount: { gt: 0 } }, { selectedOption: { not: null } }] } }),
     ]);
     return attempt ? { ...attempt, questionCount, answeredCount } : null;
   },

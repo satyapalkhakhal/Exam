@@ -1,12 +1,12 @@
 // modules/exam/index.ts
-// Barrel: the exam engine wired to Prisma, the role settings, the candidate
+// Barrel: the exam engine wired to Prisma, the drive/round settings, the candidate
 // location capture, the auto-submit queue and the beacon family binding.
 // `exam.getFlags` / `getFlagsBatch` / `getFlagCounts` (scored by flagScore)
 // are the review-flag views other modules (candidates list, evaluation) consume; autoSubmitAttempt and
 // listExpiredAttemptIds serve the BullMQ worker and the minute sweep.
 
 import { candidateAuthService } from '../candidateAuth/index.js';
-import { jobRoles } from '../jobRoles/index.js';
+import { driveExamSettings } from '../drives/index.js';
 import { enqueueAutoSubmit, removeAutoSubmit } from '../../infrastructure/queue/autoSubmit.queue.js';
 import { examRepository } from './exam.repository.js';
 import { createExamService } from './exam.service.js';
@@ -20,7 +20,7 @@ export { assessSave } from './integrity.js';
 
 export const examService = createExamService({
   repo: examRepository,
-  getSettings: (jobRoleId) => jobRoles.getSettings(jobRoleId),
+  getDriveSettings: driveExamSettings,
   recordStartLocation: async (auth, applicationId, location, client) => {
     await candidateAuthService.recordLocation(
       auth,

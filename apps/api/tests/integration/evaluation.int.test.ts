@@ -14,7 +14,7 @@ import type { Express } from 'express';
 import { env } from '../../src/infrastructure/config/env.js';
 import { prisma } from '../../src/infrastructure/db/prisma.js';
 import { getRedis } from '../../src/infrastructure/redis/redis.js';
-import { createCandidate } from './helpers.js';
+import { createCandidate, createDrive } from './helpers.js';
 import { createApp } from '../../src/app.js';
 import { closeEmailQueue, emailJobId, getEmailQueue } from '../../src/infrastructure/queue/email.queue.js';
 import { EMAIL_KEY } from '../../src/modules/messaging/index.js';
@@ -35,6 +35,13 @@ const agents = {} as Record<Who, request.Agent>;
 const adminIds = {} as Record<Who, string>;
 let roleId = '';
 let boardRoleId = '';
+/** jobRoleId -> its Round 1 and test drive (spec 2026-11-10). */
+const drv: Record<string, { roundId: string; driveId: string; collegeId: string }> = {};
+async function newRole(name: string, extra: { refApplicantCount?: number } = {}) {
+  const role = await prisma.jobRole.create({ data: { name, ...extra } });
+  drv[role.id] = await createDrive(role.id, { college: 'IITG', batch: 'Nov 2026' });
+  return role;
+}
 let questionIds: string[] = [];
 let attemptId = '';
 let candidateId = '';
@@ -64,6 +71,7 @@ async function submittedCandidate(key: string, jobRoleId: string, qs: { id: stri
     rollNumber: `R-${RUN}-${key}`,
     majorCpi: 8.5,
     jobRoleId,
+    driveId: drv[jobRoleId]!.driveId,
     status: 'SUBMITTED',
   });
   const a = await prisma.examAttempt.create({
@@ -101,13 +109,13 @@ before(async () => {
     const a = admins[who];
     adminIds[who] = (await prisma.adminUser.create({ data: { email: a.email, name: a.name, role: a.role, passwordHash: hash } })).id;
   }
-  const role = await prisma.jobRole.create({ data: { name: `Eval Role ${RUN}`, refApplicantCount: 40, examSetting: { create: {} } } });
+  const role = await newRole(`Eval Role ${RUN}`, { refApplicantCount: 40 });
   roleId = role.id;
   const q1 = await prisma.question.create({
-    data: { jobRoleId: roleId, text: 'Explain idempotency.', normalizedTextHash: `e1-${RUN}`, maxMarks: 10, evaluatorGuidance: 'Mentions retries', displayOrder: 1 },
+    data: { roundId: drv[roleId]!.roundId, text: 'Explain idempotency.', normalizedTextHash: `e1-${RUN}`, maxMarks: 10, evaluatorGuidance: 'Mentions retries', displayOrder: 1 },
   });
   const q2 = await prisma.question.create({
-    data: { jobRoleId: roleId, text: 'Explain backpressure.', normalizedTextHash: `e2-${RUN}`, maxMarks: 5, displayOrder: 2 },
+    data: { roundId: drv[roleId]!.roundId, text: 'Explain backpressure.', normalizedTextHash: `e2-${RUN}`, maxMarks: 5, displayOrder: 2 },
   });
   questionIds = [q1.id, q2.id];
   const qs = [
@@ -125,12 +133,12 @@ before(async () => {
   await prisma.candidateLoginLog.create({
     data: { candidateId, stage: 'EXAM_START', permission: 'GRANTED', latitude: 26.1, longitude: 91.7, ip: '198.51.100.20', userAgent: 'x', browser: 'x', os: 'x', deviceType: 'desktop' },
   });
-  await createCandidate({ candidateCode: `EV-${RUN}-ns`, fullName: 'Not Started', email: `ns-${RUN}@eval.int.test`, jobRoleId: roleId });
+  await createCandidate({ candidateCode: `EV-${RUN}-ns`, fullName: 'Not Started', email: `ns-${RUN}@eval.int.test`, jobRoleId: roleId, driveId: drv[roleId]!.driveId });
 
   // Leaderboard role: tied totals separated by submit time.
-  const bRole = await prisma.jobRole.create({ data: { name: `Eval Board ${RUN}`, examSetting: { create: {} } } });
+  const bRole = await newRole(`Eval Board ${RUN}`);
   boardRoleId = bRole.id;
-  const bq = await prisma.question.create({ data: { jobRoleId: boardRoleId, text: 'Board Q', normalizedTextHash: `b1-${RUN}`, maxMarks: 10 } });
+  const bq = await prisma.question.create({ data: { roundId: drv[boardRoleId]!.roundId, text: 'Board Q', normalizedTextHash: `b1-${RUN}`, maxMarks: 10 } });
   const base = Date.now() - 10 * 3_600_000;
   for (const [key, total, offsetMin] of [['late', 8, 30], ['early', 8, 10], ['top', 9, 60]] as const) {
     const s = await submittedCandidate(key, boardRoleId, [{ id: bq.id, text: 'Board Q', max: 10 }], new Date(base + offsetMin * 60_000));
@@ -304,7 +312,7 @@ test('an Evaluator calling decision, reopen, leaderboard or exports is 403', asy
   const d = await agents.a.post(`/api/admin/candidates/${candidateId}/decision`).send({ decision: 'SHORTLISTED' });
   assert.equal(d.status, 403);
   assert.equal((await agents.a.post(`/api/admin/submissions/${attemptId}/reopen`).send({ reason: 'x' })).status, 403);
-  assert.equal((await agents.a.get(`/api/admin/leaderboard?jobRoleId=${roleId}`)).status, 403);
+  assert.equal((await agents.a.get(`/api/admin/leaderboard?driveId=${drv[roleId]!.driveId}`)).status, 403);
   assert.equal((await agents.a.get('/api/admin/exports/results.xlsx')).status, 403);
   assert.equal((await agents.a.get('/api/admin/exports/activity.xlsx')).status, 403);
   assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } })).status, 'EVALUATED');
@@ -328,7 +336,7 @@ test('SA decision: shortlist from EVALUATED sets result, keeps status, with hist
 });
 
 test('leaderboard: evaluated only, by total desc then submittedAt asc, with rank, PII and per-question marks', async () => {
-  const res = await agents.sa.get(`/api/admin/leaderboard?jobRoleId=${boardRoleId}`);
+  const res = await agents.sa.get(`/api/admin/leaderboard?driveId=${drv[boardRoleId]!.driveId}`);
   assert.equal(res.status, 200, JSON.stringify(res.body));
   const items = res.body.data.items as { rank: number; candidateId: string; fullName: string; totalMarks: number; percentage: number; questionMarks: unknown[]; result: string | null }[];
   assert.ok(items.every((i) => i.result === null));
@@ -367,29 +375,60 @@ test('SA reopen: evaluation back to DRAFT, candidate back to the submitted statu
   assert.equal(unlocked.body.error.details.lockedBy, null);
 });
 
-test('dashboard: per-role counts for any admin', async () => {
-  for (const who of ['sa', 'a'] as const) {
-    const res = await agents[who].get('/api/admin/dashboard');
-    assert.equal(res.status, 200, JSON.stringify(res.body));
-    const mine = res.body.data.roles.find((r: { jobRoleId: string }) => r.jobRoleId === roleId);
-    assert.deepEqual(mine, {
-      jobRoleId: roleId,
-      jobRoleName: `Eval Role ${RUN}`,
-      refApplicantCount: 40,
-      imported: 2,
-      notStarted: 1,
-      inProgress: 0,
-      submitted: 1,
-      autoSubmitted: 0,
-      evaluated: 0,
-      shortlisted: 0,
-      rejected: 0,
-      pendingEvaluation: 1,
-    });
-    const b = res.body.data.roles.find((r: { jobRoleId: string }) => r.jobRoleId === boardRoleId);
-    assert.equal(b.evaluated, 3);
-    assert.equal(b.pendingEvaluation, 1);
+test('dashboard: per-drive counts for a Super Admin; per-round rows without college for an Evaluator', async () => {
+  const sa = await agents.sa.get('/api/admin/dashboard');
+  assert.equal(sa.status, 200, JSON.stringify(sa.body));
+  const mine = sa.body.data.drives.find((r: { driveId: string }) => r.driveId === drv[roleId]!.driveId);
+  const college = await prisma.college.findUniqueOrThrow({ where: { id: drv[roleId]!.collegeId } });
+  assert.deepEqual(mine, {
+    driveId: drv[roleId]!.driveId,
+    collegeId: college.id,
+    collegeName: college.name,
+    roundId: drv[roleId]!.roundId,
+    // The script was reopened (DRAFT): no evaluated exam % yet.
+    examPctSum: 0,
+    examPctCount: 0,
+    displayName: `Eval Role ${RUN} · Round 1 · IITG · Nov 2026`,
+    jobRoleId: roleId,
+    jobRoleName: `Eval Role ${RUN}`,
+    jobProfileType: 'PLACEMENT',
+    roundNumber: 1,
+    collegeShortCode: 'IITG',
+    batch: 'Nov 2026',
+    refApplicantCount: 40,
+    imported: 2,
+    notStarted: 1,
+    inProgress: 0,
+    submitted: 1,
+    autoSubmitted: 0,
+    evaluated: 0,
+    shortlisted: 0,
+    rejected: 0,
+    pendingEvaluation: 1,
+  });
+  const b = sa.body.data.drives.find((r: { driveId: string }) => r.driveId === drv[boardRoleId]!.driveId);
+  assert.equal(b.evaluated, 3);
+  assert.equal(b.pendingEvaluation, 1);
+  // Evaluated exam %: the board's three submitted evaluations (80 + 80 + 90); a reset attempt never counts.
+  assert.deepEqual([b.examPctSum, b.examPctCount], [250, 3]);
+  const resetC = await createCandidate({ candidateCode: `EV-${RUN}-rst`, fullName: 'Reset One', email: `rst-${RUN}@eval.int.test`, mobile: mobile(), jobRoleId: boardRoleId, driveId: drv[boardRoleId]!.driveId, status: 'NOT_STARTED' });
+  const resetA = await prisma.examAttempt.create({ data: { candidateId: resetC.id, status: 'RESET', startedAt: new Date(), endsAt: new Date(), submittedAt: new Date(), activeSessionId: crypto.randomUUID(), startIp: '198.51.100.20', userAgent: 'x', maxMarks: 10, totalMarks: 10, percentage: 100 } });
+  await prisma.attemptEvaluation.create({ data: { attemptId: resetA.id, status: 'SUBMITTED', submittedAt: new Date() } });
+  const again = (await agents.sa.get('/api/admin/dashboard')).body.data.drives.find((r: { driveId: string }) => r.driveId === drv[boardRoleId]!.driveId);
+  assert.deepEqual([again.examPctSum, again.examPctCount], [250, 3]);
+
+  const ev = await agents.a.get('/api/admin/dashboard');
+  assert.equal(ev.status, 200, JSON.stringify(ev.body));
+  assert.ok(!/IITG|Nov 2026/.test(JSON.stringify(ev.body)), 'evaluators never see the college or batch');
+  assert.ok(ev.body.data.drives.every((r: { driveId: unknown; collegeShortCode: unknown; batch: unknown }) => r.driveId === null && r.collegeShortCode === null && r.batch === null));
+  for (const r of ev.body.data.drives as Record<string, unknown>[]) {
+    for (const k of ['collegeId', 'collegeName', 'roundId', 'examPctSum', 'examPctCount']) assert.ok(!(k in r), `evaluator row has ${k}`);
   }
+  const round = ev.body.data.drives.find((r: { jobRoleId: string }) => r.jobRoleId === roleId);
+  assert.deepEqual(
+    { d: round.driveId, n: round.displayName, c: round.collegeShortCode, bt: round.batch, i: round.imported },
+    { d: null, n: `Eval Role ${RUN} · Round 1`, c: null, bt: null, i: 2 },
+  );
 });
 
 async function workbook(res: request.Response) {
@@ -453,8 +492,8 @@ test('marking view for an unknown or not-submitted attempt is 404', async () => 
 // ---- final review fixes ---------------------------------------------------
 
 async function freshSubmission(key: string) {
-  const role = await prisma.jobRole.create({ data: { name: `Eval ${key} ${RUN}`, examSetting: { create: {} } } });
-  const q = await prisma.question.create({ data: { jobRoleId: role.id, text: `Q ${key}`, normalizedTextHash: `${key}-${RUN}`, maxMarks: 10 } });
+  const role = await newRole(`Eval ${key} ${RUN}`);
+  const q = await prisma.question.create({ data: { roundId: drv[role.id]!.roundId, text: `Q ${key}`, normalizedTextHash: `${key}-${RUN}`, maxMarks: 10 } });
   return submittedCandidate(key, role.id, [{ id: q.id, text: q.text, max: 10 }], new Date(Date.now() - 60_000));
 }
 
@@ -539,8 +578,8 @@ async function evaluatedSubmission(key: string, jobRoleId: string, qId: string) 
 const READY_EMAIL = { enabled: true, baseUrl: 'https://mail.example.test', sendMailToken: 'tok', fromAddress: 'noreply@example.test', fromName: 'X', replyTo: '' };
 
 test('bulk result: shortlists evaluated, skips others, queues emails for the decided only', async () => {
-  const role = await prisma.jobRole.create({ data: { name: `Eval Bulk ${RUN}`, examSetting: { create: {} } } });
-  const q = await prisma.question.create({ data: { jobRoleId: role.id, text: 'Bulk Q', normalizedTextHash: `bulk-${RUN}`, maxMarks: 10 } });
+  const role = await newRole(`Eval Bulk ${RUN}`);
+  const q = await prisma.question.create({ data: { roundId: drv[role.id]!.roundId, text: 'Bulk Q', normalizedTextHash: `bulk-${RUN}`, maxMarks: 10 } });
   const one = await evaluatedSubmission('bulk1', role.id, q.id);
   const two = await evaluatedSubmission('bulk2', role.id, q.id);
   const already = await evaluatedSubmission('bulk3', role.id, q.id);
@@ -598,7 +637,7 @@ test('bulk result: shortlists evaluated, skips others, queues emails for the dec
 
     // Dashboard: decided candidates count under their result, not under evaluated.
     const dash = await agents.sa.get('/api/admin/dashboard');
-    const mine = dash.body.data.roles.find((r: { jobRoleId: string }) => r.jobRoleId === role.id);
+    const mine = dash.body.data.drives.find((r: { jobRoleId: string }) => r.jobRoleId === role.id);
     assert.deepEqual({ evaluated: mine.evaluated, shortlisted: mine.shortlisted, rejected: mine.rejected, submitted: mine.submitted }, { evaluated: 0, shortlisted: 2, rejected: 1, submitted: 1 });
   } finally {
     await prisma.systemConfig.deleteMany({ where: { key: EMAIL_KEY } });
@@ -607,8 +646,8 @@ test('bulk result: shortlists evaluated, skips others, queues emails for the dec
 
 test('bulk result: an Evaluator is 403; without email nothing is queued', async () => {
   assert.equal((await agents.a.post('/api/admin/candidates/bulk/result').send({ candidateIds: [candidateId], decision: 'REJECTED', sendEmail: false })).status, 403);
-  const role = await prisma.jobRole.create({ data: { name: `Eval Bulk2 ${RUN}`, examSetting: { create: {} } } });
-  const q = await prisma.question.create({ data: { jobRoleId: role.id, text: 'Bulk Q', normalizedTextHash: `bulk2-${RUN}`, maxMarks: 10 } });
+  const role = await newRole(`Eval Bulk2 ${RUN}`);
+  const q = await prisma.question.create({ data: { roundId: drv[role.id]!.roundId, text: 'Bulk Q', normalizedTextHash: `bulk2-${RUN}`, maxMarks: 10 } });
   const s = await evaluatedSubmission('bulk5', role.id, q.id);
   const res = await agents.sa.post('/api/admin/candidates/bulk/result').send({ candidateIds: [s.candidateId], decision: 'REJECTED', sendEmail: false });
   assert.equal(res.status, 200, JSON.stringify(res.body));
@@ -631,7 +670,7 @@ test('Super Admin views mask the candidate email (submissions, marking, leaderbo
   assert.match(subs.body.data.items[0].email, masked);
   const view = await agents.sa.get(`/api/admin/submissions/${attemptId}`);
   assert.match(view.body.data.email, masked);
-  const board = await agents.sa.get(`/api/admin/leaderboard?jobRoleId=${boardRoleId}`);
+  const board = await agents.sa.get(`/api/admin/leaderboard?driveId=${drv[boardRoleId]!.driveId}`);
   assert.ok(board.body.data.items.length > 0);
   for (const row of board.body.data.items) assert.match(row.email, masked);
   assert.ok(!JSON.stringify([subs.body, view.body, board.body]).includes(full));
@@ -642,7 +681,7 @@ test('nearbyCount on submissions, marking view and leaderboard; results.xlsx has
   assert.equal(typeof subs.body.data.items[0].nearbyCount, 'number', 'm has a granted start location');
   const evView = await agents.a.get(`/api/admin/submissions/${attemptId}`);
   assert.equal(typeof evView.body.data.nearbyCount, 'number', 'evaluators see the count too (not PII)');
-  const board = await agents.sa.get(`/api/admin/leaderboard?jobRoleId=${boardRoleId}`);
+  const board = await agents.sa.get(`/api/admin/leaderboard?driveId=${drv[boardRoleId]!.driveId}`);
   for (const row of board.body.data.items) assert.equal(row.nearbyCount, null, 'board candidates have no start location');
   const res = await binary(agents.sa.get(`/api/admin/exports/results.xlsx?jobRoleId=${roleId}`));
   const ws = (await workbook(res)).worksheets[0]!;
@@ -650,4 +689,180 @@ test('nearbyCount on submissions, marking view and leaderboard; results.xlsx has
   assert.ok(header.includes('Nearby candidates'));
   const mRow = [2, 3].map((r) => ws.getRow(r)).find((row) => row.getCell(header.indexOf('Candidate code') + 1).value === `EV-${RUN}-m`)!;
   assert.equal(typeof mRow.getCell(header.indexOf('Nearby candidates') + 1).value, 'number');
+});
+
+
+// ---- drives (spec 2026-11-10) -----------------------------------------------------
+
+test('leaderboard rows only from the drive; results.xlsx has College/Batch/Type/Round', async () => {
+  const other = await createDrive(boardRoleId, { college: 'NITT', batch: 'Nov 2026' });
+  const bq = await prisma.question.findFirstOrThrow({ where: { roundId: drv[boardRoleId]!.roundId } });
+  const s = await submittedCandidate('nitt', boardRoleId, [{ id: bq.id, text: 'Board Q', max: 10 }], new Date(Date.now() - 3_600_000));
+  await prisma.candidate.update({ where: { id: s.candidateId }, data: { driveId: other.driveId, status: 'EVALUATED' } });
+  await prisma.questionEvaluation.create({ data: { attemptQuestionId: s.aqIds[0]!, marks: 10, evaluatorId: adminIds.sa } });
+  await prisma.attemptEvaluation.create({ data: { attemptId: s.attemptId, status: 'SUBMITTED', evaluatorId: adminIds.sa, submittedAt: new Date() } });
+  await prisma.examAttempt.update({ where: { id: s.attemptId }, data: { totalMarks: 10, percentage: 100 } });
+
+  const iitg = await agents.sa.get(`/api/admin/leaderboard?driveId=${drv[boardRoleId]!.driveId}`);
+  assert.equal(iitg.status, 200, JSON.stringify(iitg.body));
+  assert.ok(!iitg.body.data.items.some((i: { candidateCode: string }) => i.candidateCode === `EV-${RUN}-nitt`), 'NITT candidate not on IITG board');
+  const nitt = await agents.sa.get(`/api/admin/leaderboard?driveId=${other.driveId}`);
+  assert.deepEqual(nitt.body.data.items.map((i: { candidateCode: string; rank: number }) => [i.candidateCode, i.rank]), [[`EV-${RUN}-nitt`, 1]]);
+  assert.equal((await agents.sa.get('/api/admin/leaderboard')).status, 400, 'a drive is required');
+
+  const res = await binary(agents.sa.get(`/api/admin/exports/results.xlsx?driveId=${other.driveId}`));
+  assert.equal(res.status, 200);
+  const ws = (await workbook(res)).worksheets[0]!;
+  const header = (ws.getRow(1).values as unknown[]).slice(1);
+  for (const col of ['Job profile', 'Type', 'Round', 'College', 'Batch']) assert.ok(header.includes(col), col);
+  const row = ws.getRow(2);
+  assert.deepEqual(
+    ['Job profile', 'Type', 'Round', 'College', 'Batch'].map((c) => row.getCell(header.indexOf(c) + 1).value),
+    [`Eval Board ${RUN}`, 'Placement', 1, 'NITT', 'Nov 2026'],
+  );
+  // A job-profile export has one sheet per drive.
+  const both = await binary(agents.sa.get(`/api/admin/exports/results.xlsx?jobRoleId=${boardRoleId}`));
+  assert.equal((await workbook(both)).worksheets.length, 2);
+});
+
+test('evaluator ?collegeId= or ?driveId= → 403; ?roundId= works; Super Admin may filter by college', async () => {
+  const d = drv[roleId]!;
+  const byCollege = await agents.a.get(`/api/admin/submissions?collegeId=${d.collegeId}`);
+  assert.equal(byCollege.status, 403, JSON.stringify(byCollege.body));
+  assert.equal((await agents.a.get(`/api/admin/submissions?driveId=${d.driveId}`)).status, 403);
+  const byRound = await agents.a.get(`/api/admin/submissions?roundId=${d.roundId}`);
+  assert.equal(byRound.status, 200, JSON.stringify(byRound.body));
+  assert.ok(byRound.body.data.items.length > 0);
+  for (const item of byRound.body.data.items) {
+    assert.deepEqual([item.roundNumber, item.jobProfileType], [1, 'PLACEMENT']);
+    assert.equal('driveDisplayName' in item, false);
+  }
+  assert.ok(!/IITG|Nov 2026/.test(JSON.stringify(byRound.body)));
+  const sa = await agents.sa.get(`/api/admin/submissions?collegeId=${d.collegeId}`);
+  assert.equal(sa.status, 200);
+  assert.ok(sa.body.data.items.every((i: { driveDisplayName: string }) => i.driveDisplayName.includes('· IITG · Nov 2026')));
+});
+
+// ---- MCQ questions (spec 2026-11-10) ----------------------------------------
+
+/**
+ * A submitted attempt as the exam leaves it: MCQs first (auto-marked: +2 right,
+ * -0.5 wrong → 1.5 of 3), then one written question of 5 unless `written: false`.
+ * MCQ-only attempts arrive already evaluated (auto, evaluatorId null).
+ */
+async function mcqSubmission(key: string, opts: { written?: boolean } = {}) {
+  const role = await newRole(`Eval MCQ ${key} ${RUN}`);
+  const roundId = drv[role.id]!.roundId;
+  const m1 = await prisma.question.create({ data: { roundId, type: 'MCQ', text: `${key} prime?`, normalizedTextHash: `${key}-m1-${RUN}`, maxMarks: 2, options: ['4', '6', '7', '9'], correctOption: 2 } });
+  const m2 = await prisma.question.create({ data: { roundId, type: 'MCQ', text: `${key} even?`, normalizedTextHash: `${key}-m2-${RUN}`, maxMarks: 1, options: ['3', '5', '8', '11'], correctOption: 2 } });
+  const w = opts.written === false ? null : await prisma.question.create({ data: { roundId, text: `${key} explain.`, normalizedTextHash: `${key}-w-${RUN}`, maxMarks: 5 } });
+  const c = await createCandidate({
+    candidateCode: `EV-${RUN}-${key}`, fullName: `Cand ${key} ${RUN}`, email: `${key}-${RUN}@eval.int.test`, mobile: mobile(),
+    jobRoleId: role.id, driveId: drv[role.id]!.driveId, status: opts.written === false ? 'EVALUATED' : 'SUBMITTED',
+  });
+  const at = new Date(Date.now() - 60_000);
+  const a = await prisma.examAttempt.create({
+    data: {
+      candidateId: c.id, status: 'SUBMITTED', startedAt: new Date(at.getTime() - 30 * 60_000), endsAt: at, submittedAt: at, submitType: 'MANUAL',
+      activeSessionId: crypto.randomUUID(), startIp: '198.51.100.20', userAgent: 'int-test',
+      maxMarks: 3 + (w ? 5 : 0), mcqMarks: 1.5, mcqMaxMarks: 3,
+      ...(opts.written === false ? { totalMarks: 1.5, percentage: 50 } : {}),
+      questions: {
+        create: [
+          { questionId: m1.id, order: 1, typeSnapshot: 'MCQ', textSnapshot: m1.text, maxMarksSnapshot: 2, optionsSnapshot: ['9', '7', '6', '4'], correctSnapshot: 1, negativeMarksSnapshot: 0.5, autoMarks: 2,
+            answer: { create: { text: '', wordCount: 0, selectedOption: 1 } } },
+          { questionId: m2.id, order: 2, typeSnapshot: 'MCQ', textSnapshot: m2.text, maxMarksSnapshot: 1, optionsSnapshot: ['8', '3', '11', '5'], correctSnapshot: 0, negativeMarksSnapshot: 0.5, autoMarks: -0.5,
+            answer: { create: { text: '', wordCount: 0, selectedOption: 3 } } },
+          ...(w ? [{ questionId: w.id, order: 3, textSnapshot: w.text, maxMarksSnapshot: 5, answer: { create: { text: 'Because...', wordCount: 1 } } }] : []),
+        ],
+      },
+    },
+    include: { questions: { orderBy: { order: 'asc' } } },
+  });
+  if (opts.written === false) await prisma.attemptEvaluation.create({ data: { attemptId: a.id, status: 'SUBMITTED', submittedAt: at } });
+  return { candidateId: c.id, attemptId: a.id, aqIds: a.questions.map((q) => q.id), roleId: role.id, driveId: drv[role.id]!.driveId };
+}
+const saveOn = (who: Who, aid: string, items: { attemptQuestionId: string; marks: number | null }[], submit: boolean) =>
+  agents[who].put(`/api/admin/submissions/${aid}/evaluation`).send({ items, submit });
+
+test('evaluator submits written marks; total includes MCQ marks', async () => {
+  const s = await mcqSubmission('mcqw');
+  assert.equal((await agents.a.post(`/api/admin/submissions/${s.attemptId}/lock`)).status, 200);
+  const view = await agents.a.get(`/api/admin/submissions/${s.attemptId}`);
+  assert.equal(view.status, 200);
+  assert.equal(view.body.data.mcqMarks, 1.5);
+  assert.equal(view.body.data.mcqMaxMarks, 3);
+  const [m1, m2, w] = view.body.data.questions as { type: string; options: string[]; selectedOption: number | null; correctOption: number | null; autoMarks: number | null }[];
+  assert.deepEqual([m1!.type, m2!.type, w!.type], ['MCQ', 'MCQ', 'WRITTEN']);
+  assert.deepEqual(m1!.options, ['9', '7', '6', '4']);
+  assert.deepEqual({ sel: m2!.selectedOption, correct: m2!.correctOption, auto: m2!.autoMarks }, { sel: 3, correct: 0, auto: -0.5 });
+  // Only the written question needs marks to submit.
+  const res = await saveOn('a', s.attemptId, [{ attemptQuestionId: s.aqIds[2]!, marks: 4 }], true);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.deepEqual(res.body.data, { evaluationStatus: 'SUBMITTED', totalMarks: 5.5, maxMarks: 8, percentage: 68.75 });
+  const a = await prisma.examAttempt.findUniqueOrThrow({ where: { id: s.attemptId } });
+  assert.deepEqual([a.totalMarks?.toNumber(), a.maxMarks.toNumber(), a.mcqMarks?.toNumber()], [5.5, 8, 1.5]);
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: s.candidateId } })).status, 'EVALUATED');
+  // Reopen keeps the MCQ subtotal (it is not the evaluator's mark).
+  assert.equal((await agents.sa.post(`/api/admin/submissions/${s.attemptId}/reopen`).send({ reason: 'Recheck' })).status, 200);
+  assert.equal((await prisma.examAttempt.findUniqueOrThrow({ where: { id: s.attemptId } })).mcqMarks?.toNumber(), 1.5);
+});
+
+test('marks on an MCQ question are refused', async () => {
+  const s = await mcqSubmission('mcqx');
+  assert.equal((await agents.b.post(`/api/admin/submissions/${s.attemptId}/lock`)).status, 200);
+  const res = await saveOn('b', s.attemptId, [{ attemptQuestionId: s.aqIds[0]!, marks: 1 }], false);
+  assert.equal(res.status, 400, JSON.stringify(res.body));
+  assert.equal(res.body.error.code, 'MCQ_NOT_MARKABLE');
+  assert.equal(await prisma.questionEvaluation.count({ where: { attemptQuestionId: s.aqIds[0]! } }), 0);
+});
+
+test('reopen refused for MCQ-only attempt', async () => {
+  const s = await mcqSubmission('mcqo', { written: false });
+  const res = await agents.sa.post(`/api/admin/submissions/${s.attemptId}/reopen`).send({ reason: 'Recheck' });
+  assert.equal(res.status, 409, JSON.stringify(res.body));
+  assert.equal(res.body.error.message, 'Nothing to mark: this test is MCQ only. Reset the attempt instead.');
+  assert.equal((await prisma.attemptEvaluation.findUniqueOrThrow({ where: { attemptId: s.attemptId } })).status, 'SUBMITTED');
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: s.candidateId } })).status, 'EVALUATED');
+});
+
+test('MCQ drive: leaderboard row and results.xlsx carry the MCQ subtotal; per-question columns are written only', async () => {
+  const s = await mcqSubmission('mcqr');
+  assert.equal((await agents.a.post(`/api/admin/submissions/${s.attemptId}/lock`)).status, 200);
+  assert.equal((await saveOn('a', s.attemptId, [{ attemptQuestionId: s.aqIds[2]!, marks: 3 }], true)).status, 200);
+  const lb = await agents.sa.get(`/api/admin/leaderboard?driveId=${s.driveId}`);
+  assert.equal(lb.status, 200, JSON.stringify(lb.body));
+  const [row] = lb.body.data.items as { totalMarks: number; maxMarks: number; mcqMarks: number; mcqMaxMarks: number; questionMarks: { order: number; marks: number }[] }[];
+  assert.deepEqual([row!.totalMarks, row!.maxMarks, row!.mcqMarks, row!.mcqMaxMarks], [4.5, 8, 1.5, 3]);
+  assert.deepEqual(row!.questionMarks.map((q) => [q.order, q.marks]), [[3, 3]]);
+
+  const ws = (await workbook(await binary(agents.sa.get(`/api/admin/exports/results.xlsx?driveId=${s.driveId}`)))).worksheets[0]!;
+  const h = (ws.getRow(1).values as unknown[]).slice(1);
+  assert.deepEqual(h.filter((x) => /^Q\d/.test(String(x))), ['Q3 marks', 'Q3 AI marks']);
+  const cell = (col: string) => ws.getRow(2).getCell(h.indexOf(col) + 1).value;
+  assert.deepEqual(['Total', 'MCQ marks', 'MCQ max', 'MCQ correct', 'MCQ wrong', 'MCQ unanswered'].map(cell), [4.5, 1.5, 3, 1, 1, 0]);
+});
+
+test('submissions list filters by batch, round number and programme; an evaluator sending batch is 403', async () => {
+  const role = await prisma.jobRole.create({ data: { name: `Eval Filters ${RUN}`, type: 'INTERNSHIP' } });
+  const r1 = await createDrive(role.id, { college: 'IITG', batch: 'Nov 2026' });
+  const r2 = await createDrive(role.id, { roundNumber: 2, college: 'IITG', batch: 'Jan 2027' });
+  drv[role.id] = r1;
+  const q = await prisma.question.create({ data: { roundId: r1.roundId, text: 'Filter Q', normalizedTextHash: `fq-${RUN}`, maxMarks: 10 } });
+  const a = await submittedCandidate('flt1', role.id, [{ id: q.id, text: q.text, max: 10 }], new Date(Date.now() - 60_000));
+  drv[role.id] = r2;
+  const b = await submittedCandidate('flt2', role.id, [{ id: q.id, text: q.text, max: 10 }], new Date(Date.now() - 50_000));
+  const ids = async (qs: string, who: Who = 'sa') => {
+    const res = await agents[who].get(`/api/admin/submissions?jobRoleId=${role.id}&${qs}`);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    return (res.body.data.items as { attemptId: string }[]).map((x) => x.attemptId).sort();
+  };
+  assert.deepEqual(await ids('batch=Nov%202026'), [a.attemptId]);
+  assert.deepEqual(await ids('roundNumber=2'), [b.attemptId]);
+  assert.deepEqual(await ids('jobProfileType=INTERNSHIP'), [a.attemptId, b.attemptId].sort());
+  assert.deepEqual(await ids('jobProfileType=PLACEMENT'), []);
+  // Round number and programme are not college data: an Evaluator may use them; batch identifies the drive.
+  assert.deepEqual(await ids('roundNumber=1', 'a'), [a.attemptId]);
+  const blind = await agents.a.get(`/api/admin/submissions?batch=Nov%202026`);
+  assert.equal(blind.status, 403, JSON.stringify(blind.body));
 });

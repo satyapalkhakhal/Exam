@@ -5,6 +5,7 @@ export * from './schemas/integrations.js';
 export * from './schemas/admin.js';
 export * from './schemas/auth.js';
 export * from './examAvailability.js';
+export * from './schemas/drives.js';
 export * from './schemas/roles.js';
 export * from './schemas/questions.js';
 export * from './schemas/candidates.js';

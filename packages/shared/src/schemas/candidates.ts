@@ -4,6 +4,7 @@
 // form accept exactly the same mobile formats (design §6.1).
 
 import { z } from 'zod';
+import { JOB_PROFILE_TYPES, type JobProfileType } from './drives.js';
 
 /** Exam progress, the only statuses written since results moved to their own column. */
 export const CANDIDATE_PROGRESS_STATUSES = ['NOT_STARTED', 'IN_PROGRESS', 'SUBMITTED', 'AUTO_SUBMITTED', 'EVALUATED'] as const;
@@ -60,14 +61,14 @@ export const CandidateCreateSchema = z.object({
   majorCpi: cpi.optional(),
   discipline: optText.optional(),
   programme: optText.optional(),
-  jobRoleId: z.string().uuid(),
+  driveId: z.string().uuid(),
 });
 export type CandidateCreateInput = z.infer<typeof CandidateCreateSchema>;
 
 // Multipart form fields arrive as strings. updateExisting=true lets the import move
-// existing (not yet started) candidates to the chosen job profile and refresh their details.
+// existing (not yet started) candidates of the chosen drive and refresh their details.
 export const CandidateImportPreviewBodySchema = z.object({
-  jobRoleId: z.string().uuid(),
+  driveId: z.string().uuid(),
   updateExisting: z
     .enum(['true', 'false'])
     .optional()
@@ -86,26 +87,30 @@ export const CandidateUpdateSchema = z
     majorCpi: cpi.optional(),
     discipline: optText.optional(),
     programme: optText.optional(),
-    jobRoleId: z.string().uuid().optional(),
+    driveId: z.string().uuid().optional(),
   })
   .refine((v) => Object.values(v).some((x) => x !== undefined), { message: 'Nothing to update' });
 export type CandidateUpdateInput = z.infer<typeof CandidateUpdateSchema>;
 
-/** Move several candidates to one job role at once (only those who have not started). */
+/**
+ * Move several candidates into one drive. Within the same round anyone can move
+ * (the questions are the same); into another round only those who have not started.
+ */
 export const CANDIDATE_BULK_MAX = 1000;
-export const CandidateBulkJobRoleSchema = z.object({
+export const CandidateMoveToDriveSchema = z.object({
   candidateIds: z
     .array(z.string().uuid())
     .min(1, 'Select at least one candidate')
     .max(CANDIDATE_BULK_MAX, `At most ${CANDIDATE_BULK_MAX} candidates at a time`)
     .transform((ids) => [...new Set(ids)]),
-  jobRoleId: z.string().uuid(),
+  driveId: z.string().uuid(),
 });
-export type CandidateBulkJobRoleInput = z.infer<typeof CandidateBulkJobRoleSchema>;
+export type CandidateMoveToDriveInput = z.infer<typeof CandidateMoveToDriveSchema>;
 
-export interface CandidateBulkJobRoleResultDto {
+export type CandidateMoveSkipReason = 'STARTED' | 'SAME_DRIVE' | 'NOT_FOUND' | 'SAME_ROUND_BATCH';
+export interface CandidateMoveResultDto {
   updated: number;
-  skipped: { candidateId: string; candidateCode: string | null; fullName: string | null; reason: 'STARTED' | 'SAME_ROLE' | 'NOT_FOUND' | 'SAME_PERSON_HAS_ROLE' }[];
+  skipped: { candidateId: string; candidateCode: string | null; fullName: string | null; reason: CandidateMoveSkipReason }[];
 }
 
 export const CandidateEligibilitySchema = z.object({ eligible: z.boolean() });
@@ -124,6 +129,13 @@ const pctMin = z.coerce.number().min(0).max(100).optional();
 export const CandidateListQuerySchema = z.object({
   search: z.string().trim().max(100).optional(),
   jobRoleId: z.string().uuid().optional(),
+  roundId: z.string().uuid().optional(),
+  collegeId: z.string().uuid().optional(),
+  driveId: z.string().uuid().optional(),
+  /** Campus dashboard links (spec 2026-11-11): the drive's batch and the round number across profiles. */
+  batch: z.string().trim().min(1).max(60).optional(),
+  roundNumber: z.coerce.number().int().min(1).max(20).optional(),
+  jobProfileType: z.enum(JOB_PROFILE_TYPES).optional(),
   status: z.enum(CANDIDATE_PROGRESS_STATUSES).optional(),
   result: z.enum(CANDIDATE_RESULT_FILTERS).optional(),
   flagged: bool.optional(),
@@ -159,6 +171,11 @@ export interface CandidateRowDto {
   programme: string | null;
   jobRoleId: string;
   jobRoleName: string;
+  jobProfileType: JobProfileType;
+  driveId: string;
+  driveDisplayName: string;
+  roundNumber: number;
+  collegeShortCode: string;
   status: CandidateStatus;
   result: CandidateResult | null;
   eligible: boolean;
@@ -182,15 +199,15 @@ export interface CandidateListItemDto extends CandidateRowDto {
   exam: CandidateExamStatsDto | null;
   /** Other candidates who started within 100 m and ±2 h; null without a start location. */
   nearbyCount: number | null;
-  /** The same person's other applications (other job profiles). */
-  otherApplications: { jobRoleName: string; status: CandidateStatus; result: CandidateResult | null }[];
+  /** The same person's other entries (other drives). */
+  otherApplications: { driveDisplayName: string; status: CandidateStatus; result: CandidateResult | null }[];
 }
 
 /** Every candidate matching the list filters (for "select all matching"), capped at CANDIDATE_BULK_MAX. */
 export interface CandidateMatchingIdsDto {
   ids: string[];
   total: number;
-  jobRoleIdById: Record<string, string>;
+  driveIdById: Record<string, string>;
 }
 
 export interface CandidateLoginLogDto {
@@ -226,7 +243,7 @@ export interface CandidateDetailDto {
   activity: { items: { id: string; type: string; createdAt: string; detail: unknown }[]; total: number; page: number; pageSize: number };
   flags: CandidateFlagsDto;
   /** The same person's other applications (same account), excluding this one. */
-  otherApplications: { id: string; candidateCode: string; jobRole: { id: string; name: string }; status: string; result: CandidateResult | null }[];
+  otherApplications: { id: string; candidateCode: string; jobRole: { id: string; name: string }; driveDisplayName: string; status: string; result: CandidateResult | null }[];
   /** A row whose fromResult differs from toResult is a result change (decision, or cleared by a reopen/reset). */
   history: {
     id: string; fromStatus: string | null; toStatus: string; fromResult: CandidateResult | null; toResult: CandidateResult | null;

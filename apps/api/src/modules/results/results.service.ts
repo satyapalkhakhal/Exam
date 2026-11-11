@@ -1,10 +1,12 @@
 // modules/results/results.service.ts
 // Super Admin outcomes (design §8, §9): the shortlist/reject decision (only
-// after an evaluation, with history and audit), the per-role leaderboard
-// (total marks desc, ties by earlier submit; or by composite / AI % on request),
-// AI marks and the weighted composite (docs/ai-evaluation.md §7, §10), the dashboard counts every admin
-// sees (numbers only, so nothing here is blind-marking sensitive), and the two
-// XLSX exports. Marks, totals and comments are exported only once an
+// after an evaluation, with history and audit), the per-drive leaderboard
+// (spec 2026-11-10: one college's drive of one round; total marks desc, ties by
+// earlier submit; or by composite / AI % on request), AI marks and the weighted
+// composite with the round's weights (docs/ai-evaluation.md §7, §10), the
+// dashboard counts (per drive for a Super Admin; per round, without college or
+// batch, for an Evaluator: blind marking), and the two XLSX exports (a sheet per
+// drive). Marks, totals and comments are exported only once an
 // evaluation is submitted; a draft or reopened one is work in progress.
 
 import {
@@ -17,19 +19,20 @@ import type {
   CandidateDecisionBulkInput,
   CandidateDecisionBulkResultDto,
   CandidateResult,
-  DashboardRoleDto,
+  DashboardDriveDto,
   DecisionInput,
   EmailSendInput,
   EmailSendResultDto,
   LeaderboardRowDto,
 } from '@exam/shared';
+import { JOB_PROFILE_TYPE_LABELS } from '@exam/shared';
 import { conflict, notFound } from '../../shared/errors.js';
 import { logger } from '../../infrastructure/logger/logger.js';
 import type { CandidateFlags } from '../exam/index.js';
 import { flagBreakdown, flagScore } from '../exam/index.js';
-import { num, percentageOf, toCandidatePii } from '../evaluation/index.js';
+import { combinedTotals, num, percentageOf, toCandidatePii } from '../evaluation/index.js';
 import type { Cell, SheetSpec } from './exports.js';
-import type { CandidateStatusValue, LiveAttemptRow, ResultsRepository, ScoredAttempt } from './results.repository.js';
+import { displayNameOf, type CandidateStatusValue, type DriveFilter, type LiveAttemptRow, type ResultDrive, type ResultsRepository, type ScoredAttempt } from './results.repository.js';
 
 export interface ResultsDeps {
   repo: ResultsRepository;
@@ -50,7 +53,7 @@ export interface Actor {
 
 const EMPTY_FLAGS: CandidateFlags = { integrity: { pasteAttempts: 0, bulkInsert: 0, tabHidden: 0, blur: 0, ipChanges: 0 }, location: [], nearbyCount: null };
 
-const STATUS_KEYS: Record<CandidateStatusValue, keyof DashboardRoleDto> = {
+const STATUS_KEYS: Record<CandidateStatusValue, keyof DashboardDriveDto> = {
   NOT_STARTED: 'notStarted',
   IN_PROGRESS: 'inProgress',
   SUBMITTED: 'submitted',
@@ -77,22 +80,31 @@ interface RowScores {
   provisional: boolean;
 }
 
+type ScoredQuestion = ScoredAttempt['questions'][number];
+/** Written questions only: MCQs are auto-marked, never AI-graded nor marked per question. */
+export const writtenOf = (r: ScoredAttempt): ScoredQuestion[] => r.questions.filter((q) => q.typeSnapshot !== 'MCQ');
+
 /**
- * AI % (only when every question has a DONE AI score) and the composite. The
- * exam % in the composite is the human percentage once the evaluation is
- * submitted, else the AI % (provisional).
+ * AI % (written questions only, when every one has a DONE AI score) and the
+ * composite. The exam % in the composite is the human percentage once the
+ * evaluation is submitted, else (provisional) the MCQ subtotal plus the AI
+ * written marks over the full maximum, once every written question is AI-scored.
  */
 export function scoreRow(r: ScoredAttempt, weights: CompositeWeights): RowScores {
+  const written = writtenOf(r);
   const aiMarksByOrder = new Map<number, number>();
-  for (const q of r.questions) {
+  for (const q of written) {
     const m = num(q.aiScores[0]?.marks ?? null);
     if (m !== null) aiMarksByOrder.set(q.order, m);
   }
-  const allScored = r.questions.length > 0 && aiMarksByOrder.size === r.questions.length;
-  const aiMax = r.questions.reduce((a, q) => a + (num(q.maxMarksSnapshot) ?? 0), 0);
-  const aiPercentage = allScored ? percentageOf([...aiMarksByOrder.values()].reduce((a, b) => a + b, 0), aiMax) : null;
+  const allScored = aiMarksByOrder.size === written.length;
+  const aiSum = [...aiMarksByOrder.values()].reduce((a, b) => a + b, 0);
+  const aiMax = written.reduce((a, q) => a + (num(q.maxMarksSnapshot) ?? 0), 0);
+  const aiPercentage = written.length > 0 && allScored ? percentageOf(aiSum, aiMax) : null;
+  const mcqMax = num(r.mcqMaxMarks) ?? 0;
+  const provisionalExam = allScored && (written.length > 0 || mcqMax > 0) ? combinedTotals(aiSum, aiMax, num(r.mcqMarks), mcqMax).percentage : null;
   const human = r.evaluation?.status === 'SUBMITTED' ? num(r.percentage) : null;
-  const exam = human ?? aiPercentage;
+  const exam = human ?? provisionalExam;
   const c = r.candidate;
   const composite = compositeScore(
     { examPercentage: exam, xPercentage: num(c.xPercentage), xiiPercentage: num(c.xiiPercentage), majorCpi: num(c.majorCpi) },
@@ -151,9 +163,10 @@ export function createResultsService(deps: ResultsDeps) {
     return result;
   }
 
-  async function leaderboard(jobRoleId: string, sort: LeaderboardSort = 'human'): Promise<{ items: LeaderboardRowDto[] }> {
-    const [rows, weightsByRole] = await Promise.all([repo.leaderboard(jobRoleId, sort !== 'human'), repo.weightsFor([jobRoleId])]);
-    const weights = weightsByRole.get(jobRoleId) ?? DEFAULT_COMPOSITE_WEIGHTS;
+  async function leaderboard(driveId: string, sort: LeaderboardSort = 'human'): Promise<{ items: LeaderboardRowDto[] }> {
+    const [rows, drives] = await Promise.all([repo.leaderboard(driveId, sort !== 'human'), repo.drives({ driveId })]);
+    if (!drives[0]) throw notFound('Drive not found');
+    const weights = drives[0].weights;
     const flags = await deps.getFlagsBatch(rows.map((r) => r.candidate.id));
     const scored = rows.map((r) => ({ r, s: scoreRow(r, weights) }));
     if (sort !== 'human') {
@@ -172,7 +185,9 @@ export function createResultsService(deps: ResultsDeps) {
         totalMarks: num(r.totalMarks) ?? 0,
         maxMarks: num(r.maxMarks) ?? 0,
         percentage: num(r.percentage) ?? 0,
-        questionMarks: r.questions.map((q) => ({
+        mcqMarks: num(r.mcqMarks),
+        mcqMaxMarks: num(r.mcqMaxMarks) ?? 0,
+        questionMarks: writtenOf(r).map((q) => ({
           order: q.order,
           marks: r.evaluation?.status === 'SUBMITTED' ? num(q.evaluation?.marks ?? null) : null,
           aiMarks: s.aiMarksByOrder.get(q.order) ?? null,
@@ -187,14 +202,28 @@ export function createResultsService(deps: ResultsDeps) {
     };
   }
 
-  async function dashboard(): Promise<{ roles: DashboardRoleDto[] }> {
-    const [roles, counts] = await Promise.all([repo.roles(), repo.statusCounts()]);
-    return {
-      roles: roles.map((role) => {
-        const dto: DashboardRoleDto = {
-          jobRoleId: role.id,
-          jobRoleName: role.name,
-          refApplicantCount: role.refApplicantCount,
+  /**
+   * Counts per drive for a Super Admin. An Evaluator gets one row per round
+   * (its drives summed) with no drive, college or batch: blind marking.
+   */
+  async function dashboard(viewer: 'SUPER_ADMIN' | 'EVALUATOR' = 'SUPER_ADMIN'): Promise<{ drives: DashboardDriveDto[] }> {
+    const blind = viewer !== 'SUPER_ADMIN';
+    const [drives, counts, stats] = await Promise.all([repo.drives({}), repo.statusCounts(), blind ? Promise.resolve([]) : repo.examPercentStats()]);
+    const statOf = new Map(stats.map((s) => [s.driveId, s]));
+    const rows = new Map<string, DashboardDriveDto>();
+    const rowFor = new Map<string, DashboardDriveDto>();
+    for (const d of drives) {
+      const key = blind ? d.roundId : d.id;
+      const dto: DashboardDriveDto = rows.get(key) ?? {
+          driveId: blind ? null : d.id,
+          displayName: blind ? `${d.jobRoleName} · Round ${d.roundNumber}` : displayNameOf(d),
+          jobRoleId: d.jobRoleId,
+          jobRoleName: d.jobRoleName,
+          jobProfileType: d.jobProfileType,
+          roundNumber: d.roundNumber,
+          collegeShortCode: blind ? null : d.collegeShortCode,
+          batch: blind ? null : d.batch,
+          refApplicantCount: d.refApplicantCount,
           imported: 0,
           notStarted: 0,
           inProgress: 0,
@@ -204,36 +233,52 @@ export function createResultsService(deps: ResultsDeps) {
           shortlisted: 0,
           rejected: 0,
           pendingEvaluation: 0,
+          // Campus dashboard (spec 2026-11-11): the college and exam % reach a Super Admin only.
+          ...(blind
+            ? {}
+            : { collegeId: d.collegeId, collegeName: d.collegeName, roundId: d.roundId, examPctSum: statOf.get(d.id)?.sum ?? 0, examPctCount: statOf.get(d.id)?.count ?? 0 }),
         };
-        for (const c of counts) {
-          if (c.jobRoleId !== role.id) continue;
-          dto.imported += c.count;
-          // A decided candidate counts under its result, not under "evaluated" (awaiting a decision).
-          if (c.result) (dto[STATUS_KEYS[c.result]] as number) += c.count;
-          else (dto[STATUS_KEYS[c.status]] as number) += c.count;
-        }
-        dto.pendingEvaluation = dto.submitted + dto.autoSubmitted;
-        return dto;
-      }),
-    };
+      rows.set(key, dto);
+      rowFor.set(d.id, dto);
+    }
+    for (const c of counts) {
+      const dto = rowFor.get(c.driveId);
+      if (!dto) continue;
+      dto.imported += c.count;
+      // A decided candidate counts under its result, not under "evaluated" (awaiting a decision).
+      if (c.result) (dto[STATUS_KEYS[c.result]] as number) += c.count;
+      else (dto[STATUS_KEYS[c.status]] as number) += c.count;
+    }
+    for (const dto of rows.values()) dto.pendingEvaluation = dto.submitted + dto.autoSubmitted;
+    return { drives: [...rows.values()] };
   }
 
-  async function rolesFor(jobRoleId: string | undefined) {
-    const roles = await repo.roles(jobRoleId);
-    if (jobRoleId && roles.length === 0) throw notFound('Job role not found');
-    return roles;
+  /** Drives for an export; a filter that matches nothing is a 404. */
+  async function drivesFor(filter: DriveFilter): Promise<ResultDrive[]> {
+    const drives = await repo.drives(filter);
+    if (Object.values(filter).some(Boolean) && drives.length === 0) throw notFound('Nothing matches this filter');
+    return drives;
   }
 
-  function resultsSheet(roleName: string, rows: ScoredAttempt[], flags: Map<string, CandidateFlags>, weights: CompositeWeights): SheetSpec {
-    const qCount = Math.max(0, ...rows.flatMap((r) => r.questions.map((q) => q.order)));
-    const orders = Array.from({ length: qCount }, (_, i) => i + 1);
+  /** File name label: the drive, else the job profile, else "all". */
+  const labelOf = (filter: DriveFilter, drives: ResultDrive[]): string | null =>
+    filter.driveId && drives[0] ? displayNameOf(drives[0]) : filter.jobRoleId && drives[0] ? drives[0].jobRoleName : null;
+
+  const DRIVE_COLUMNS = [{ header: 'Job profile', width: 24 }, { header: 'Type' }, { header: 'Round', width: 8 }, { header: 'College' }, { header: 'Batch', width: 16 }];
+  const driveCells = (d: ResultDrive): Cell[] => [d.jobRoleName, JOB_PROFILE_TYPE_LABELS[d.jobProfileType], d.roundNumber, d.collegeShortCode, d.batch];
+
+  function resultsSheet(drive: ResultDrive | null, rows: ScoredAttempt[], flags: Map<string, CandidateFlags>): SheetSpec {
+    const weights: CompositeWeights = drive?.weights ?? DEFAULT_COMPOSITE_WEIGHTS;
+    // Per-question columns for written questions only (by the order the candidate saw them).
+    const orders = [...new Set(rows.flatMap((r) => writtenOf(r).map((q) => q.order)))].sort((a, b) => a - b);
     let rank = 0;
     const weightsText = `${weights.exam}/${weights.x}/${weights.xii}/${weights.cpi}`;
     return {
-      name: roleName,
+      name: drive ? displayNameOf(drive) : 'Results',
       columns: [
         { header: 'Rank', width: 6 },
         { header: 'Candidate code', width: 18 },
+        ...DRIVE_COLUMNS,
         { header: 'Name', width: 28 },
         { header: 'Email', width: 30 },
         { header: 'Mobile' },
@@ -253,6 +298,11 @@ export function createResultsService(deps: ResultsDeps) {
         { header: 'Total' },
         { header: 'Max' },
         { header: 'Percentage' },
+        { header: 'MCQ marks' },
+        { header: 'MCQ max' },
+        { header: 'MCQ correct' },
+        { header: 'MCQ wrong' },
+        { header: 'MCQ unanswered' },
         ...orders.map((o) => ({ header: `Q${o} AI marks` })),
         { header: 'AI %' },
         { header: 'Composite' },
@@ -268,11 +318,18 @@ export function createResultsService(deps: ResultsDeps) {
         const evaluated = r.evaluation?.status === 'SUBMITTED' && r.totalMarks !== null;
         const f = flags.get(c.id) ?? EMPTY_FLAGS;
         const breakdown = flagBreakdown(f);
-        const byOrder = new Map(r.questions.map((q) => [q.order, q]));
+        const byOrder = new Map(writtenOf(r).map((q) => [q.order, q]));
         const sc = scoreRow(r, weights);
+        // MCQ marks are automatic (set at submit), so they are exported whatever the evaluation state.
+        const mcqs = r.questions.filter((q) => q.typeSnapshot === 'MCQ');
+        const picked = mcqs.filter((q) => q.answer?.selectedOption != null);
+        const right = picked.filter((q) => q.answer!.selectedOption === q.correctSnapshot).length;
+        const mcqCells: Cell[] =
+          mcqs.length === 0 ? [null, null, null, null, null] : [num(r.mcqMarks), num(r.mcqMaxMarks), right, picked.length - right, mcqs.length - picked.length];
         return [
           evaluated ? ++rank : null,
           c.candidateCode,
+          ...(drive ? driveCells(drive) : [null, null, null, null, null]),
           c.fullName,
           c.email,
           c.mobile,
@@ -292,6 +349,7 @@ export function createResultsService(deps: ResultsDeps) {
           evaluated ? num(r.totalMarks) : null,
           evaluated ? num(r.maxMarks) : null,
           evaluated ? num(r.percentage) : null,
+          ...mcqCells,
           ...orders.map((o) => sc.aiMarksByOrder.get(o) ?? null),
           sc.aiPercentage,
           sc.composite,
@@ -309,19 +367,17 @@ export function createResultsService(deps: ResultsDeps) {
     };
   }
 
-  async function resultsExport(jobRoleId: string | undefined): Promise<{ roleName: string | null; sheets: SheetSpec[] }> {
-    const roles = await rolesFor(jobRoleId);
-    const attempts = await repo.submittedAttempts(roles.map((r) => r.id));
+  async function resultsExport(filter: DriveFilter): Promise<{ label: string | null; sheets: SheetSpec[] }> {
+    const drives = await drivesFor(filter);
+    const attempts = await repo.submittedAttempts(drives.map((d) => d.id));
     const flags = await deps.getFlagsBatch(attempts.map((a) => a.candidate.id));
-    const weightsByRole = await repo.weightsFor(roles.map((r) => r.id));
-    const weightsOf = (id: string) => weightsByRole.get(id) ?? DEFAULT_COMPOSITE_WEIGHTS;
-    const sheets = roles.map((role) => resultsSheet(role.name, attempts.filter((a) => a.candidate.jobRoleId === role.id), flags, weightsOf(role.id)));
-    return { roleName: jobRoleId ? roles[0]!.name : null, sheets: sheets.length > 0 ? sheets : [resultsSheet('Results', [], flags, DEFAULT_COMPOSITE_WEIGHTS)] };
+    const sheets = drives.map((d) => resultsSheet(d, attempts.filter((a) => a.candidate.driveId === d.id), flags));
+    return { label: labelOf(filter, drives), sheets: sheets.length > 0 ? sheets : [resultsSheet(null, [], flags)] };
   }
 
-  async function activityExport(jobRoleId: string | undefined): Promise<{ roleName: string | null; sheets: SheetSpec[] }> {
-    const roles = await rolesFor(jobRoleId);
-    const attempts = await repo.liveAttempts(roles.map((r) => r.id));
+  async function activityExport(filter: DriveFilter): Promise<{ label: string | null; sheets: SheetSpec[] }> {
+    const drives = await drivesFor(filter);
+    const attempts = await repo.liveAttempts(drives.map((d) => d.id));
     const flags = await deps.getFlagsBatch(attempts.map((a) => a.candidate.id));
     const nearbyIds = [...flags.values()].flatMap((f) => f.location.flatMap((l) => (l.code === 'NEARBY_CANDIDATES' ? l.withCandidateIds : [])));
     const codes = await repo.codesFor([...new Set(nearbyIds)]);
@@ -380,8 +436,8 @@ export function createResultsService(deps: ResultsDeps) {
         ];
       }),
     });
-    const sheets = roles.map((role) => sheet(role.name, attempts.filter((a) => a.candidate.jobRoleId === role.id)));
-    return { roleName: jobRoleId ? roles[0]!.name : null, sheets: sheets.length > 0 ? sheets : [sheet('Activity', [])] };
+    const sheets = drives.map((d) => sheet(displayNameOf(d), attempts.filter((a) => a.candidate.driveId === d.id)));
+    return { label: labelOf(filter, drives), sheets: sheets.length > 0 ? sheets : [sheet('Activity', [])] };
   }
 
   return { decide, decideMany, leaderboard, dashboard, resultsExport, activityExport };

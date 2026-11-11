@@ -35,7 +35,8 @@ const candidate = {
   latitude: 26.19,
   longitude: 91.69,
   ip: '203.0.113.7',
-  jobRole: { name: 'Backend Engineer' },
+  jobRole: { name: 'Backend Engineer', type: 'INTERNSHIP' },
+  drive: { batch: 'Nov 2026', round: { roundNumber: 2 }, college: { shortCode: 'IITG' } },
 };
 
 const t0 = new Date('2026-10-01T10:00:00Z');
@@ -100,9 +101,13 @@ test('submission view shape', () => {
     attemptId: 'a-1',
     candidateCode: 'ARH-EX-000001',
     jobRole: 'Backend Engineer',
+    jobProfileType: 'INTERNSHIP',
+    roundNumber: 2,
     submittedAt: t1.toISOString(),
     timeTakenSec: 2730,
     submitType: 'AUTO',
+    mcqMarks: null,
+    mcqMaxMarks: 0,
     flagCounts: { pasteAttempts: 1, bulkInsert: 0, ipChanges: 0, locationFlags: 2, excessiveTabSwitching: 0 },
     nearbyCount: null,
     evaluationStatus: 'DRAFT',
@@ -118,7 +123,12 @@ test('marking view: per-question answer, versions, integrity and evaluation', ()
     {
       attemptQuestionId: 'aq-1',
       order: 1,
+      type: 'WRITTEN',
       text: 'Explain idempotency.',
+      options: [],
+      selectedOption: null,
+      correctOption: null,
+      autoMarks: null,
       maxMarks: 10,
       evaluatorGuidance: 'Mentions retries',
       answer: { text: 'An operation...', wordCount: 2, versions: [{ savedAt: t0.toISOString(), wordCount: 1 }] },
@@ -246,4 +256,69 @@ test('submission AI roll-up: NONE, PARTIAL, DONE with totals, and needsReview', 
   assert.equal(rollup([{ maxMarksSnapshot: 10, aiScores: [aiScore({ confidence: 'LOW' })] }]).needsReview, true);
   assert.equal(rollup([{ maxMarksSnapshot: 10, aiScores: [aiScore({ concerns: ['TOO_SHORT'] })] }]).needsReview, true);
   assert.equal(rollup([{ maxMarksSnapshot: 10, aiScores: [aiScore({ status: 'FAILED', marks: null })] }]).state, 'PARTIAL');
+});
+
+test('evaluator DTO has round and type, no college; Super Admin also gets the drive name', () => {
+  for (const out of [toSubmissionView(submission, 'EVALUATOR'), toMarkingView(marking, 'EVALUATOR')]) {
+    assert.equal(out.roundNumber, 2);
+    assert.equal(out.jobProfileType, 'INTERNSHIP');
+    const text = JSON.stringify(out);
+    assert.ok(!/IITG|Nov 2026|driveDisplayName|college/i.test(text), text);
+  }
+  assert.equal(toSubmissionView(submission, 'SUPER_ADMIN').driveDisplayName, 'Backend Engineer · Round 2 · IITG · Nov 2026');
+});
+
+test('marking view shows MCQ choice, correct and auto mark read-only', () => {
+  const src = {
+    ...marking,
+    mcqMarks: 1.75,
+    mcqMaxMarks: 3,
+    questions: [
+      {
+        ...(marking.questions[0] as object),
+        id: 'aq-m',
+        order: 1,
+        typeSnapshot: 'MCQ',
+        textSnapshot: 'Which is prime?',
+        maxMarksSnapshot: 2,
+        optionsSnapshot: ['9', '7', '4', '6'],
+        correctSnapshot: 1,
+        autoMarks: 2,
+        answer: { text: '', wordCount: 0, selectedOption: 1, versions: [] },
+        evaluation: null,
+      },
+      { ...(marking.questions[0] as object), id: 'aq-w', order: 2, typeSnapshot: 'WRITTEN' },
+    ],
+  } as unknown as MarkingSource;
+  const v = toMarkingView(src, 'EVALUATOR');
+  assert.equal(v.mcqMarks, 1.75);
+  assert.equal(v.mcqMaxMarks, 3);
+  const [m, w] = v.questions;
+  assert.equal(m!.type, 'MCQ');
+  assert.deepEqual(m!.options, ['9', '7', '4', '6']);
+  assert.equal(m!.selectedOption, 1);
+  assert.equal(m!.correctOption, 1);
+  assert.equal(m!.autoMarks, 2);
+  assert.equal(w!.type, 'WRITTEN');
+  assert.deepEqual(w!.options, []);
+  assert.equal(w!.selectedOption, null);
+  assert.equal(w!.correctOption, null);
+  assert.equal(w!.autoMarks, null);
+  // The AI roll-up looks at written questions only: an MCQ never has an AI score.
+  assert.equal(v.ai.state, 'NONE');
+});
+
+test('AI roll-up is DONE when every written question is scored, ignoring MCQs', () => {
+  const done = { id: 'ai-1', status: 'DONE', marks: 4, maxMarks: 5, rationale: null, strengths: [], improvements: [], confidence: 'HIGH', concerns: [], model: 'm', error: null, completedAt: t1 };
+  const sub = {
+    ...submission,
+    questions: [
+      { typeSnapshot: 'MCQ', maxMarksSnapshot: 2, aiScores: [] },
+      { typeSnapshot: 'WRITTEN', maxMarksSnapshot: 5, aiScores: [done] },
+    ],
+  } as unknown as SubmissionSource;
+  const ai = toSubmissionView(sub, 'EVALUATOR').ai;
+  assert.equal(ai.state, 'DONE');
+  assert.equal(ai.totalMarks, 4);
+  assert.equal(ai.percentage, 80);
 });

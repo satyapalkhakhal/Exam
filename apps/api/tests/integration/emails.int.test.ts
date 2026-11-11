@@ -16,7 +16,7 @@ import { createApp } from '../../src/app.js';
 import { createDispatchProcessor, emailsRepository } from '../../src/modules/emails/index.js';
 import { EMAIL_KEY } from '../../src/modules/messaging/index.js';
 import { systemConfig } from '../../src/modules/systemConfig/index.js';
-import { createCandidate } from './helpers.js';
+import { createCandidate, createRoleWithDrive } from './helpers.js';
 
 const SA = { email: 'super@mail.test', password: 'super-pass-123' };
 const EV = { email: 'eval@mail.test', password: 'eval-pass-123' };
@@ -43,7 +43,7 @@ before(async () => {
   assert.match(env.DATABASE_URL, /\/exam_test(\?|$)/);
   assert.match(env.REDIS_URL, /\/15$/);
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE email_dispatches, system_configs, admin_audit_logs, exam_attempts, candidates, candidate_accounts, exam_settings, job_roles, admin_users RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE email_dispatches, system_configs, admin_audit_logs, exam_attempts, candidates, candidate_accounts, drives, colleges, exam_rounds, job_roles, admin_users RESTART IDENTITY CASCADE',
   );
   await getRedis().flushdb();
   const admins = await Promise.all(
@@ -55,9 +55,9 @@ before(async () => {
     ).map(async ([c, name, role]) => prisma.adminUser.create({ data: { email: c.email, name, role, passwordHash: await bcrypt.hash(c.password, 4) } })),
   );
   superId = admins[0]!.id;
-  const role = await prisma.jobRole.create({ data: { name: 'Mail Role', examSetting: { create: {} } } });
+  const role = await createRoleWithDrive('Mail Role');
   const mk = (n: number, status: 'SUBMITTED' | 'EVALUATED' | 'NOT_STARTED', result: 'SHORTLISTED' | null = null) =>
-    createCandidate({ candidateCode: `MAIL-000${n}`, fullName: `Mail Person ${n}`, email: `mail${n}@cands.test`, jobRoleId: role.id, status, result });
+    createCandidate({ candidateCode: `MAIL-000${n}`, fullName: `Mail Person ${n}`, email: `mail${n}@cands.test`, driveId: role.driveId, status, result });
   const [a, b, c] = await Promise.all([mk(1, 'SUBMITTED'), mk(2, 'EVALUATED', 'SHORTLISTED'), mk(3, 'NOT_STARTED')]);
   submittedId = a.id;
   shortlistedId = b.id;

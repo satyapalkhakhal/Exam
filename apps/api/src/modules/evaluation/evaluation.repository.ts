@@ -36,7 +36,8 @@ const candidateSelect = {
   majorCpi: true,
   programme: true,
   discipline: true,
-  jobRole: { select: { name: true } },
+  jobRole: { select: { name: true, type: true } },
+  drive: { select: { batch: true, round: { select: { roundNumber: true } }, college: { select: { shortCode: true } } } },
 } as const;
 
 // Newest first; the mapper shows the latest DONE one, else the latest of any status.
@@ -65,9 +66,11 @@ const submissionSelect = {
   submittedAt: true,
   submitType: true,
   totalMarks: true,
+  mcqMarks: true,
+  mcqMaxMarks: true,
   candidate: { select: candidateSelect },
   evaluation: { select: { status: true, evaluatorId: true } },
-  questions: { select: { maxMarksSnapshot: true, aiScores: aiScoresSelect } },
+  questions: { select: { typeSnapshot: true, maxMarksSnapshot: true, aiScores: aiScoresSelect } },
 } as const;
 
 export interface LockHolder {
@@ -90,15 +93,19 @@ function evaluationFilter(state: SubmissionListQuery['evaluation']): Prisma.Exam
 
 // AI roll-up filter. NEEDS_REVIEW approximates "latest DONE has concerns" by
 // "some DONE score has concerns or LOW confidence" (identical until a re-run).
+// Only written questions are AI-graded; MCQs never have scores.
 const everyQuestionDone: Prisma.ExamAttemptWhereInput = {
-  AND: [{ questions: { some: {} } }, { questions: { every: { aiScores: { some: { status: 'DONE' } } } } }],
+  AND: [
+    { questions: { some: { typeSnapshot: 'WRITTEN' } } },
+    { questions: { every: { OR: [{ typeSnapshot: 'MCQ' }, { aiScores: { some: { status: 'DONE' } } }] } } },
+  ],
 };
 function aiFilter(state: SubmissionListQuery['ai']): Prisma.ExamAttemptWhereInput {
   switch (state) {
     case 'NONE':
       return { questions: { every: { aiScores: { none: {} } } } };
     case 'PARTIAL':
-      return { AND: [{ questions: { some: { aiScores: { some: {} } } } }, { questions: { some: { aiScores: { none: { status: 'DONE' } } } } }] };
+      return { AND: [{ questions: { some: { aiScores: { some: {} } } } }, { questions: { some: { typeSnapshot: 'WRITTEN', aiScores: { none: { status: 'DONE' } } } } }] };
     case 'DONE':
       return everyQuestionDone;
     case 'NEEDS_REVIEW':
@@ -139,11 +146,11 @@ function txMethods(tx: Tx) {
     attempt(attemptId: string) {
       return tx.examAttempt.findFirst({
         where: { id: attemptId, status: { in: [...SUBMITTED_STATUSES] } },
-        select: { id: true, status: true, candidateId: true, candidate: { select: { status: true } } },
+        select: { id: true, status: true, candidateId: true, mcqMarks: true, mcqMaxMarks: true, candidate: { select: { status: true } } },
       });
     },
     questions(attemptId: string) {
-      return tx.attemptQuestion.findMany({ where: { attemptId }, select: { id: true, order: true, maxMarksSnapshot: true } });
+      return tx.attemptQuestion.findMany({ where: { attemptId }, select: { id: true, order: true, typeSnapshot: true, maxMarksSnapshot: true } });
     },
     /**
      * Writes one question's draft. `comment` undefined keeps the stored one.
@@ -216,7 +223,7 @@ function txMethods(tx: Tx) {
     attemptAny(attemptId: string) {
       return tx.examAttempt.findUnique({
         where: { id: attemptId },
-        select: { id: true, status: true, candidateId: true, candidate: { select: { candidateCode: true } } },
+        select: { id: true, status: true, candidateId: true, mcqMarks: true, mcqMaxMarks: true, candidate: { select: { candidateCode: true } } },
       });
     },
     /** Creates the evaluation row if missing and locks it FOR UPDATE; the lock holder is read under that lock. */
@@ -227,10 +234,10 @@ function txMethods(tx: Tx) {
       const r = rows[0]!;
       return { status: r.status, lockedById: r.locked_by_id, lockedAt: r.locked_at };
     },
-    /** Every question of the attempt with its latest DONE AI score (if any). */
+    /** Every written question of the attempt with its latest DONE AI score (if any); MCQs are auto-marked. */
     async questionsWithAi(attemptId: string) {
       const rows = await tx.attemptQuestion.findMany({
-        where: { attemptId },
+        where: { attemptId, typeSnapshot: 'WRITTEN' },
         orderBy: { order: 'asc' },
         select: {
           id: true,
@@ -266,6 +273,12 @@ export const evaluationRepository = {
   async listSubmissions(q: SubmissionListQuery, searchNames: boolean) {
     const and: Prisma.ExamAttemptWhereInput[] = [{ status: { in: [...SUBMITTED_STATUSES] } }, evaluationFilter(q.evaluation), aiFilter(q.ai)];
     if (q.jobRoleId) and.push({ candidate: { jobRoleId: q.jobRoleId } });
+    if (q.driveId) and.push({ candidate: { driveId: q.driveId } });
+    if (q.roundId) and.push({ candidate: { drive: { roundId: q.roundId } } });
+    if (q.collegeId) and.push({ candidate: { drive: { collegeId: q.collegeId } } });
+    if (q.batch) and.push({ candidate: { drive: { batch: { equals: q.batch, mode: 'insensitive' } } } });
+    if (q.roundNumber) and.push({ candidate: { drive: { round: { roundNumber: q.roundNumber } } } });
+    if (q.jobProfileType) and.push({ candidate: { jobRole: { type: q.jobProfileType } } });
     if (q.search) {
       const or: Prisma.CandidateWhereInput[] = [{ candidateCode: { contains: q.search, mode: 'insensitive' } }];
       // Identity fields only for a Super Admin; an Evaluator searches by code alone (blind marking).
@@ -302,11 +315,15 @@ export const evaluationRepository = {
           select: {
             id: true,
             order: true,
+            typeSnapshot: true,
             textSnapshot: true,
+            optionsSnapshot: true,
+            correctSnapshot: true,
+            autoMarks: true,
             maxMarksSnapshot: true,
             question: { select: { evaluatorGuidance: true } },
             answer: {
-              select: { text: true, wordCount: true, versions: { orderBy: { savedAt: 'asc' }, select: { savedAt: true, wordCount: true } } },
+              select: { text: true, wordCount: true, selectedOption: true, versions: { orderBy: { savedAt: 'asc' }, select: { savedAt: true, wordCount: true } } },
             },
             evaluation: { select: { marks: true, comment: true, aiScoreId: true } },
             aiScores: aiScoresSelect,
@@ -324,14 +341,20 @@ export const evaluationRepository = {
     return { ...attempt, activity };
   },
 
-  /** Submitted attempts of a role whose evaluation is not yet submitted (bulk accept by role). */
-  async openAttemptIdsForRole(jobRoleId: string): Promise<string[]> {
+  /** Submitted attempts of a drive whose evaluation is not yet submitted (bulk accept by drive). */
+  async openAttemptIdsForDrive(driveId: string): Promise<string[]> {
     const rows = await prisma.examAttempt.findMany({
-      where: { status: { in: [...SUBMITTED_STATUSES] }, candidate: { jobRoleId }, NOT: { evaluation: { is: { status: 'SUBMITTED' } } } },
+      where: { status: { in: [...SUBMITTED_STATUSES] }, candidate: { driveId }, NOT: { evaluation: { is: { status: 'SUBMITTED' } } } },
       orderBy: [{ submittedAt: 'asc' }, { id: 'asc' }],
       select: { id: true },
     });
     return rows.map((r) => r.id);
+  },
+
+  /** The distinct drives the attempts belong to (a selection must be one drive). */
+  async driveIdsOfAttempts(attemptIds: string[]): Promise<string[]> {
+    const rows = await prisma.examAttempt.findMany({ where: { id: { in: attemptIds } }, select: { candidate: { select: { driveId: true } } } });
+    return [...new Set(rows.map((r) => r.candidate.driveId))];
   },
 
   async candidateIdsOf(attemptIds: string[]): Promise<Map<string, string>> {

@@ -77,10 +77,53 @@ test('rowNumbers override the positional row numbers in errors', () => {
   assert.equal(r.errors[0]?.row, 9);
 });
 
-test('the downloadable sample CSV imports cleanly: 6 valid rows, no errors', async () => {
+test('the downloadable sample CSV imports cleanly: 6 written rows and 1 MCQ, no errors', async () => {
   const sheet = await readSheet(Buffer.from(SAMPLE_CSV), 'questions-sample.csv');
   const r = parseQuestionRows(sheet.rows, new Set(), sheet.rowNumbers);
   assert.deepEqual(r.errors, []);
   assert.deepEqual(r.duplicates, []);
-  assert.equal(r.valid.length, 6);
+  assert.equal(r.valid.length, 7);
+  assert.deepEqual(r.valid.map((v) => v.type).filter((t) => t === 'MCQ'), ['MCQ']);
+});
+
+// ---- MCQ rows (spec 2026-11-10 MCQ questions) ------------------------------------
+
+const mcq = (text: string, opts: string[], correct: string, marks = '1') => ({
+  type: 'MCQ', question_text: text, max_marks: marks,
+  option_a: opts[0] ?? '', option_b: opts[1] ?? '', option_c: opts[2] ?? '', option_d: opts[3] ?? '', correct_option: correct,
+});
+
+test('MCQ row maps options and correct letter', () => {
+  const r = parseQuestionRows([mcq('Which of these is prime?', ['4', '6', '7', '9'], 'c')], new Set());
+  assert.deepEqual(r.errors, []);
+  const { row, ...d } = r.valid[0]!;
+  assert.equal(row, 2);
+  assert.deepEqual([d.type, d.options, d.correctOption, d.maxMarks], ['MCQ', ['4', '6', '7', '9'], 2, 1]);
+});
+
+test('MCQ row with 3 options or correct_option E is an error', () => {
+  const r = parseQuestionRows([mcq('Which of these is prime?', ['4', '6', '7'], 'A'), mcq('Which of these is even here?', ['4', '5', '7', '9'], 'E')], new Set());
+  assert.equal(r.valid.length, 0);
+  assert.deepEqual(r.errors.map((e) => [e.row, e.field]), [[2, 'option_d'], [3, 'correct_option']]);
+});
+
+test('WRITTEN row with options is an error; a blank type means WRITTEN', () => {
+  const r = parseQuestionRows([{ ...q('Explain the CAP theorem please'), option_a: 'x' }, q('Explain idempotency in HTTP')], new Set());
+  assert.deepEqual(r.errors.map((e) => [e.row, e.field]), [[2, 'option_a']]);
+  assert.equal(r.valid[0]!.type, 'WRITTEN');
+  assert.deepEqual(r.valid[0]!.options, []);
+});
+
+test('same text different options are not duplicates (MCQ); same text and options are', () => {
+  const r = parseQuestionRows(
+    [mcq('Find the odd one out', ['Cat', 'Dog', 'Car', 'Cow'], 'C'), mcq('Find the odd one out', ['2', '4', '7', '8'], 'C'), mcq('find the odd ONE out', ['cat', 'dog', 'car', 'cow'], 'C')],
+    new Set(),
+  );
+  assert.equal(r.valid.length, 2);
+  assert.deepEqual(r.duplicates, [{ row: 4, reason: 'IN_FILE' }]);
+});
+
+test('an unknown type is an error on type', () => {
+  const r = parseQuestionRows([{ ...q('Explain idempotency in HTTP'), type: 'ESSAY' }], new Set());
+  assert.deepEqual(r.errors.map((e) => e.field), ['type']);
 });

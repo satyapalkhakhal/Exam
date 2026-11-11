@@ -34,3 +34,16 @@ test('marksText formats and dashes', () => {
   assert.equal(marksText({ ...exam, totalMarks: 38, percentage: 76 }), '38 / 50 (76%)');
   assert.equal(marksText({ ...exam, totalMarks: 37.5, percentage: 75 }), '37.5 / 50 (75%)');
 });
+
+test('candidateQuery serialises driveId/collegeId/roundId/jobProfileType; blank ones are left out', () => {
+  const q = candidateQuery(f({ driveId: 'd1', collegeId: 'c1', roundId: 'r1', jobProfileType: 'INTERNSHIP' }));
+  assert.deepEqual([q.get('driveId'), q.get('collegeId'), q.get('roundId'), q.get('jobProfileType')], ['d1', 'c1', 'r1', 'INTERNSHIP']);
+  const none = candidateQuery(f());
+  for (const k of ['driveId', 'collegeId', 'roundId', 'jobProfileType']) assert.equal(none.has(k), false, k);
+});
+
+test('candidate query string carries batch and roundNumber', () => {
+  const q = candidateQuery(f({ batch: 'Nov 2026', roundNumber: '1' }));
+  assert.deepEqual([q.get('batch'), q.get('roundNumber')], ['Nov 2026', '1']);
+  assert.equal(candidateQuery(f()).has('batch'), false);
+});

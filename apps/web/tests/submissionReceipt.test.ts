@@ -67,3 +67,15 @@ test('candidates near you: the count, or Not available without a shared start lo
   const none = Object.fromEntries(receiptRows({ ...candidate, nearbyCount: null }, summary).map((r) => [r.label, r.value]));
   assert.equal(none['Candidates near you'], 'Not available');
 });
+
+test('receipt title adds Round 2 only when roundNumber set; internships are labelled', async () => {
+  const { examTitle } = await import('../src/lib/submissionReceipt.js');
+  assert.equal(examTitle({ jobRole: { name: 'Quant Analyst' }, jobProfileType: 'PLACEMENT', roundNumber: null }), 'Quant Analyst');
+  assert.equal(examTitle({ jobRole: { name: 'Quant Analyst' }, jobProfileType: 'PLACEMENT', roundNumber: 2 }), 'Quant Analyst · Round 2');
+  assert.equal(examTitle({ jobRole: { name: 'Quant Analyst' }, jobProfileType: 'INTERNSHIP', roundNumber: null }), 'Quant Analyst (Internship)');
+  const rows = receiptRows({ ...candidate, jobProfileType: 'INTERNSHIP', roundNumber: 2 }, {
+    status: 'SUBMITTED', submitType: 'MANUAL', startedAt: null, submittedAt: null, answeredCount: 1, questionCount: 2,
+  } as never);
+  assert.equal(rows.find((r) => r.label === 'Job profile')?.value, 'AI & ML Engineer (Internship) · Round 2');
+  assert.ok(!rows.some((r) => /college/i.test(r.label)), 'the college is never shown to candidates');
+});

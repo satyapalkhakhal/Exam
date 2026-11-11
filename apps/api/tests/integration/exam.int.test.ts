@@ -17,7 +17,7 @@ import { createApp } from '../../src/app.js';
 import { autoSubmitAttempt, getFlagCounts, exam } from '../../src/modules/exam/index.js';
 import { sweepExpiredAttempts } from '../../src/infrastructure/queue/sweep.js';
 import { closeAutoSubmitQueue, getAutoSubmitQueue } from '../../src/infrastructure/queue/autoSubmit.queue.js';
-import { createApplication, createCandidate, createCandidates } from './helpers.js';
+import { createApplication, createCandidate, createCandidates, createDrive } from './helpers.js';
 import { issueRefreshToken, peekRefreshFamily, signAccess } from '../../src/modules/adminAuth/tokens.js';
 
 const RUN = crypto.randomBytes(4).toString('hex');
@@ -29,12 +29,14 @@ let roleId = '';
 let closedRoleId = '';
 const emails: Record<string, string> = {};
 const ids: Record<string, string> = {};
+/** jobRoleId -> its Round 1 and the test drive (spec 2026-11-10: settings live on round + drive). */
+const driveOf: Record<string, { roundId: string; driveId: string }> = {};
 
 const mobile = () => `9${crypto.randomInt(100_000_000, 999_999_999)}`;
 
 async function makeCandidate(key: string, jobRoleId: string, extra: { locationExempt?: boolean } = {}) {
   const email = `${key}-${RUN}@exam.int.test`;
-  const c = await createCandidate({ candidateCode: `X-${RUN}-${key}`, fullName: `Exam ${key}`, email, mobile: mobile(), jobRoleId, ...extra });
+  const c = await createCandidate({ candidateCode: `X-${RUN}-${key}`, fullName: `Exam ${key}`, email, mobile: mobile(), jobRoleId, driveId: driveOf[jobRoleId]!.driveId, ...extra });
   emails[key] = email;
   ids[key] = c.id;
 }
@@ -44,17 +46,17 @@ before(async () => {
   assert.match(env.REDIS_URL, /\/15$/);
   const role = await prisma.jobRole.create({ data: { name: `Exam Engine ${RUN}` } });
   roleId = role.id;
-  await prisma.examSetting.create({ data: { jobRoleId: role.id, durationMinutes: 1, isOpen: true } });
+  driveOf[role.id] = await createDrive(role.id, { durationMinutes: 1, isOpen: true });
   await prisma.question.createMany({
     data: [
-      { jobRoleId: role.id, text: 'Describe a market.', normalizedTextHash: `a-${RUN}`, maxMarks: 10, evaluatorGuidance: GUIDE, displayOrder: 1 },
-      { jobRoleId: role.id, text: 'Explain risk.', normalizedTextHash: `b-${RUN}`, maxMarks: 15, evaluatorGuidance: GUIDE, displayOrder: 2 },
-      { jobRoleId: role.id, text: 'Retired question.', normalizedTextHash: `c-${RUN}`, maxMarks: 5, displayOrder: 3, active: false },
+      { roundId: driveOf[role.id]!.roundId, text: 'Describe a market.', normalizedTextHash: `a-${RUN}`, maxMarks: 10, evaluatorGuidance: GUIDE, displayOrder: 1 },
+      { roundId: driveOf[role.id]!.roundId, text: 'Explain risk.', normalizedTextHash: `b-${RUN}`, maxMarks: 15, evaluatorGuidance: GUIDE, displayOrder: 2 },
+      { roundId: driveOf[role.id]!.roundId, text: 'Retired question.', normalizedTextHash: `c-${RUN}`, maxMarks: 5, displayOrder: 3, active: false },
     ],
   });
   const closed = await prisma.jobRole.create({ data: { name: `Exam Closed ${RUN}` } });
   closedRoleId = closed.id;
-  await prisma.examSetting.create({ data: { jobRoleId: closed.id, durationMinutes: 1, isOpen: false } });
+  driveOf[closed.id] = await createDrive(closed.id, { durationMinutes: 1, isOpen: false });
   for (const key of ['a', 'b', 'c', 'd', 'e', 'f']) await makeCandidate(key, roleId);
   await makeCandidate('exempt', roleId, { locationExempt: true });
   await makeCandidate('closed', closedRoleId);
@@ -128,10 +130,10 @@ test('start without a granted location is LOCATION_REQUIRED, and the EXAM_START 
 });
 
 test('the first start sets questionsLocked', async () => {
-  const before = await prisma.examSetting.findUniqueOrThrow({ where: { jobRoleId: roleId } });
+  const before = await prisma.examRound.findUniqueOrThrow({ where: { id: driveOf[roleId]!.roundId } });
   assert.equal(before.questionsLocked, false);
   stateA = await start('a');
-  const afterStart = await prisma.examSetting.findUniqueOrThrow({ where: { jobRoleId: roleId } });
+  const afterStart = await prisma.examRound.findUniqueOrThrow({ where: { id: driveOf[roleId]!.roundId } });
   assert.equal(afterStart.questionsLocked, true);
 });
 
@@ -147,7 +149,7 @@ test('start with location returns the state: 2 active questions, a session id, n
       [2, 'Explain risk.', 15],
     ],
   );
-  assert.deepEqual(stateA.questions[0]?.answer, { text: '', wordCount: 0, clientSeq: 0, markedForReview: false, visited: false, lastSavedAt: null });
+  assert.deepEqual(stateA.questions[0]?.answer, { text: '', wordCount: 0, selectedOption: null, clientSeq: 0, markedForReview: false, visited: false, lastSavedAt: null });
   const raw = JSON.stringify(stateA);
   assert.ok(!raw.includes('evaluatorGuidance'));
   assert.ok(!raw.includes(GUIDE));
@@ -520,11 +522,11 @@ test('the beacon and events routes refuse cross-site requests with 403', async (
 
 test('100 concurrent starts for one role all succeed, and saves keep working meanwhile', async () => {
   const role = await prisma.jobRole.create({ data: { name: `Exam Burst ${RUN}` } });
-  await prisma.examSetting.create({ data: { jobRoleId: role.id, durationMinutes: 30, isOpen: true } });
+  driveOf[role.id] = await createDrive(role.id, { durationMinutes: 30, isOpen: true });
   await prisma.question.createMany({
     data: [
-      { jobRoleId: role.id, text: 'Burst one.', normalizedTextHash: `burst-a-${RUN}`, maxMarks: 10, displayOrder: 1 },
-      { jobRoleId: role.id, text: 'Burst two.', normalizedTextHash: `burst-b-${RUN}`, maxMarks: 10, displayOrder: 2 },
+      { roundId: driveOf[role.id]!.roundId, text: 'Burst one.', normalizedTextHash: `burst-a-${RUN}`, maxMarks: 10, displayOrder: 1 },
+      { roundId: driveOf[role.id]!.roundId, text: 'Burst two.', normalizedTextHash: `burst-b-${RUN}`, maxMarks: 10, displayOrder: 2 },
     ],
   });
   const created = await createCandidates(
@@ -534,6 +536,7 @@ test('100 concurrent starts for one role all succeed, and saves keep working mea
       email: `burst${i}-${RUN}@exam.int.test`,
       mobile: mobile(),
       jobRoleId: role.id,
+      driveId: driveOf[role.id]!.driveId,
     })),
   );
   const [early, ...rest] = created;
@@ -557,13 +560,13 @@ test('100 concurrent starts for one role all succeed, and saves keep working mea
   assert.deepEqual(bad, []);
   assert.deepEqual(saveRes.filter((r) => r.status !== 200).map((r) => r.status), []);
   assert.equal(await prisma.examAttempt.count({ where: { candidate: { jobRoleId: role.id } } }), 101);
-  assert.equal((await prisma.examSetting.findUniqueOrThrow({ where: { jobRoleId: role.id } })).questionsLocked, true);
+  assert.equal((await prisma.examRound.findUniqueOrThrow({ where: { id: driveOf[role.id]!.roundId } })).questionsLocked, true);
   assert.equal((await prisma.answer.findUniqueOrThrow({ where: { attemptQuestionId: earlyState.questions[0]!.attemptQuestionId } })).clientSeq, 20);
 
   // Ruling: an already-submitted attempt is ALREADY_ATTEMPTED even once the exam has closed.
   const submit = await request(app).post(`/api/candidate/exams/${early!.id}/submit`).set('Cookie', earlyCookie).send({ sessionId: (await request(app).post(`/api/candidate/exams/${early!.id}/resume`).set('Cookie', earlyCookie)).body.data.sessionId });
   assert.equal(submit.status, 200, JSON.stringify(submit.body));
-  await prisma.examSetting.update({ where: { jobRoleId: role.id }, data: { isOpen: false } });
+  await prisma.drive.update({ where: { id: driveOf[role.id]!.driveId }, data: { isOpen: false } });
   const again = await request(app).post(`/api/candidate/exams/${early!.id}/start`).set('Cookie', earlyCookie).send({ location: HERE });
   assert.equal(again.status, 409, JSON.stringify(again.body));
   assert.equal(again.body.error.code, 'ALREADY_ATTEMPTED');
@@ -573,12 +576,12 @@ test('100 concurrent starts for one role all succeed, and saves keep working mea
 
 test('I1: a repeated start of a running attempt resumes it after windowEnd and without a location', async () => {
   const role = await prisma.jobRole.create({ data: { name: `Exam Late ${RUN}` } });
-  await prisma.examSetting.create({ data: { jobRoleId: role.id, durationMinutes: 30, isOpen: true } });
-  await prisma.question.create({ data: { jobRoleId: role.id, text: 'Late one.', normalizedTextHash: `late-${RUN}`, maxMarks: 10, displayOrder: 1 } });
+  driveOf[role.id] = await createDrive(role.id, { durationMinutes: 30, isOpen: true });
+  await prisma.question.create({ data: { roundId: driveOf[role.id]!.roundId, text: 'Late one.', normalizedTextHash: `late-${RUN}`, maxMarks: 10, displayOrder: 1 } });
   await makeCandidate('late', role.id);
   const first = await start('late');
   // The window closes while the candidate is mid-exam (they keep their full duration).
-  await prisma.examSetting.update({ where: { jobRoleId: role.id }, data: { windowEnd: new Date(Date.now() - 60_000) } });
+  await prisma.drive.update({ where: { id: driveOf[role.id]!.driveId }, data: { windowEnd: new Date(Date.now() - 60_000) } });
   const afterWindow = await agents.late!.post(`/api/candidate/exams/${ids.late}/start`).send({ location: HERE });
   assert.equal(afterWindow.status, 200, JSON.stringify(afterWindow.body));
   assert.equal(afterWindow.body.data.attemptId, first.attemptId);
@@ -597,8 +600,8 @@ test('I1: a repeated start of a running attempt resumes it after windowEnd and w
 
 test('I4: an Undo re-insertion sent as restoredChars is saved without a SUSPICIOUS_BULK_INSERT flag', async () => {
   const role = await prisma.jobRole.create({ data: { name: `Exam Undo ${RUN}` } });
-  await prisma.examSetting.create({ data: { jobRoleId: role.id, durationMinutes: 30, isOpen: true } });
-  await prisma.question.create({ data: { jobRoleId: role.id, text: 'Undo one.', normalizedTextHash: `undo-${RUN}`, maxMarks: 10, displayOrder: 1 } });
+  driveOf[role.id] = await createDrive(role.id, { durationMinutes: 30, isOpen: true });
+  await prisma.question.create({ data: { roundId: driveOf[role.id]!.roundId, text: 'Undo one.', normalizedTextHash: `undo-${RUN}`, maxMarks: 10, displayOrder: 1 } });
   await makeCandidate('undo', role.id);
   const st = await start('undo');
   const aq = st.questions[0]!.attemptQuestionId;
@@ -614,10 +617,10 @@ test('I4: an Undo re-insertion sent as restoredChars is saved without a SUSPICIO
 
 test('one exam at a time: starting a second application while the first runs is 409 ANOTHER_EXAM_IN_PROGRESS; after submit it starts; /exams reflects progress', async () => {
   const roleB = await prisma.jobRole.create({ data: { name: `Exam Multi B ${RUN}` } });
-  await prisma.examSetting.create({ data: { jobRoleId: roleB.id, durationMinutes: 30, isOpen: true } });
-  await prisma.question.create({ data: { jobRoleId: roleB.id, text: 'Multi B.', normalizedTextHash: `multi-b-${RUN}`, maxMarks: 10, displayOrder: 1 } });
-  const first = await createCandidate({ candidateCode: `M-${RUN}-1`, fullName: 'Multi Person', email: `multi-${RUN}@exam.int.test`, mobile: mobile(), jobRoleId: roleId, locationExempt: true });
-  const second = await createApplication(first.id, { candidateCode: `M-${RUN}-2`, fullName: 'Multi Person', jobRoleId: roleB.id, locationExempt: true });
+  driveOf[roleB.id] = await createDrive(roleB.id, { durationMinutes: 30, isOpen: true });
+  await prisma.question.create({ data: { roundId: driveOf[roleB.id]!.roundId, text: 'Multi B.', normalizedTextHash: `multi-b-${RUN}`, maxMarks: 10, displayOrder: 1 } });
+  const first = await createCandidate({ candidateCode: `M-${RUN}-1`, fullName: 'Multi Person', email: `multi-${RUN}@exam.int.test`, mobile: mobile(), jobRoleId: roleId, driveId: driveOf[roleId]!.driveId, locationExempt: true });
+  const second = await createApplication(first.id, { candidateCode: `M-${RUN}-2`, fullName: 'Multi Person', jobRoleId: roleB.id, driveId: driveOf[roleB.id]!.driveId, locationExempt: true });
   const cookie = await mintCookies(first.id);
   const DENIED = { location: { stage: 'EXAM_START', permission: 'DENIED' } };
 
@@ -649,7 +652,197 @@ test('one exam at a time: starting a second application while the first runs is 
   assert.equal(JSON.stringify(after.body).includes('SHORTLISTED'), false);
 
   // Another account cannot reach the application.
-  const stranger = await createCandidate({ candidateCode: `M-${RUN}-3`, fullName: 'Stranger', email: `stranger-${RUN}@exam.int.test`, mobile: mobile(), jobRoleId: roleId });
+  const stranger = await createCandidate({ candidateCode: `M-${RUN}-3`, fullName: 'Stranger', email: `stranger-${RUN}@exam.int.test`, mobile: mobile(), jobRoleId: roleId, driveId: driveOf[roleId]!.driveId });
   const theirs = await request(app).get(`/api/candidate/exams/${first.id}`).set('Cookie', await mintCookies(stranger.id));
   assert.equal(theirs.status, 404);
+});
+
+
+// ---- drives: one round, several colleges (spec 2026-11-10) ------------------
+
+async function twoDriveRound(name: string) {
+  const role = await prisma.jobRole.create({ data: { name: `${name} ${RUN}` } });
+  const a = await createDrive(role.id, { durationMinutes: 30, isOpen: true, college: 'DRVA' });
+  const b = await createDrive(role.id, { durationMinutes: 30, isOpen: false, college: 'DRVB' });
+  await prisma.question.create({ data: { roundId: a.roundId, text: `${name} one.`, normalizedTextHash: `${name}-${RUN}`, maxMarks: 10, displayOrder: 1 } });
+  const person = async (key: string, driveId: string) =>
+    createCandidate({ candidateCode: `D-${RUN}-${key}`, fullName: `Drive ${key}`, email: `${key}-${RUN}@exam.int.test`, mobile: mobile(), jobRoleId: role.id, driveId, locationExempt: true });
+  return { role, a, b, person };
+}
+const DENIED_START = { location: { stage: 'EXAM_START', permission: 'DENIED' } };
+
+test('two drives of one round: window open in A only → start in A ok, start in B 403 EXAM_NOT_OPEN', async () => {
+  const { a, b, person } = await twoDriveRound('TwoDrives');
+  const inA = await person('twoa', a.driveId);
+  const inB = await person('twob', b.driveId);
+  const okA = await request(app).post(`/api/candidate/exams/${inA.id}/start`).set('Cookie', await mintCookies(inA.id)).send(DENIED_START);
+  assert.equal(okA.status, 200, JSON.stringify(okA.body));
+  const noB = await request(app).post(`/api/candidate/exams/${inB.id}/start`).set('Cookie', await mintCookies(inB.id)).send(DENIED_START);
+  assert.equal(noB.status, 403, JSON.stringify(noB.body));
+  assert.equal(noB.body.error.code, 'EXAM_NOT_OPEN');
+  // Drive B's own list entry shows B's switch, A's shows A's.
+  const listB = await request(app).get('/api/candidate/exams').set('Cookie', await mintCookies(inB.id));
+  assert.equal(listB.body.data.exams[0].isOpen, false);
+  assert.equal(listB.body.data.exams[0].roundNumber, null);
+  assert.equal(listB.body.data.exams[0].jobProfileType, 'PLACEMENT');
+  assert.ok(!/college|DRVB/i.test(JSON.stringify(listB.body)), 'candidates never see the college');
+});
+
+test('start in drive A locks round questions for drive B', async () => {
+  const { a, b, person } = await twoDriveRound('SharedLock');
+  const inA = await person('locka', a.driveId);
+  assert.equal((await prisma.examRound.findUniqueOrThrow({ where: { id: a.roundId } })).questionsLocked, false);
+  const res = await request(app).post(`/api/candidate/exams/${inA.id}/start`).set('Cookie', await mintCookies(inA.id)).send(DENIED_START);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(a.roundId, b.roundId);
+  assert.equal((await prisma.examRound.findUniqueOrThrow({ where: { id: b.roundId } })).questionsLocked, true);
+});
+
+test('resume after same-round move', async () => {
+  const { a, b, person } = await twoDriveRound('MoveResume');
+  const who = await person('mover', a.driveId);
+  const cookie = await mintCookies(who.id);
+  const started = await request(app).post(`/api/candidate/exams/${who.id}/start`).set('Cookie', cookie).send(DENIED_START);
+  assert.equal(started.status, 200, JSON.stringify(started.body));
+  // An admin corrects the college: same round, so the running attempt stays valid.
+  await prisma.candidate.update({ where: { id: who.id }, data: { driveId: b.driveId } });
+  const resumed = await request(app).post(`/api/candidate/exams/${who.id}/resume`).set('Cookie', cookie);
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+  assert.equal(resumed.body.data.attemptId, started.body.data.attemptId);
+  const done = await request(app).post(`/api/candidate/exams/${who.id}/submit`).set('Cookie', cookie).send({ sessionId: resumed.body.data.sessionId });
+  assert.equal(done.status, 200, JSON.stringify(done.body));
+});
+
+test('roundNumber shows on the candidate list once the job profile has two rounds; internship type is passed through', async () => {
+  const role = await prisma.jobRole.create({ data: { name: `Two Rounds ${RUN}`, type: 'INTERNSHIP' } });
+  await createDrive(role.id, { roundNumber: 1, isOpen: false });
+  const r2 = await createDrive(role.id, { roundNumber: 2, isOpen: false });
+  const who = await createCandidate({ candidateCode: `R2-${RUN}`, fullName: 'Round Two', email: `r2-${RUN}@exam.int.test`, mobile: mobile(), jobRoleId: role.id, driveId: r2.driveId });
+  const list = await request(app).get('/api/candidate/exams').set('Cookie', await mintCookies(who.id));
+  assert.equal(list.status, 200, JSON.stringify(list.body));
+  assert.deepEqual([list.body.data.exams[0].roundNumber, list.body.data.exams[0].jobProfileType], [2, 'INTERNSHIP']);
+});
+
+// ---- MCQ questions (spec 2026-11-10 MCQ questions) ----------------------------------
+
+async function mcqRound(name: string, opts: { written?: boolean; negative?: number } = {}) {
+  const role = await prisma.jobRole.create({ data: { name: `${name} ${RUN}` } });
+  const d = await createDrive(role.id, { durationMinutes: 30, isOpen: true, college: 'MCQC' });
+  if (opts.negative) await prisma.examRound.update({ where: { id: d.roundId }, data: { mcqNegativeMarks: opts.negative } });
+  await prisma.question.createMany({
+    data: [
+      { roundId: d.roundId, type: 'MCQ', text: `${name} prime?`, normalizedTextHash: `${name}-m1-${RUN}`, maxMarks: 2, options: ['4', '6', '7', '9'], correctOption: 2, displayOrder: 1 },
+      { roundId: d.roundId, type: 'MCQ', text: `${name} even?`, normalizedTextHash: `${name}-m2-${RUN}`, maxMarks: 1, options: ['3', '5', '8', '11'], correctOption: 2, displayOrder: 2 },
+      ...(opts.written === false ? [] : [{ roundId: d.roundId, text: `${name} explain.`, normalizedTextHash: `${name}-w-${RUN}`, maxMarks: 5, displayOrder: 0 }]),
+    ],
+  });
+  const who = await createCandidate({ candidateCode: `MQ-${RUN}-${name}`, fullName: `Mcq ${name}`, email: `mcq-${name.toLowerCase()}-${RUN}@exam.int.test`, mobile: mobile(), jobRoleId: role.id, driveId: d.driveId, locationExempt: true });
+  return { role, d, who, cookie: await mintCookies(who.id) };
+}
+
+test('candidate payloads never reveal the correct option', async () => {
+  const { who, cookie } = await mcqRound('McqLeak', { negative: 0.25 });
+  const start = await request(app).post(`/api/candidate/exams/${who.id}/start`).set('Cookie', cookie).send(DENIED_START);
+  assert.equal(start.status, 200, JSON.stringify(start.body));
+  const qs = start.body.data.questions as { type: string; options: string[]; answer: { selectedOption: number | null } }[];
+  assert.deepEqual(qs.map((q) => q.type), ['MCQ', 'MCQ', 'WRITTEN']);
+  assert.deepEqual([...qs[0]!.options].sort().length, 4);
+  assert.equal(qs[0]!.answer.selectedOption, null);
+  assert.equal(start.body.data.mcqNegativeMarks, 0.25);
+  const payloads = [
+    start.body,
+    (await request(app).post(`/api/candidate/exams/${who.id}/resume`).set('Cookie', cookie)).body,
+    (await request(app).get(`/api/candidate/exams/${who.id}/state`).set('Cookie', cookie)).body,
+    (await request(app).get(`/api/candidate/exams/${who.id}/summary`).set('Cookie', cookie)).body,
+    (await request(app).get('/api/candidate/exams').set('Cookie', cookie)).body,
+    (await request(app).get(`/api/candidate/exams/${who.id}`).set('Cookie', cookie)).body,
+  ];
+  for (const p of payloads) assert.ok(!/correct|autoMarks|mcqMarks/i.test(JSON.stringify(p)), JSON.stringify(p).slice(0, 300));
+  const list = payloads[4] as { data: { exams: { mcqNegativeMarks: number }[] } };
+  assert.equal(list.data.exams[0]!.mcqNegativeMarks, 0.25);
+  // The stored snapshot keeps the correct answer in the shown order.
+  const aqs = await prisma.attemptQuestion.findMany({ where: { attempt: { candidateId: who.id } }, orderBy: { order: 'asc' } });
+  const prime = aqs.find((q) => q.textSnapshot.endsWith('prime?'))!;
+  assert.equal(prime.optionsSnapshot[prime.correctSnapshot!], '7');
+  assert.equal(Number(prime.negativeMarksSnapshot), 0.25);
+});
+
+test('choice save follows the answer save rules', async () => {
+  const { who, cookie } = await mcqRound('McqSave');
+  const start = await request(app).post(`/api/candidate/exams/${who.id}/start`).set('Cookie', cookie).send(DENIED_START);
+  const sid = start.body.data.sessionId as string;
+  const [mq, , wq] = start.body.data.questions as { attemptQuestionId: string }[];
+  const choice = (aq: string, body: object) => request(app).put(`/api/candidate/exams/${who.id}/answers/${aq}/choice`).set('Cookie', cookie).send({ sessionId: sid, ...body });
+  const ok = await choice(mq!.attemptQuestionId, { clientSeq: 1, selectedOption: 3 });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.data.accepted, true);
+  assert.equal((await choice(mq!.attemptQuestionId, { clientSeq: 1, selectedOption: 0 })).body.data.reason, 'STALE');
+  assert.equal((await choice(wq!.attemptQuestionId, { clientSeq: 1, selectedOption: 0 })).status, 400, 'no choice on a written question');
+  const text = await request(app).put(`/api/candidate/exams/${who.id}/answers/${mq!.attemptQuestionId}`).set('Cookie', cookie)
+    .send({ sessionId: sid, clientSeq: 2, text: 'hello', typedChars: 5, intervalMs: 2000 });
+  assert.equal(text.status, 400, 'no text on an MCQ');
+  const cleared = await choice(mq!.attemptQuestionId, { clientSeq: 2, selectedOption: null });
+  assert.equal(cleared.body.data.accepted, true);
+  assert.equal((await prisma.answer.findUniqueOrThrow({ where: { attemptQuestionId: mq!.attemptQuestionId } })).selectedOption, null);
+  await choice(mq!.attemptQuestionId, { clientSeq: 3, selectedOption: 1 });
+  const summary = await request(app).get(`/api/candidate/exams/${who.id}/summary`).set('Cookie', cookie);
+  assert.equal(summary.body.data.answeredCount, 1, 'a chosen MCQ counts as answered');
+  // A resumed session supersedes the old one.
+  const resumed = await request(app).post(`/api/candidate/exams/${who.id}/resume`).set('Cookie', cookie);
+  const superseded = await choice(mq!.attemptQuestionId, { clientSeq: 4, selectedOption: 2 });
+  assert.equal(superseded.status, 409);
+  assert.equal(superseded.body.error.code, 'SESSION_SUPERSEDED');
+  // After submit the choice is locked.
+  const newSid = resumed.body.data.sessionId as string;
+  assert.equal((await request(app).post(`/api/candidate/exams/${who.id}/submit`).set('Cookie', cookie).send({ sessionId: newSid })).status, 200);
+  const late = await request(app).put(`/api/candidate/exams/${who.id}/answers/${mq!.attemptQuestionId}/choice`).set('Cookie', cookie).send({ sessionId: newSid, clientSeq: 9, selectedOption: 2 });
+  assert.equal(late.status, 409);
+  assert.equal(late.body.error.code, 'ATTEMPT_LOCKED');
+  assert.equal((await prisma.answer.findUniqueOrThrow({ where: { attemptQuestionId: mq!.attemptQuestionId } })).selectedOption, 1);
+});
+
+test('submit auto-marks MCQs in a mixed test and leaves it for the evaluator', async () => {
+  const { who, cookie } = await mcqRound('McqMixed', { negative: 0.5 });
+  const start = await request(app).post(`/api/candidate/exams/${who.id}/start`).set('Cookie', cookie).send(DENIED_START);
+  const sid = start.body.data.sessionId as string;
+  const qs = start.body.data.questions as { attemptQuestionId: string; type: string; text: string; options: string[] }[];
+  const prime = qs.find((q) => q.text.endsWith('prime?'))!;
+  const even = qs.find((q) => q.text.endsWith('even?'))!;
+  const put = (aq: string, seq: number, selectedOption: number) =>
+    request(app).put(`/api/candidate/exams/${who.id}/answers/${aq}/choice`).set('Cookie', cookie).send({ sessionId: sid, clientSeq: seq, selectedOption });
+  await put(prime.attemptQuestionId, 1, prime.options.indexOf('7')); // right: +2
+  await put(even.attemptQuestionId, 1, even.options.indexOf('3')); // wrong: -0.5
+  assert.equal((await request(app).post(`/api/candidate/exams/${who.id}/submit`).set('Cookie', cookie).send({ sessionId: sid })).status, 200);
+  const attempt = await prisma.examAttempt.findFirstOrThrow({ where: { candidateId: who.id }, include: { questions: true, evaluation: true } });
+  assert.deepEqual([Number(attempt.mcqMarks), Number(attempt.mcqMaxMarks)], [1.5, 3]);
+  const marks = Object.fromEntries(attempt.questions.map((q) => [q.textSnapshot, q.autoMarks === null ? null : Number(q.autoMarks)]));
+  assert.deepEqual(marks, { 'McqMixed prime?': 2, 'McqMixed even?': -0.5, 'McqMixed explain.': null });
+  assert.equal(attempt.evaluation, null, 'written answers still need an evaluator');
+  assert.equal(attempt.totalMarks, null);
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: who.id } })).status, 'SUBMITTED');
+});
+
+test('auto-submit auto-marks and auto-evaluates an MCQ-only attempt', async () => {
+  const { who, cookie } = await mcqRound('McqOnly', { written: false, negative: 0.5 });
+  const start = await request(app).post(`/api/candidate/exams/${who.id}/start`).set('Cookie', cookie).send(DENIED_START);
+  const sid = start.body.data.sessionId as string;
+  const qs = start.body.data.questions as { attemptQuestionId: string; text: string; options: string[] }[];
+  const prime = qs.find((q) => q.text.endsWith('prime?'))!;
+  await request(app).put(`/api/candidate/exams/${who.id}/answers/${prime.attemptQuestionId}/choice`).set('Cookie', cookie)
+    .send({ sessionId: sid, clientSeq: 1, selectedOption: prime.options.indexOf('4') }); // wrong: -0.5, other unanswered
+  // Time runs out.
+  const attemptId = start.body.data.attemptId as string;
+  await prisma.examAttempt.update({ where: { id: attemptId }, data: { endsAt: new Date(Date.now() - 60_000) } });
+  assert.equal(await autoSubmitAttempt(attemptId), true);
+  const a = await prisma.examAttempt.findUniqueOrThrow({ where: { id: attemptId }, include: { evaluation: true } });
+  assert.equal(a.status, 'AUTO_SUBMITTED');
+  assert.deepEqual([Number(a.mcqMarks), Number(a.mcqMaxMarks)], [-0.5, 3]);
+  assert.equal(a.evaluation?.status, 'SUBMITTED');
+  assert.equal(a.evaluation?.evaluatorId, null);
+  assert.deepEqual([Number(a.totalMarks), Number(a.maxMarks), Number(a.percentage)], [0, 3, 0], 'total floored at 0');
+  const c = await prisma.candidate.findUniqueOrThrow({ where: { id: who.id } });
+  assert.equal(c.status, 'EVALUATED');
+  const history = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId: who.id, toStatus: 'EVALUATED' } });
+  assert.equal(history.comment, 'Auto-marked (MCQ only)');
+  assert.equal(await prisma.activityLog.count({ where: { attemptId, eventType: 'EXAM_AUTO_MARKED' } }), 1);
 });

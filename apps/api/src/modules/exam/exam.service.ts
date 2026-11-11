@@ -14,15 +14,16 @@
 // checked under the account row lock.
 
 import crypto from 'node:crypto';
-import { countWords, examAvailability, type CandidateExamDetailDto, type CandidateExamDto, type CandidateExamListDto, type ExamEventsInput, type ExamStartInput, type ExamState, type ExamSummaryDto, type SaveAnswerInput, type SaveAnswerResult } from '@exam/shared';
+import { countWords, examAvailability, type CandidateExamDetailDto, type CandidateExamDto, type CandidateExamListDto, type ExamEventsInput, type ExamStartInput, type ExamState, type ExamSummaryDto, type JobProfileType, type SaveAnswerInput, type SaveAnswerResult, type SaveChoiceInput } from '@exam/shared';
 import { logger } from '../../infrastructure/logger/logger.js';
-import { AppError, conflict, forbidden, notFound } from '../../shared/errors.js';
+import { AppError, badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import type { ClientInfo } from '../../shared/utils/clientInfo.js';
 import { SAVE_GRACE_MS } from '../../infrastructure/queue/autoSubmit.queue.js';
 import { assessSave } from './integrity.js';
+import { buildAttemptQuestions } from './mcqShuffle.js';
 import { flagScore, type CandidateFlags } from './flagScore.js';
 import { evaluateLocationFlags, LOCATION_FLAG_THRESHOLDS, nearbyCountOf, type LocationFlag } from './locationFlags.js';
-import type { ActivityEntry, ExamRepository, LiveAttempt } from './exam.repository.js';
+import type { ActivityEntry, ExamRepository, ExamTx, LiveAttempt } from './exam.repository.js';
 
 /** A version row at most this often per answer (design §7.5). */
 export const VERSION_INTERVAL_MS = 30_000;
@@ -37,11 +38,27 @@ const superseded = () => new AppError(409, 'SESSION_SUPERSEDED', 'This exam is o
 
 export interface ExamServiceDeps {
   repo: ExamRepository;
-  getSettings: (jobRoleId: string) => Promise<{ durationMinutes: number; isOpen: boolean; windowStart: Date | null; windowEnd: Date | null; instructions: string } | null>;
+  /** Window/open/instructions from the drive; duration, round and type from its round (spec 2026-11-10). */
+  getDriveSettings: (driveId: string) => Promise<DriveExamSettings | null>;
   recordStartLocation: (auth: { id: string; sessionFamily: string }, applicationId: string, location: ExamStartInput['location'], client: ClientInfo) => Promise<void>;
   queue: { enqueue: (attemptId: string, endsAt: Date) => Promise<void>; remove: (attemptId: string) => Promise<void> };
   bindFamily: (family: string, accountId: string) => Promise<void>;
   now?: () => Date;
+}
+
+export interface DriveExamSettings {
+  durationMinutes: number;
+  isOpen: boolean;
+  windowStart: Date | null;
+  windowEnd: Date | null;
+  instructions: string;
+  roundId: string;
+  roundNumber: number;
+  /** Rounds the job profile has; the candidate sees the round number only when it is above 1. */
+  roundCount: number;
+  jobProfileType: JobProfileType;
+  /** Marks lost per wrong MCQ answer in the round (0 = none). */
+  mcqNegativeMarks: number;
 }
 
 export interface IntegrityCounts {
@@ -84,14 +101,19 @@ export function createExamService(deps: ExamServiceDeps) {
       startedAt: a.startedAt.toISOString(),
       endsAt: a.endsAt.toISOString(),
       durationMinutes: Math.round((a.endsAt.getTime() - a.startedAt.getTime()) / 60_000),
+      // The penalty copied at start; never the correct option or any mark.
+      mcqNegativeMarks: Number(a.questions.find((q) => q.typeSnapshot === 'MCQ')?.negativeMarksSnapshot ?? 0),
       questions: a.questions.map((q) => ({
         attemptQuestionId: q.id,
         order: q.order,
+        type: q.typeSnapshot,
         text: q.textSnapshot,
+        options: q.optionsSnapshot,
         maxMarks: Number(q.maxMarksSnapshot),
         answer: {
           text: q.answer?.text ?? '',
           wordCount: q.answer?.wordCount ?? 0,
+          selectedOption: q.answer?.selectedOption ?? null,
           clientSeq: q.answer?.clientSeq ?? 0,
           markedForReview: q.answer?.markedForReview ?? false,
           visited: q.answer?.visited ?? false,
@@ -150,7 +172,7 @@ export function createExamService(deps: ExamServiceDeps) {
       return takeOver(auth, applicationId, settled, client);
     }
 
-    const settings = await deps.getSettings(candidate.jobRoleId);
+    const settings = await deps.getDriveSettings(candidate.driveId);
     const availability = examAvailability(settings ?? { isOpen: false, windowStart: null, windowEnd: null }, now());
     if (availability === 'AFTER_WINDOW') throw new AppError(403, 'EXAM_WINDOW_CLOSED', 'The exam window has closed.');
     if (availability !== 'OPEN') throw new AppError(403, 'EXAM_NOT_OPEN', 'The exam is not open yet.');
@@ -162,25 +184,31 @@ export function createExamService(deps: ExamServiceDeps) {
 
     const sessionId = crypto.randomUUID();
     const outcome = await repo.transaction(async (tx) => {
-      // Account row first (serialises this person's starts), then the role
-      // settings row (the order question writes use; shared once the role is
-      // locked), then the candidate row, then re-read the role under the lock: a concurrent role change or a second start cannot slip between the
-      // checks and the insert.
+      // Account row first (serialises this person's starts), then the round
+      // row (the order question writes use; shared once the round is locked,
+      // and shared by every college's drive of the round), then the candidate
+      // row, then re-read its round under the lock: a move to a drive of another
+      // round or a second start cannot slip between the checks and the insert.
+      // A move to another drive of the same round keeps the start valid (same
+      // questions).
+      if (!settings) throw new AppError(403, 'EXAM_NOT_OPEN', 'The exam is not open yet.');
       if (!(await tx.lockAccount(auth.id))) throw forbidden('You are not eligible to take this exam.');
-      if (!(await tx.holdRoleLocked(candidate.jobRoleId))) throw new AppError(403, 'EXAM_NOT_OPEN', 'The exam is not open yet.');
+      const round = await tx.holdRoundLocked(settings.roundId);
+      if (!round) throw new AppError(403, 'EXAM_NOT_OPEN', 'The exam is not open yet.');
       const locked = await tx.lockCandidate(applicationId);
       if (!locked || !locked.eligible) throw forbidden('You are not eligible to take this exam.');
-      if (locked.jobRoleId !== candidate.jobRoleId) throw conflict('Your exam role has just changed. Please try again.');
+      if (locked.roundId !== settings.roundId) throw conflict('Your exam has just changed. Please try again.');
       const raced = await tx.findLiveAttempt(applicationId);
       if (raced) return { kind: 'existing', attempt: raced } as const;
       if (await tx.hasOtherRunningAttempt(auth.id, applicationId, now())) {
         throw new AppError(409, 'ANOTHER_EXAM_IN_PROGRESS', 'Finish your other exam before starting this one.');
       }
 
-      const questions = await tx.activeQuestions(locked.jobRoleId);
+      // MCQs first in this candidate's own shuffled order (options shuffled too); written after.
+      const questions = buildAttemptQuestions(await tx.activeQuestions(locked.roundId));
       if (questions.length === 0) throw new AppError(403, 'EXAM_NOT_OPEN', 'This exam has no questions yet.');
       const startedAt = now();
-      const durationMinutes = settings?.durationMinutes ?? 60;
+      const durationMinutes = settings.durationMinutes;
       const endsAt = new Date(startedAt.getTime() + durationMinutes * 60_000);
       const attemptId = await tx.createAttempt({
         candidateId: applicationId,
@@ -190,6 +218,8 @@ export function createExamService(deps: ExamServiceDeps) {
         ip: client.ip,
         userAgent: client.userAgent,
         questions,
+        // Read under the round lock, so every attempt of the round freezes the same penalty.
+        negativeMarks: round.mcqNegativeMarks,
       });
       await tx.setCandidateStatus(applicationId, locked.status, 'IN_PROGRESS');
       await tx.addActivity({
@@ -274,6 +304,7 @@ export function createExamService(deps: ExamServiceDeps) {
       const at = now();
       if (attempt.status !== 'IN_PROGRESS' || pastGrace(attempt.endsAt, at)) throw attemptLocked();
       if (input.sessionId !== attempt.activeSessionId) throw superseded();
+      if (locked.questionType === 'MCQ') throw badRequest('This is a multiple-choice question: choose an option.');
       if (input.clientSeq <= answer.clientSeq) return { accepted: false, reason: 'STALE' } as const;
 
       const assessment = assessSave({
@@ -342,6 +373,43 @@ export function createExamService(deps: ExamServiceDeps) {
     return { recorded: entries.length };
   }
 
+  /** An MCQ choice (spec 2026-11-10 MCQ questions): the answer-save rules (session, clientSeq, grace), no versions. */
+  async function saveChoice(auth: Auth, applicationId: string, attemptQuestionId: string, input: SaveChoiceInput): Promise<SaveAnswerResult> {
+    void auth;
+    return repo.transaction(async (tx) => {
+      const locked = await tx.lockForSave(attemptQuestionId);
+      if (!locked || locked.attempt.candidateId !== applicationId) throw notFound('Question not found.');
+      const { attempt, answer } = locked;
+      const at = now();
+      if (attempt.status !== 'IN_PROGRESS' || pastGrace(attempt.endsAt, at)) throw attemptLocked();
+      if (input.sessionId !== attempt.activeSessionId) throw superseded();
+      if (locked.questionType !== 'MCQ') throw badRequest('This is a written question: type an answer.');
+      if (input.clientSeq <= answer.clientSeq) return { accepted: false, reason: 'STALE' } as const;
+      await tx.updateChoice(answer.id, {
+        selectedOption: input.selectedOption,
+        clientSeq: input.clientSeq,
+        savedAt: at,
+        ...(input.markedForReview !== undefined ? { markedForReview: input.markedForReview } : {}),
+        ...(input.visited !== undefined ? { visited: input.visited } : {}),
+      });
+      return { accepted: true, serverNow: at.toISOString(), lastSavedAt: at.toISOString() } as const;
+    });
+  }
+
+  /** MCQ auto-marking (spec 2026-11-10); an MCQ-only attempt is evaluated on the spot. */
+  async function autoMark(tx: ExamTx, attemptId: string, candidateId: string, at: Date): Promise<void> {
+    const r = await tx.markMcqs(attemptId, candidateId, at);
+    if (r.autoEvaluated) {
+      await tx.addActivity({
+        candidateId,
+        attemptId,
+        eventType: 'EXAM_AUTO_MARKED',
+        ip: SYSTEM_IP,
+        metadata: { mcqMarks: r.mcqMarks, mcqMaxMarks: r.mcqMaxMarks },
+      });
+    }
+  }
+
   async function submit(applicationId: string, sessionId: string, client: ClientInfo): Promise<{ status: 'SUBMITTED'; submittedAt: string }> {
     const attempt = await liveAttempt(applicationId);
     const at = now();
@@ -356,6 +424,7 @@ export function createExamService(deps: ExamServiceDeps) {
       const from = await tx.candidateStatus(applicationId);
       await tx.setCandidateStatus(applicationId, from, 'SUBMITTED');
       await tx.writeFinalVersions(attempt.id, at);
+      await autoMark(tx, attempt.id, applicationId, at);
       await tx.addActivity({
         candidateId: applicationId,
         attemptId: attempt.id,
@@ -389,6 +458,7 @@ export function createExamService(deps: ExamServiceDeps) {
       const from = await tx.candidateStatus(finished.candidateId);
       await tx.setCandidateStatus(finished.candidateId, from, 'AUTO_SUBMITTED');
       await tx.writeFinalVersions(attemptId, at);
+      await autoMark(tx, attemptId, finished.candidateId, at);
       await tx.addActivity({
         candidateId: finished.candidateId,
         attemptId,
@@ -412,21 +482,24 @@ export function createExamService(deps: ExamServiceDeps) {
       for (const a of expired) await autoSubmitAttempt(a.attempt!.id);
       apps = await repo.listApplications(accountId, applicationId);
     }
-    const settings = new Map<string, Awaited<ReturnType<ExamServiceDeps['getSettings']>>>();
-    for (const roleId of new Set(apps.map((a) => a.jobRole.id))) settings.set(roleId, await deps.getSettings(roleId));
+    const settings = new Map<string, DriveExamSettings | null>();
+    for (const driveId of new Set(apps.map((a) => a.driveId))) settings.set(driveId, await deps.getDriveSettings(driveId));
     const location = await locationFor(apps.map((a) => a.id));
     return apps.map((a) => {
-      const s = settings.get(a.jobRole.id) ?? null;
+      const s = settings.get(a.driveId) ?? null;
       const att = a.attempt;
       return {
         applicationId: a.id,
         candidateCode: a.candidateCode,
         jobRole: a.jobRole,
+        jobProfileType: s?.jobProfileType ?? 'PLACEMENT',
+        roundNumber: s && s.roundCount > 1 ? s.roundNumber : null,
         progress: a.status === 'NOT_STARTED' ? 'NOT_STARTED' : a.status === 'IN_PROGRESS' ? 'IN_PROGRESS' : SUBMITTED_LIKE.has(a.status) ? 'SUBMITTED' : 'NOT_STARTED',
         locationExempt: a.locationExempt,
         selectedForNextRound: a.result === 'SHORTLISTED' ? 'YES' : a.result === 'REJECTED' ? 'NO' : 'AWAITED',
         nearbyCount: ((l) => (l ? nearbyCountOf(l.flags, l.hasStart) : null))(location.get(a.id)),
         durationMinutes: s?.durationMinutes ?? 60,
+        mcqNegativeMarks: s?.mcqNegativeMarks ?? 0,
         windowStart: s?.windowStart?.toISOString() ?? null,
         windowEnd: s?.windowEnd?.toISOString() ?? null,
         isOpen: s?.isOpen ?? false,
@@ -559,6 +632,7 @@ export function createExamService(deps: ExamServiceDeps) {
     getState,
     resume,
     saveAnswer,
+    saveChoice,
     recordEvents,
     submit,
     autoSubmitAttempt,

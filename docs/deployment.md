@@ -130,6 +130,41 @@ The API validates all of these at startup and refuses to boot if any are missing
 
 ## 9. Updates and rollback
 
+**2026-11-10 — colleges and drives (migration `20261110090000_colleges_drives_rounds`).** This
+migration restructures data: every job role becomes Round 1 with one drive at **IIT Guwahati
+(IITG), batch "Nov 2026"** (all existing candidates are from IITG), and `exam_settings` is
+dropped. Before deploying with `--migrate`:
+
+1. Take a database backup (`pg_dump`), and do it with the exam closed.
+2. Record the counts that must not change:
+   ```sql
+   select (select count(*) from candidates) c, (select count(*) from exam_attempts) at,
+          (select count(*) from answers) an, (select count(*) from attempt_evaluations) ev,
+          (select count(*) from ai_question_scores) ai, (select count(*) from email_dispatches) em,
+          (select count(*) from questions) q, (select count(*) from job_roles) r;
+   ```
+3. Deploy API **and** web together (`deploy-api.sh production --migrate`, then `deploy-web.sh production`):
+   the old web app calls routes that no longer exist.
+4. Run the same query: every number must match. Also check
+   `select count(*) from candidates where drive_id is null` is 0 and
+   `select count(*) from exam_rounds` equals the job role count.
+5. Rename the college or batch on the Colleges / Job profiles pages if needed.
+
+
+**2026-11-10 — MCQ questions (migration `20261110120000_mcq_questions`).** Additive: new
+columns with defaults (question type, options, correct option, negative marking per round, MCQ
+snapshots on attempt questions, the MCQ choice on answers, MCQ subtotals on attempts) and every
+marks column widened from `decimal(6,1)`/`(7,1)` to `decimal(8,2)` (quarter-mark deductions). No
+row is changed or removed; existing questions become `WRITTEN`.
+
+1. Back up first, as always, and take the counts query above before and after: every number must match.
+2. Deploy API **and** web together (`deploy-api.sh production --migrate`, then `deploy-web.sh production`):
+   the answer and marking payloads gained fields the old web app does not send or show.
+3. Don't change a round's negative marking once candidates have started: it is locked with the
+   questions (423), and it is frozen into every attempt when the candidate starts.
+4. This release also fixes candidate autosave (every answer save returned 400 since commit `4b93638`:
+   request params were dropped by validation). Deploying it restores autosave.
+
 - Update: `git pull` → `./deploy/deploy-api.sh production [--migrate]` → `./deploy/deploy-web.sh production`.
 - `deploy-api.sh` tags every image with its timestamp and keeps the last 3. To roll back, run `deploy-api.sh production --image exam-api:<tag>`.
 - Migrations only add things. A migration that removes something must ship as a separate, later release.

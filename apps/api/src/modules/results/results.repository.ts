@@ -6,7 +6,7 @@
 
 import { prisma } from '../../infrastructure/db/prisma.js';
 import type { Prisma } from '../../generated/prisma/client.js';
-import type { CandidateDecisionBulkResultDto, CandidateResult } from '@exam/shared';
+import { driveDisplayName, type CandidateDecisionBulkResultDto, type CandidateResult, type CompositeWeights, type JobProfileType } from '@exam/shared';
 import { writeAudit, type AuditRecord } from '../audit/index.js';
 
 const SUBMITTED_STATUSES = ['SUBMITTED', 'AUTO_SUBMITTED'] as const;
@@ -27,6 +27,7 @@ const candidateSelect = {
   status: true,
   result: true,
   jobRoleId: true,
+  driveId: true,
   jobRole: { select: { name: true } },
 } as const;
 
@@ -39,13 +40,19 @@ const scoredAttemptSelect = {
   totalMarks: true,
   maxMarks: true,
   percentage: true,
+  mcqMarks: true,
+  mcqMaxMarks: true,
   candidate: { select: candidateSelect },
   evaluation: { select: { status: true } },
   questions: {
     orderBy: { order: 'asc' },
     select: {
       order: true,
+      typeSnapshot: true,
       maxMarksSnapshot: true,
+      // MCQ: the correct index (shown order) and the candidate's pick, for the export's counts.
+      correctSnapshot: true,
+      answer: { select: { selectedOption: true } },
       evaluation: { select: { marks: true, comment: true } },
       // Latest DONE AI score only.
       aiScores: { where: { status: 'DONE' }, orderBy: [{ createdAt: 'desc' }, { id: 'asc' }], take: 1, select: { marks: true } },
@@ -59,34 +66,105 @@ const rankOrder: Prisma.ExamAttemptOrderByWithRelationInput[] = [
   { id: 'asc' },
 ];
 
-export const resultsRepository = {
-  roles(jobRoleId?: string) {
-    return prisma.jobRole.findMany({
-      where: jobRoleId ? { id: jobRoleId } : {},
-      orderBy: { name: 'asc' },
-      select: { id: true, name: true, refApplicantCount: true },
-    });
-  },
+/** A drive as results need it: names for sheets and the dashboard, its round's weights. */
+export interface ResultDrive {
+  id: string;
+  jobRoleId: string;
+  jobRoleName: string;
+  jobProfileType: JobProfileType;
+  roundId: string;
+  roundNumber: number;
+  collegeId: string;
+  collegeName: string;
+  collegeShortCode: string;
+  batch: string;
+  refApplicantCount: number;
+  weights: CompositeWeights;
+}
 
-  async statusCounts() {
-    const rows = await prisma.candidate.groupBy({ by: ['jobRoleId', 'status', 'result'], _count: { _all: true } });
-    return rows.map((r) => ({ jobRoleId: r.jobRoleId, status: r.status as CandidateStatusValue, result: r.result, count: r._count._all }));
+export const displayNameOf = (d: ResultDrive): string =>
+  driveDisplayName({ jobRoleName: d.jobRoleName, roundNumber: d.roundNumber, collegeShortCode: d.collegeShortCode, batch: d.batch });
+
+export interface DriveFilter {
+  driveId?: string;
+  roundId?: string;
+  collegeId?: string;
+  jobRoleId?: string;
+}
+
+export const resultsRepository = {
+  /** Drives matching the filter (all when empty), ordered job profile, round, college, batch. */
+  async drives(f: DriveFilter): Promise<ResultDrive[]> {
+    const rows = await prisma.drive.findMany({
+      where: {
+        ...(f.driveId ? { id: f.driveId } : {}),
+        ...(f.roundId ? { roundId: f.roundId } : {}),
+        ...(f.collegeId ? { collegeId: f.collegeId } : {}),
+        ...(f.jobRoleId ? { round: { jobRoleId: f.jobRoleId } } : {}),
+      },
+      orderBy: [{ round: { jobRole: { name: 'asc' } } }, { round: { roundNumber: 'asc' } }, { college: { shortCode: 'asc' } }, { batch: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        batch: true,
+        college: { select: { id: true, name: true, shortCode: true } },
+        round: {
+          select: {
+            id: true, roundNumber: true, jobRoleId: true, weightExam: true, weightX: true, weightXii: true, weightCpi: true,
+            jobRole: { select: { name: true, type: true, refApplicantCount: true } },
+          },
+        },
+      },
+    });
+    return rows.map((d) => ({
+      id: d.id,
+      jobRoleId: d.round.jobRoleId,
+      jobRoleName: d.round.jobRole.name,
+      jobProfileType: d.round.jobRole.type,
+      roundId: d.round.id,
+      roundNumber: d.round.roundNumber,
+      collegeId: d.college.id,
+      collegeName: d.college.name,
+      collegeShortCode: d.college.shortCode,
+      batch: d.batch,
+      refApplicantCount: d.round.jobRole.refApplicantCount,
+      weights: { exam: d.round.weightExam, x: d.round.weightX, xii: d.round.weightXii, cpi: d.round.weightCpi },
+    }));
   },
 
   /**
-   * Evaluated candidates of a role, best first, ties by earlier submit. With
+   * Per drive: sum and count of evaluated exam % (evaluation submitted, live attempt only —
+   * never a reset one), for the dashboard's averages weighted across drives.
+   */
+  async examPercentStats(): Promise<{ driveId: string; sum: number; count: number }[]> {
+    const rows = await prisma.$queryRaw<{ drive_id: string; sum: Prisma.Decimal | null; count: bigint }[]>`
+      SELECT c.drive_id::text AS drive_id, sum(a.percentage) AS sum, count(*) AS count
+      FROM exam_attempts a
+      JOIN candidates c ON c.id = a.candidate_id
+      JOIN attempt_evaluations e ON e.attempt_id = a.id AND e.status = 'SUBMITTED'
+      WHERE a.status IN ('SUBMITTED', 'AUTO_SUBMITTED') AND a.percentage IS NOT NULL
+      GROUP BY c.drive_id`;
+    return rows.map((r) => ({ driveId: r.drive_id, sum: Math.round(Number(r.sum ?? 0) * 100) / 100, count: Number(r.count) }));
+  },
+
+  async statusCounts() {
+    const rows = await prisma.candidate.groupBy({ by: ['driveId', 'status', 'result'], _count: { _all: true } });
+    return rows.map((r) => ({ driveId: r.driveId, status: r.status as CandidateStatusValue, result: r.result, count: r._count._all }));
+  },
+
+  /**
+   * Evaluated candidates of a drive, best first, ties by earlier submit. With
    * `withAiOnly`, also submitted attempts that are not human-evaluated yet but
    * have an AI score (they appear with a provisional composite).
    */
-  leaderboard(jobRoleId: string, withAiOnly = false) {
+  leaderboard(driveId: string, withAiOnly = false) {
     const evaluated: Prisma.ExamAttemptWhereInput = {
       evaluation: { is: { status: 'SUBMITTED' } },
       totalMarks: { not: null },
-      candidate: { jobRoleId, status: 'EVALUATED' },
+      candidate: { driveId, status: 'EVALUATED' },
     };
     const aiOnly: Prisma.ExamAttemptWhereInput = {
       NOT: { evaluation: { is: { status: 'SUBMITTED' } } },
-      candidate: { jobRoleId },
+      candidate: { driveId },
       questions: { some: { aiScores: { some: { status: 'DONE' } } } },
     };
     return prisma.examAttempt.findMany({
@@ -96,28 +174,19 @@ export const resultsRepository = {
     });
   },
 
-  /** Composite weights per role (a role without a settings row uses the defaults in the service). */
-  async weightsFor(jobRoleIds: string[]): Promise<Map<string, { exam: number; x: number; xii: number; cpi: number }>> {
-    const rows = await prisma.examSetting.findMany({
-      where: { jobRoleId: { in: jobRoleIds } },
-      select: { jobRoleId: true, weightExam: true, weightX: true, weightXii: true, weightCpi: true },
-    });
-    return new Map(rows.map((r) => [r.jobRoleId, { exam: r.weightExam, x: r.weightX, xii: r.weightXii, cpi: r.weightCpi }]));
-  },
-
-  /** Every submitted attempt of the roles, ranked like the leaderboard (unevaluated last). */
-  submittedAttempts(jobRoleIds: string[]) {
+  /** Every submitted attempt of the drives, ranked like the leaderboard (unevaluated last). */
+  submittedAttempts(driveIds: string[]) {
     return prisma.examAttempt.findMany({
-      where: { status: { in: [...SUBMITTED_STATUSES] }, candidate: { jobRoleId: { in: jobRoleIds } } },
+      where: { status: { in: [...SUBMITTED_STATUSES] }, candidate: { driveId: { in: driveIds } } },
       orderBy: rankOrder,
       select: scoredAttemptSelect,
     });
   },
 
-  /** Every live (not reset) attempt of the roles, for the integrity export. */
-  liveAttempts(jobRoleIds: string[]) {
+  /** Every live (not reset) attempt of the drives, for the integrity export. */
+  liveAttempts(driveIds: string[]) {
     return prisma.examAttempt.findMany({
-      where: { status: { not: 'RESET' }, candidate: { jobRoleId: { in: jobRoleIds } } },
+      where: { status: { not: 'RESET' }, candidate: { driveId: { in: driveIds } } },
       orderBy: [{ startedAt: 'asc' }, { id: 'asc' }],
       select: { id: true, status: true, startedAt: true, submittedAt: true, candidate: { select: candidateSelect } },
     });

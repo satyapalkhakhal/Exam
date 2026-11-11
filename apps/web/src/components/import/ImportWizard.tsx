@@ -1,6 +1,6 @@
 // src/components/import/ImportWizard.tsx
 // Why: one 4-step import flow for candidates and questions (design §5, §6.1): choose
-// role + file -> preview (valid / errors / duplicates) -> confirm -> summary. Step
+// the target (a drive for candidates, a round for questions; spec 2026-11-10) + file -> preview (valid / errors / duplicates) -> confirm -> summary. Step
 // logic lives in lib/importState; this is the thin view. A 409 on confirm means the same
 // file was imported before, so the button becomes "Import anyway" (re-sent with force).
 
@@ -20,23 +20,27 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { QUESTION_TYPE_LABELS, optionsSummary } from '@/lib/mcqForm';
 
 type Row = Record<string, unknown>;
 
 export interface ImportWizardProps {
   kind: 'CANDIDATES' | 'QUESTIONS';
-  jobRoles: Array<{ id: string; name: string }>;
+  /** Drives (candidates) or rounds (questions) the file can go into, already labelled. */
+  targets: Array<{ id: string; name: string }>;
   templateUrl: string;
   /** Optional filled-in example file, offered next to the header-only template. */
   sampleUrl?: string;
-  previewFn: (file: File, jobRoleId: string, opts?: { updateExisting?: boolean }) => Promise<ImportPreview<Row>>;
+  previewFn: (file: File, targetId: string, opts?: { updateExisting?: boolean }) => Promise<ImportPreview<Row>>;
   confirmFn: (a: { previewId: string; force?: boolean }) => Promise<ImportResult>;
   /** Called after a successful import so the host page can refresh. */
   onImported?: () => void;
-  defaultJobRoleId?: string;
+  defaultTargetId?: string;
 }
 
-const COLUMNS: Record<ImportWizardProps['kind'], Array<{ key: string; label: string }>> = {
+type Column = { key: string; label: string; format?: (row: Record<string, unknown>) => string };
+
+const COLUMNS: Record<ImportWizardProps['kind'], Column[]> = {
   CANDIDATES: [
     { key: 'fullName', label: 'Name' },
     { key: 'email', label: 'Email' },
@@ -44,7 +48,13 @@ const COLUMNS: Record<ImportWizardProps['kind'], Array<{ key: string; label: str
     { key: 'mobile', label: 'Mobile' },
   ],
   QUESTIONS: [
+    { key: 'type', label: 'Type', format: (r) => (r.type === 'MCQ' ? QUESTION_TYPE_LABELS.MCQ : QUESTION_TYPE_LABELS.WRITTEN) },
     { key: 'questionText', label: 'Question' },
+    {
+      key: 'options',
+      label: 'Options',
+      format: (r) => (Array.isArray(r.options) ? optionsSummary(r.options as string[], typeof r.correctOption === 'number' ? r.correctOption : null) : ''),
+    },
     { key: 'maxMarks', label: 'Max marks' },
     { key: 'displayOrder', label: 'Order' },
   ],
@@ -53,12 +63,12 @@ const COLUMNS: Record<ImportWizardProps['kind'], Array<{ key: string; label: str
 const DUP_TEXT = { IN_FILE: 'Repeated in this file', EXISTS: 'Already exists' } as const;
 const ACCEPT = '.csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
-export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn, confirmFn, onImported, defaultJobRoleId }: ImportWizardProps) {
+export function ImportWizard({ kind, targets, templateUrl, sampleUrl, previewFn, confirmFn, onImported, defaultTargetId }: ImportWizardProps) {
   const [state, dispatch] = useReducer(
     (s: ImportState<Row>, a: Parameters<typeof importReducer<Row>>[1]) => importReducer<Row>(s, a),
     initialImportState as ImportState<Row>,
   );
-  const [jobRoleId, setJobRoleId] = useState(defaultJobRoleId ?? '');
+  const [targetId, setTargetId] = useState(defaultTargetId ?? '');
   const [file, setFile] = useState<File | null>(null);
   // Candidates only: existing (not yet started) candidates in the file are moved to the
   // chosen job profile and their details refreshed, instead of being skipped.
@@ -82,8 +92,8 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
 
   const preview = () =>
     run(async () => {
-      if (!file || !jobRoleId) return;
-      dispatch({ type: 'PREVIEW_OK', preview: await previewFn(file, jobRoleId, kind === 'CANDIDATES' ? { updateExisting } : undefined) });
+      if (!file || !targetId) return;
+      dispatch({ type: 'PREVIEW_OK', preview: await previewFn(file, targetId, kind === 'CANDIDATES' ? { updateExisting } : undefined) });
     });
 
   const confirm = (force: boolean) =>
@@ -131,15 +141,15 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
       {state.step === 'choose' && (
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <Label htmlFor="imp-role">{kind === 'CANDIDATES' ? 'Job role for this file' : 'Job role'}</Label>
-            <Select id="imp-role" value={jobRoleId} onChange={(e) => setJobRoleId(e.target.value)}>
-              <option value="">Select a role…</option>
-              {jobRoles.map((r) => (
+            <Label htmlFor="imp-role">{kind === 'CANDIDATES' ? 'Drive for this file' : 'Round'}</Label>
+            <Select id="imp-role" value={targetId} onChange={(e) => setTargetId(e.target.value)}>
+              <option value="">{kind === 'CANDIDATES' ? 'Select a drive…' : 'Select a round…'}</option>
+              {targets.map((r) => (
                 <option key={r.id} value={r.id}>{r.name}</option>
               ))}
             </Select>
             {kind === 'CANDIDATES' && (
-              <p className="text-xs text-muted-foreground">A job_role column in the file overrides this per row.</p>
+              <p className="text-xs text-muted-foreground">Every row goes into this drive (one college, one batch). Import each college's list separately.</p>
             )}
           </div>
           <div className="space-y-1.5">
@@ -171,7 +181,7 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
             </label>
           )}
           <div className="flex flex-wrap items-center gap-3">
-            <Button type="button" onClick={preview} disabled={busy || !file || !jobRoleId}>
+            <Button type="button" onClick={preview} disabled={busy || !file || !targetId}>
               <FileUp className="mr-1.5 h-4 w-4" />
               {busy ? 'Reading…' : 'Preview'}
             </Button>
@@ -221,7 +231,7 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
                     {p.valid.map((r, i) => (
                       <TableRow key={i}>
                         {cols.map((c) => (
-                          <TableCell key={c.key} className="max-w-xs truncate">{String(r[c.key] ?? '')}</TableCell>
+                          <TableCell key={c.key} className="max-w-xs truncate">{c.format ? c.format(r) : String(r[c.key] ?? '')}</TableCell>
                         ))}
                       </TableRow>
                     ))}
@@ -277,7 +287,7 @@ export function ImportWizard({ kind, jobRoles, templateUrl, sampleUrl, previewFn
                       {p.updates.map((r, i) => (
                         <TableRow key={i}>
                           {cols.map((c) => (
-                            <TableCell key={c.key} className="max-w-xs truncate">{String(r[c.key] ?? '')}</TableCell>
+                            <TableCell key={c.key} className="max-w-xs truncate">{c.format ? c.format(r) : String(r[c.key] ?? '')}</TableCell>
                           ))}
                         </TableRow>
                       ))}

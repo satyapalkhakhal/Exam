@@ -6,6 +6,7 @@
 // API checks belongs to the signed-in account.
 
 import { z } from 'zod';
+import type { JobProfileType } from './drives.js';
 
 export const ApplicationParamsSchema = z.object({ applicationId: z.string().uuid() });
 export const ApplicationQuestionParamsSchema = ApplicationParamsSchema.extend({ attemptQuestionId: z.string().uuid() });
@@ -35,12 +36,17 @@ export interface CandidateExamDto {
   applicationId: string;
   candidateCode: string;
   jobRole: { id: string; name: string };
+  jobProfileType: JobProfileType;
+  /** Shown only when the job profile has more than one round; null otherwise. The college is never shown to candidates. */
+  roundNumber: number | null;
   progress: CandidateExamProgress;
   selectedForNextRound: CandidateSelection;
   /** Other candidates who started within 100 m and ±2 h of this one; null when no start location was shared. */
   nearbyCount: number | null;
   locationExempt: boolean;
   durationMinutes: number;
+  /** Marks lost per wrong MCQ answer in this round (0 = none). */
+  mcqNegativeMarks: number;
   windowStart: string | null;
   windowEnd: string | null;
   isOpen: boolean;

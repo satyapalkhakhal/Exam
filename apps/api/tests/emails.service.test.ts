@@ -38,6 +38,8 @@ const cand = (n: number, over: Partial<EmailCandidate> = {}): EmailCandidate => 
   status: 'SUBMITTED',
   result: null,
   jobRoleName: 'Backend Engineer',
+  jobProfileType: 'PLACEMENT',
+  roundNumber: null,
   attempt: submitted,
   ...over,
 });
@@ -393,4 +395,17 @@ test('worker keeps the row QUEUED on a failed attempt and FAILED only on the las
   assert.equal(last.state.status, 'FAILED');
   assert.equal(last.state.error, 'ZatpatMail request timed out');
   assert.doesNotMatch(last.state.error ?? '', /<p>|c@x\.test/);
+});
+
+test("emails carry the candidate's job profile type and round (round only when the profile has several)", async () => {
+  const { service, created } = setup({
+    candidates: [
+      cand(1, { status: 'EVALUATED', result: 'REJECTED', jobProfileType: 'INTERNSHIP', roundNumber: 2 }),
+      cand(2, { status: 'EVALUATED', result: 'REJECTED', jobProfileType: 'PLACEMENT', roundNumber: null }),
+    ],
+  });
+  await service.send({ template: 'REJECTED', candidateIds: [id(1), id(2)] }, ADMIN);
+  assert.match(created[0]!.html, /Backend Engineer \(Internship\)/);
+  assert.match(created[0]!.html, /Round 2/);
+  assert.doesNotMatch(created[1]!.html, /\(Internship\)|>Round</);
 });

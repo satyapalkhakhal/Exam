@@ -59,6 +59,19 @@ enum ImportKind {
   QUESTIONS
 }
 
+// Placement (full-time) or internship hiring (spec 2026-11-10 colleges/drives).
+enum JobProfileType {
+  PLACEMENT
+  INTERNSHIP
+}
+
+// Written (marked by an evaluator) or MCQ (4 options, one correct, auto-marked;
+// spec 2026-11-10 MCQ questions).
+enum QuestionType {
+  WRITTEN
+  MCQ
+}
+
 enum CandidateStatus {
   NOT_STARTED
   IN_PROGRESS
@@ -145,69 +158,125 @@ model AdminUser {
   @@map("admin_users")
 }
 
+// A job profile. Name is unique per type, case-insensitively, through the raw
+// expression index job_roles_name_type_key (lower(name), type) in migration
+// 20261110090000; Prisma cannot declare expression indexes.
 model JobRole {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  name              String   @unique
-  refApplicantCount Int      @default(0) @map("ref_applicant_count")
-  active            Boolean  @default(true)
-  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name              String
+  type              JobProfileType @default(PLACEMENT)
+  refApplicantCount Int            @default(0) @map("ref_applicant_count")
+  active            Boolean        @default(true)
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  examSetting   ExamSetting?
-  questions     Question[]
-  candidates    Candidate[]
-  importBatches ImportBatch[]
-  aiRuns        AiEvaluationRun[]
+  rounds     ExamRound[]
+  candidates Candidate[]
 
   @@map("job_roles")
 }
 
-model ExamSetting {
-  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  jobRoleId       String    @unique @map("job_role_id") @db.Uuid
-  durationMinutes Int       @default(60) @map("duration_minutes")
-  windowStart     DateTime? @map("window_start") @db.Timestamptz(6)
-  windowEnd       DateTime? @map("window_end") @db.Timestamptz(6)
-  instructions    String    @default("")
-  isOpen          Boolean   @default(false) @map("is_open")
-  questionsLocked Boolean   @default(false) @map("questions_locked")
+// An institution candidates come from. lower(name) and short_code are unique
+// (raw indexes colleges_name_key / colleges_short_code_key).
+model College {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String
+  shortCode String   @map("short_code")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  drives Drive[]
+
+  @@map("colleges")
+}
+
+// One test stage of a job profile: everything that is the same for every
+// college (questions, duration, weights, the question lock).
+model ExamRound {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  jobRoleId       String   @map("job_role_id") @db.Uuid
+  roundNumber     Int      @map("round_number")
+  name            String?
+  durationMinutes Int      @default(60) @map("duration_minutes")
+  questionsLocked Boolean  @default(false) @map("questions_locked")
   // Composite-score weights (docs/ai-evaluation.md); the four add up to 100.
-  weightExam      Int       @default(70) @map("weight_exam")
-  weightX         Int       @default(10) @map("weight_x")
-  weightXii       Int       @default(10) @map("weight_xii")
-  weightCpi       Int       @default(10) @map("weight_cpi")
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  weightExam      Int      @default(70) @map("weight_exam")
+  weightX         Int      @default(10) @map("weight_x")
+  weightXii       Int      @default(10) @map("weight_xii")
+  weightCpi       Int      @default(10) @map("weight_cpi")
+  // Marks deducted per wrong MCQ answer (0 = no negative marking); frozen with the question lock.
+  mcqNegativeMarks Decimal @default(0) @map("mcq_negative_marks") @db.Decimal(4, 2)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  jobRole JobRole @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  jobRole       JobRole       @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  questions     Question[]
+  drives        Drive[]
+  importBatches ImportBatch[]
 
-  @@map("exam_settings")
+  @@unique([jobRoleId, roundNumber])
+  @@map("exam_rounds")
+}
+
+// One round at one college in one batch: the date/time window and the open
+// switch. (round_id, college_id, lower(batch)) is unique through the raw index
+// drives_round_college_batch_key.
+model Drive {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roundId      String    @map("round_id") @db.Uuid
+  collegeId    String    @map("college_id") @db.Uuid
+  batch        String
+  windowStart  DateTime? @map("window_start") @db.Timestamptz(6)
+  windowEnd    DateTime? @map("window_end") @db.Timestamptz(6)
+  isOpen       Boolean   @default(false) @map("is_open")
+  instructions String    @default("")
+  active       Boolean   @default(true)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  round         ExamRound         @relation(fields: [roundId], references: [id], onDelete: Restrict)
+  college       College           @relation(fields: [collegeId], references: [id], onDelete: Restrict)
+  candidates    Candidate[]
+  importBatches ImportBatch[]
+  aiRuns        AiEvaluationRun[]
+
+  @@index([roundId])
+  @@index([collegeId])
+  @@map("drives")
 }
 
 model Question {
   id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  jobRoleId          String   @map("job_role_id") @db.Uuid
+  roundId            String   @map("round_id") @db.Uuid
+  type               QuestionType @default(WRITTEN)
   text               String
+  // MCQ: exactly 4 options (A–D) and the index of the correct one; empty / null for written.
+  options            String[] @default([])
+  correctOption      Int?     @map("correct_option") @db.SmallInt
+  // Written: hash of the text. MCQ: hash of the text and its 4 options.
   normalizedTextHash String   @map("normalized_text_hash")
-  maxMarks           Decimal  @map("max_marks") @db.Decimal(6, 1)
+  maxMarks           Decimal  @map("max_marks") @db.Decimal(8, 2)
   evaluatorGuidance  String?  @map("evaluator_guidance")
   displayOrder       Int      @default(0) @map("display_order")
   active             Boolean  @default(true)
   createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  jobRole          JobRole           @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  round            ExamRound         @relation(fields: [roundId], references: [id], onDelete: Restrict)
   attemptQuestions AttemptQuestion[]
 
-  @@unique([jobRoleId, normalizedTextHash])
-  @@index([jobRoleId, active, displayOrder])
+  @@unique([roundId, normalizedTextHash])
+  @@index([roundId, active, displayOrder])
   @@map("questions")
 }
 
 model ImportBatch {
   id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   kind         ImportKind
-  jobRoleId    String?    @map("job_role_id") @db.Uuid
+  // QUESTIONS imports belong to a round, CANDIDATES imports to a drive.
+  roundId      String?    @map("round_id") @db.Uuid
+  driveId      String?    @map("drive_id") @db.Uuid
   fileName     String     @map("file_name")
   fileHash     String     @map("file_hash")
   uploadedById String     @map("uploaded_by_id") @db.Uuid
@@ -217,14 +286,16 @@ model ImportBatch {
   errors       Json       @default("[]")
   createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  jobRole    JobRole?    @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  round      ExamRound?  @relation(fields: [roundId], references: [id], onDelete: Restrict)
+  drive      Drive?      @relation(fields: [driveId], references: [id], onDelete: Restrict)
   uploadedBy AdminUser   @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
   candidates Candidate[]
 
   @@index([kind, createdAt])
   @@index([fileHash])
   @@index([uploadedById])
-  @@index([jobRoleId])
+  @@index([roundId])
+  @@index([driveId])
   @@map("import_batches")
 }
 
@@ -258,7 +329,11 @@ model Candidate {
   discipline     String?
   programme      String?
   extra          Json             @default("{}")
+  // Denormalised from drive -> round -> job role; always written together with driveId.
   jobRoleId      String           @map("job_role_id") @db.Uuid
+  driveId        String           @map("drive_id") @db.Uuid
+  // The Round 1 entry this entry was promoted from ("Move shortlisted to Round 2").
+  promotedFromId String?          @map("promoted_from_id") @db.Uuid
   eligible       Boolean          @default(true)
   locationExempt Boolean          @default(false) @map("location_exempt")
   status         CandidateStatus  @default(NOT_STARTED)
@@ -271,6 +346,9 @@ model Candidate {
 
   account      CandidateAccount         @relation(fields: [accountId], references: [id], onDelete: Restrict)
   jobRole      JobRole                  @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  drive        Drive                    @relation(fields: [driveId], references: [id], onDelete: Restrict)
+  promotedFrom Candidate?               @relation("PromotedFrom", fields: [promotedFromId], references: [id], onDelete: Restrict)
+  promotedTo   Candidate[]              @relation("PromotedFrom")
   importBatch  ImportBatch?             @relation(fields: [importBatchId], references: [id], onDelete: Restrict)
   resultBy     AdminUser?               @relation("CandidateResultBy", fields: [resultById], references: [id], onDelete: Restrict)
   attempts     ExamAttempt[]
@@ -279,9 +357,12 @@ model Candidate {
   history      CandidateStatusHistory[]
   emails       EmailDispatch[]
 
-  @@unique([accountId, jobRoleId])
+  @@unique([accountId, driveId])
   @@index([jobRoleId, status])
   @@index([jobRoleId, result])
+  @@index([driveId, status])
+  @@index([driveId, result])
+  @@index([promotedFromId])
   @@index([resultById])
   @@index([importBatchId])
   @@index([rollNumber])
@@ -301,8 +382,11 @@ model ExamAttempt {
   activeSessionId String        @map("active_session_id")
   startIp         String        @map("start_ip")
   userAgent       String        @map("user_agent")
-  totalMarks      Decimal?      @map("total_marks") @db.Decimal(7, 1)
-  maxMarks        Decimal       @map("max_marks") @db.Decimal(7, 1)
+  totalMarks      Decimal?      @map("total_marks") @db.Decimal(8, 2)
+  maxMarks        Decimal       @map("max_marks") @db.Decimal(8, 2)
+  // Sum of the MCQ auto marks (set at submit) and their maximum.
+  mcqMarks        Decimal?      @map("mcq_marks") @db.Decimal(8, 2)
+  mcqMaxMarks     Decimal       @default(0) @map("mcq_max_marks") @db.Decimal(8, 2)
   percentage      Decimal?      @db.Decimal(5, 2)
   createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -322,8 +406,15 @@ model AttemptQuestion {
   attemptId        String   @map("attempt_id") @db.Uuid
   questionId       String   @map("question_id") @db.Uuid
   order            Int
+  typeSnapshot     QuestionType @default(WRITTEN) @map("type_snapshot")
   textSnapshot     String   @map("text_snapshot")
-  maxMarksSnapshot Decimal  @map("max_marks_snapshot") @db.Decimal(6, 1)
+  // MCQ: options in the order this candidate saw them, the correct index in that order,
+  // the round's negative marking at start, and the auto mark set at submit.
+  optionsSnapshot       String[] @default([]) @map("options_snapshot")
+  correctSnapshot       Int?     @map("correct_snapshot") @db.SmallInt
+  negativeMarksSnapshot Decimal  @default(0) @map("negative_marks_snapshot") @db.Decimal(4, 2)
+  autoMarks             Decimal? @map("auto_marks") @db.Decimal(8, 2)
+  maxMarksSnapshot Decimal  @map("max_marks_snapshot") @db.Decimal(8, 2)
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   attempt    ExamAttempt         @relation(fields: [attemptId], references: [id], onDelete: Restrict)
@@ -343,6 +434,8 @@ model Answer {
   attemptQuestionId String   @unique @map("attempt_question_id") @db.Uuid
   text              String   @default("")
   wordCount         Int      @default(0) @map("word_count")
+  // MCQ choice (index in the shown order); null = not answered.
+  selectedOption    Int?     @map("selected_option") @db.SmallInt
   clientSeq         Int      @default(0) @map("client_seq")
   lastSavedAt       DateTime @default(now()) @map("last_saved_at") @db.Timestamptz(6)
   markedForReview   Boolean  @default(false) @map("marked_for_review")
@@ -417,7 +510,7 @@ model CandidateLoginLog {
 model QuestionEvaluation {
   id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   attemptQuestionId String   @unique @map("attempt_question_id") @db.Uuid
-  marks             Decimal? @db.Decimal(6, 1)
+  marks             Decimal? @db.Decimal(8, 2)
   comment           String?
   evaluatorId       String   @map("evaluator_id") @db.Uuid
   // Set by bulk accept: the AI score this mark was taken from unchanged.
@@ -541,7 +634,8 @@ model AdminAuditLog {
 // bumped by the worker; the run is DONE when done + failed = total.
 model AiEvaluationRun {
   id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  jobRoleId     String?     @map("job_role_id") @db.Uuid
+  // The whole drive this run graded; null for a run on chosen submissions.
+  driveId       String?     @map("drive_id") @db.Uuid
   model         String
   promptVersion String      @map("prompt_version")
   status        AiRunStatus @default(RUNNING)
@@ -554,11 +648,11 @@ model AiEvaluationRun {
   createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
   finishedAt    DateTime?   @map("finished_at") @db.Timestamptz(6)
 
-  jobRole   JobRole?          @relation(fields: [jobRoleId], references: [id], onDelete: Restrict)
+  drive     Drive?            @relation(fields: [driveId], references: [id], onDelete: Restrict)
   createdBy AdminUser         @relation(fields: [createdById], references: [id], onDelete: Restrict)
   scores    AiQuestionScore[]
 
-  @@index([jobRoleId, createdAt])
+  @@index([driveId, createdAt])
   @@index([status])
   @@index([createdById])
   @@map("ai_evaluation_runs")
@@ -572,8 +666,8 @@ model AiQuestionScore {
   runId             String        @map("run_id") @db.Uuid
   attemptQuestionId String        @map("attempt_question_id") @db.Uuid
   status            AiScoreStatus @default(QUEUED)
-  marks             Decimal?      @db.Decimal(6, 1)
-  maxMarks          Decimal       @map("max_marks") @db.Decimal(6, 1)
+  marks             Decimal?      @db.Decimal(8, 2)
+  maxMarks          Decimal       @map("max_marks") @db.Decimal(8, 2)
   rationale         String?
   strengths         Json          @default("[]")
   improvements      Json          @default("[]")

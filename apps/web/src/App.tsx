@@ -23,6 +23,7 @@ const AdminUsers = lazy(() => import('@/pages/admin/AdminUsers'));
 const Integrations = lazy(() => import('@/pages/admin/Integrations'));
 const AuditLog = lazy(() => import('@/pages/admin/AuditLog'));
 const Roles = lazy(() => import('@/pages/admin/Roles'));
+const Colleges = lazy(() => import('@/pages/admin/Colleges'));
 const Questions = lazy(() => import('@/pages/admin/Questions'));
 const Candidates = lazy(() => import('@/pages/admin/Candidates'));
 const CandidateDetail = lazy(() => import('@/pages/admin/CandidateDetail'));
@@ -61,6 +62,7 @@ export function App() {
               <Route path="/admin/candidates/:id" element={<CandidateDetail />} />
               <Route path="/admin/questions" element={<Questions />} />
               <Route path="/admin/settings" element={<Roles />} />
+              <Route path="/admin/colleges" element={<Colleges />} />
               <Route path="/admin/leaderboard" element={<Leaderboard />} />
               <Route path="/admin/email-templates" element={<EmailTemplates />} />
               <Route path="/admin/users" element={<AdminUsers />} />

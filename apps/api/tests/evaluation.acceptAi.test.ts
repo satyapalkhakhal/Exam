@@ -57,7 +57,7 @@ function setup(attempts: Att[], flags: Record<string, Record<string, number>> = 
   const transitions: { candidateId: string; to: string; by: string }[] = [];
   const fakeTx = (a: Att | undefined, staged: { audits: typeof audits; transitions: typeof transitions }) =>
     ({
-      attemptAny: async () => (a ? { id: a.id, status: a.status, candidateId: a.candidateId, candidate: { candidateCode: a.code } } : null),
+      attemptAny: async () => (a ? { id: a.id, status: a.status, candidateId: a.candidateId, mcqMarks: null, mcqMaxMarks: 0, candidate: { candidateCode: a.code } } : null),
       lockEvaluationRow: async () => a!.evaluation,
       questionsWithAi: async () => a!.questions,
       setMarkFromAi: async (qid: string, marks: number, aiScoreId: string, evaluatorId: string) => void a!.marks.set(qid, { marks, aiScoreId, evaluatorId }),
@@ -87,7 +87,8 @@ function setup(attempts: Att[], flags: Record<string, Record<string, number>> = 
       },
     }) as unknown as EvaluationTx;
   const repo = {
-    openAttemptIdsForRole: async () => attempts.filter((a) => a.status === 'SUBMITTED' && a.evaluation.status !== 'SUBMITTED').map((a) => a.id),
+    driveIdsOfAttempts: async (ids: string[]) => (ids.includes('other-drive') ? ['d1', 'd2'] : ['d1']),
+    openAttemptIdsForDrive: async () => attempts.filter((a) => a.status === 'SUBMITTED' && a.evaluation.status !== 'SUBMITTED').map((a) => a.id),
     candidateIdsOf: async (ids: string[]) => new Map(ids.filter((i) => byId.has(i)).map((i) => [i, byId.get(i)!.candidateId])),
     recordAudit: async (e: (typeof audits)[number]) => void audits.push(e),
     transaction: async <T>(fn: (t: EvaluationTx) => Promise<T>): Promise<T> => {
@@ -129,7 +130,7 @@ test('accepts a clean script: AI marks written as the actor with provenance, tot
   assert.deepEqual(submitted.metadata, { totalMarks: 14.5, maxMarks: 20, percentage: 72.5, viaAi: true });
   const summary = audits.filter((x) => x.action === 'EVALUATIONS_BULK_ACCEPTED_AI');
   assert.equal(summary.length, 1);
-  assert.deepEqual(summary[0]!.metadata, { jobRoleId: null, onlyClean: true, requested: 1, accepted: 1, skipped: 0, byReason: {} });
+  assert.deepEqual(summary[0]!.metadata, { driveId: null, onlyClean: true, requested: 1, accepted: 1, skipped: 0, byReason: {} });
 });
 
 test('each skip reason', async () => {
@@ -204,9 +205,9 @@ test('by role: only scripts whose evaluation is not yet submitted are considered
   const done = attempt('done', { evaluation: { status: 'SUBMITTED', lockedById: null, lockedAt: null } });
   const open = attempt('open');
   const { service, audits } = setup([done, open]);
-  const r = await service.acceptAi({ jobRoleId: ROLE, onlyClean: true }, ACTOR);
+  const r = await service.acceptAi({ driveId: ROLE, onlyClean: true }, ACTOR);
   assert.deepEqual(r, { accepted: 1, skipped: [] });
-  assert.equal(audits.at(-1)?.metadata?.jobRoleId, ROLE);
+  assert.equal(audits.at(-1)?.metadata?.driveId, ROLE);
 });
 
 test('the summary audit holds counts only, with a reason breakdown', async () => {
@@ -214,6 +215,15 @@ test('the summary audit holds counts only, with a reason breakdown', async () =>
   const { service, audits } = setup(atts);
   await service.acceptAi({ attemptIds: ['a', 'b', 'c'], onlyClean: true }, ACTOR);
   const summary = audits.find((x) => x.action === 'EVALUATIONS_BULK_ACCEPTED_AI')!;
-  assert.deepEqual(summary.metadata, { jobRoleId: null, onlyClean: true, requested: 3, accepted: 1, skipped: 2, byReason: { LOW_CONFIDENCE: 2 } });
+  assert.deepEqual(summary.metadata, { driveId: null, onlyClean: true, requested: 3, accepted: 1, skipped: 2, byReason: { LOW_CONFIDENCE: 2 } });
   assert.ok(!JSON.stringify(summary).includes('ARH-'), 'no candidate codes in the audit');
+});
+
+test('bulk accept on chosen attempts from two drives -> 400 MIXED_DRIVES, nothing accepted', async () => {
+  const { service, audits } = setup([]);
+  await assert.rejects(
+    () => service.acceptAi({ attemptIds: ['a1', 'other-drive'] }, ACTOR),
+    (e: unknown) => (e as { code?: string; statusCode?: number }).code === 'MIXED_DRIVES' && (e as { statusCode?: number }).statusCode === 400,
+  );
+  assert.equal(audits.length, 0);
 });

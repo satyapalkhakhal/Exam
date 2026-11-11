@@ -5,11 +5,14 @@
 // seeded from a fetch made after the lock settled, never from an older cached copy. The server is blind-marking: an Evaluator's payload has no PII,
 // so the candidate panel renders only for a Super Admin. Marks are validated client-side with
 // the same rules as the server's validateMarks; the server remains authoritative.
+// MCQs (spec 2026-11-10) are auto-marked at submit: they show read-only (choice, correct
+// answer, auto mark, subtotal) and are never part of the drafts or the items sent.
 
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router';
-import { AdminRole } from '@exam/shared';
+import { AdminRole, MCQ_LETTERS } from '@exam/shared';
+import { Check, X } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -21,7 +24,8 @@ import { AiPanel } from '@/components/admin/AiPanel';
 import { countAiUsable, fillDraftsFromAi } from '@/lib/aiEvaluation';
 import { ApiError } from '@/lib/api';
 import { createLockManager, LOCK_RENEW_MS } from '@/lib/lockManager';
-import { canSubmitEvaluation, shouldSeedDrafts, sumMarks, validateMarksClient } from '@/lib/marking';
+import { canSubmitEvaluation, markingTotal, shouldSeedDrafts, validateMarksClient, writtenRows } from '@/lib/marking';
+import { cn } from '@/lib/utils';
 import {
   lockAttempt,
   markingKey,
@@ -49,6 +53,43 @@ function lockHolder(e: unknown): string {
     return d?.lockedBy?.name ?? e.message;
   }
   return 'another evaluator';
+}
+
+/** One MCQ, read-only: the candidate's choice against the correct answer, and the auto mark. */
+function McqReview({ q }: { q: MarkingQuestion }) {
+  const right = q.selectedOption !== null && q.selectedOption === q.correctOption;
+  const outcome = q.selectedOption === null ? 'Not answered' : right ? 'Correct' : 'Wrong';
+  return (
+    <li className="space-y-2 rounded-md border border-border p-3" aria-label={`Question ${q.order}, ${outcome}`}>
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-sm text-foreground"><span className="font-semibold">Q{q.order}.</span> <span className="whitespace-pre-wrap">{q.text}</span></p>
+        <Badge variant={q.selectedOption === null ? 'outline' : right ? 'default' : 'destructive'} className="shrink-0">
+          {outcome} · {q.autoMarks ?? 0} / {q.maxMarks}
+        </Badge>
+      </div>
+      <ul className="grid gap-1 text-sm sm:grid-cols-2">
+        {q.options.map((o, i) => {
+          const chosen = q.selectedOption === i;
+          const correct = q.correctOption === i;
+          return (
+            <li
+              key={i}
+              className={cn(
+                'flex items-start gap-2 rounded border px-2 py-1',
+                correct ? 'border-emerald-300 bg-emerald-50 text-emerald-900' : chosen ? 'border-red-300 bg-red-50 text-red-900' : 'border-transparent text-muted-foreground',
+              )}
+            >
+              <span className="font-semibold">{MCQ_LETTERS[i]}.</span>
+              <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{o}</span>
+              {correct && <Check className="mt-0.5 h-4 w-4 shrink-0" aria-label="correct answer" />}
+              {chosen && !correct && <X className="mt-0.5 h-4 w-4 shrink-0" aria-label="candidate's choice" />}
+              {chosen && correct && <span className="sr-only">candidate's choice</span>}
+            </li>
+          );
+        })}
+      </ul>
+    </li>
+  );
 }
 
 function QuestionPanel({ q, draft, readOnly, onChange, onUseAi }: { q: MarkingQuestion; draft: Draft; readOnly: boolean; onChange: (d: Draft) => void; onUseAi: () => void }) {
@@ -182,7 +223,7 @@ export default function Marking() {
     setSeeded(true);
     setDrafts(
       Object.fromEntries(
-        view.data.questions.map((q) => [q.attemptQuestionId, { marks: q.evaluation.marks === null ? '' : String(q.evaluation.marks), comment: q.evaluation.comment ?? '' }]),
+        view.data.questions.filter((q) => q.type !== 'MCQ').map((q) => [q.attemptQuestionId, { marks: q.evaluation.marks === null ? '' : String(q.evaluation.marks), comment: q.evaluation.comment ?? '' }]),
       ),
     );
   }, [view.data, view.dataUpdatedAt, view.isFetching, seeded, lockSettledAt]);
@@ -194,11 +235,13 @@ export default function Marking() {
   const finalised = v.evaluationStatus === 'SUBMITTED';
   // Until fresh drafts are seeded the inputs are empty; saving then would wipe stored marks.
   const readOnly = lockedBy !== null || lockError !== null || finalised || !seeded;
-  const rows = v.questions.map((q) => ({ q, marks: parseMarks(drafts[q.attemptQuestionId]?.marks ?? '') }));
+  const written = v.questions.filter((q) => q.type !== 'MCQ');
+  const mcqs = v.questions.filter((q) => q.type === 'MCQ');
+  const rows = writtenRows(written, drafts);
   const invalid = rows.some(({ q, marks }) => marks !== null && validateMarksClient(marks, q.maxMarks) !== null);
-  const aiUsable = countAiUsable(v.questions);
-  const max = v.questions.reduce((t, q) => t + q.maxMarks, 0);
-  const items: EvaluationItem[] = v.questions.map((q) => {
+  const aiUsable = countAiUsable(written);
+  const totals = markingTotal(rows, written.reduce((t, q) => t + q.maxMarks, 0), v.mcqMarks, v.mcqMaxMarks);
+  const items: EvaluationItem[] = written.map((q) => {
     const d = drafts[q.attemptQuestionId];
     return { attemptQuestionId: q.attemptQuestionId, marks: parseMarks(d?.marks ?? ''), comment: d?.comment ?? '' };
   });
@@ -239,17 +282,18 @@ export default function Marking() {
         </div>
         <div className="flex gap-2">
           {aiUsable > 0 && (
-            <Button variant="outline" disabled={readOnly} onClick={() => setDrafts((c) => fillDraftsFromAi(c, v.questions) as Record<string, Draft>)}>
+            <Button variant="outline" disabled={readOnly} onClick={() => setDrafts((c) => fillDraftsFromAi(c, written) as Record<string, Draft>)}>
               Use all AI marks ({aiUsable})
             </Button>
           )}
-          {isSa && finalised && <Button variant="outline" onClick={() => setReopening(true)}>Reopen</Button>}
+          {/* An MCQ-only script has nothing to re-mark: the server refuses the reopen (reset the attempt instead). */}
+          {isSa && finalised && written.length > 0 && <Button variant="outline" onClick={() => setReopening(true)}>Reopen</Button>}
         </div>
       </div>
 
       {lockedBy && <p className="rounded-md border border-border bg-muted p-3 text-sm" role="status">Being marked by {lockedBy}. This view is read-only.</p>}
       {lockError && <p className="text-sm text-destructive" role="alert">{lockError}</p>}
-      {finalised && <p className="rounded-md border border-border bg-muted p-3 text-sm" role="status">This evaluation is submitted{isSa ? '; reopen it to change marks.' : '.'}</p>}
+      {finalised && <p className="rounded-md border border-border bg-muted p-3 text-sm" role="status">This evaluation is submitted{isSa && written.length > 0 ? '; reopen it to change marks.' : '.'}</p>}
 
       {isSa && v.fullName !== undefined && (
         <section className="grid gap-2 rounded-lg border border-border bg-card p-4 text-sm sm:grid-cols-3" aria-label="Candidate">
@@ -264,21 +308,35 @@ export default function Marking() {
 
       <ExamTimeline events={v.timeline} startedAt={v.startedAt} />
 
-      {v.questions.map((q) => (
+      {mcqs.length > 0 && (
+        <section className="space-y-3 rounded-lg border border-border bg-card p-4" aria-labelledby="mcq-heading">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 id="mcq-heading" className="text-sm font-semibold text-foreground">Multiple choice (auto-marked)</h2>
+            <Badge variant="outline">MCQ total: {v.mcqMarks ?? 0} / {v.mcqMaxMarks}</Badge>
+          </div>
+          {written.length === 0 && <p className="text-sm text-muted-foreground">This test is MCQ only. It was marked automatically when the candidate submitted.</p>}
+          <ul className="space-y-2">
+            {mcqs.map((q) => <McqReview key={q.attemptQuestionId} q={q} />)}
+          </ul>
+        </section>
+      )}
+
+      {written.map((q) => (
         <QuestionPanel
           key={q.attemptQuestionId}
           q={q}
           readOnly={readOnly}
           draft={drafts[q.attemptQuestionId] ?? { marks: '', comment: '' }}
           onChange={(d) => setDrafts((c) => ({ ...c, [q.attemptQuestionId]: d }))}
-          onUseAi={() => setDrafts((c) => fillDraftsFromAi(c, v.questions, q.attemptQuestionId) as Record<string, Draft>)}
+          onUseAi={() => setDrafts((c) => fillDraftsFromAi(c, written, q.attemptQuestionId) as Record<string, Draft>)}
         />
       ))}
 
       <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 px-4 py-3 backdrop-blur lg:left-60">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3">
           <div className="text-sm">
-            <span className="font-semibold">Total: {sumMarks(rows)}</span> <span className="text-muted-foreground">/ {max}</span>
+            <span className="font-semibold">Total: {totals.total}</span> <span className="text-muted-foreground">/ {totals.max}</span>
+            {mcqs.length > 0 && <span className="ml-2 text-xs text-muted-foreground">(incl. MCQ {v.mcqMarks ?? 0} / {v.mcqMaxMarks})</span>}
             <span className="ml-3 text-xs" role="status" aria-live="polite">{saveError ? <span className="text-destructive">{saveError}</span> : notice}</span>
           </div>
           <div className="flex gap-2">

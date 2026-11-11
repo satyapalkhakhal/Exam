@@ -10,6 +10,14 @@ export type CandidateSort = 'fullName' | 'majorCpi' | 'xPercentage' | 'xiiPercen
 export interface CandidateFilters {
   search: string;
   jobRoleId: string;
+  /** Spec 2026-11-10: narrow by round, college, drive and Placement/Internship. */
+  roundId: string;
+  collegeId: string;
+  driveId: string;
+  /** Campus dashboard links (spec 2026-11-11): the drive's batch and the round number across profiles. */
+  batch: string;
+  roundNumber: string;
+  jobProfileType: '' | 'PLACEMENT' | 'INTERNSHIP';
   status: string;
   result: '' | 'SHORTLISTED' | 'REJECTED' | 'NONE';
   flagged: '' | 'true' | 'false';
@@ -24,6 +32,12 @@ export interface CandidateFilters {
 export const EMPTY_CANDIDATE_FILTERS: CandidateFilters = {
   search: '',
   jobRoleId: '',
+  roundId: '',
+  collegeId: '',
+  driveId: '',
+  batch: '',
+  roundNumber: '',
+  jobProfileType: '',
   status: '',
   result: '',
   flagged: '',
@@ -36,7 +50,7 @@ export const EMPTY_CANDIDATE_FILTERS: CandidateFilters = {
 };
 
 /** The filter keys that count toward "Clear filters". */
-export const FILTER_KEYS = ['search', 'jobRoleId', 'status', 'result', 'flagged', 'xMin', 'xiiMin', 'cpiMin', 'marksPctMin'] as const;
+export const FILTER_KEYS = ['search', 'jobRoleId', 'roundId', 'collegeId', 'driveId', 'batch', 'roundNumber', 'jobProfileType', 'status', 'result', 'flagged', 'xMin', 'xiiMin', 'cpiMin', 'marksPctMin'] as const;
 
 export function candidateQuery(f: CandidateFilters, page?: number, pageSize?: number): URLSearchParams {
   const q = new URLSearchParams({ sort: f.sort, dir: f.dir });

@@ -21,7 +21,7 @@
 // image is the ArihantPlus icon, hot-linked from arihantplus.com (PLUS_ICON_URL);
 // when an email app blocks images, its alt text and the name beside it still read.
 
-import type { EmailTemplateKey } from '@exam/shared';
+import type { EmailTemplateKey, JobProfileType } from '@exam/shared';
 
 export interface EmailContent {
   subject: string;
@@ -312,6 +312,10 @@ interface CommonParams {
   fullName: string;
   candidateCode: string;
   jobRoleName: string;
+  /** Internship adds "(Internship)" to the Role row (spec 2026-11-10); omitted = placement. */
+  jobProfileType?: JobProfileType;
+  /** Set only when the job profile has more than one round: adds a Round row. */
+  roundNumber?: number | null;
   /** HR contact shown in the footer; defaults to DEFAULT_HR_CONTACT. */
   contactEmail?: string;
 }
@@ -325,6 +329,12 @@ const commonValues = (p: CommonParams, contact: string): Record<string, string> 
 });
 
 const SIGN_OFF_TEAM = `Talent Acquisition Team, ${BRAND}`;
+
+/** The details card's first rows: Role (with "(Internship)" when it is one), then Round when known. */
+const roleRows = (p: CommonParams): Row[] => [
+  ['Role', p.jobProfileType === 'INTERNSHIP' ? `${p.jobRoleName} (Internship)` : p.jobRoleName],
+  ...(p.roundNumber !== undefined && p.roundNumber !== null ? ([['Round', `Round ${p.roundNumber}`]] as Row[]) : []),
+];
 
 // ---- 1. Submission received -----------------------------------------------------
 
@@ -349,7 +359,7 @@ export function buildSubmissionEmail(p: SubmissionEmailParams, template: EmailTe
   const paras = bodyParagraphs(fillPlaceholders(template.body, values));
   const how = p.submitType === 'AUTO' ? 'Submitted automatically when the time ran out' : 'Submitted by you';
   const rows: Row[] = [
-    ['Role', p.jobRoleName],
+    ...roleRows(p),
     ['Candidate code', p.candidateCode],
     ['Submitted at', submittedAt],
     ['Submission', how],
@@ -405,7 +415,7 @@ export interface ShortlistEmailParams extends CommonParams {
 
 function assessmentRows(p: ShortlistEmailParams): Row[] {
   const rows: Row[] = [
-    ['Role', p.jobRoleName],
+    ...roleRows(p),
     ['Candidate code', p.candidateCode],
   ];
   const a = p.assessment;
@@ -525,7 +535,7 @@ export function buildRejectionEmail(p: CommonParams, template: EmailTemplate = D
   const subject = oneLine(fillPlaceholders(template.subject, values));
   const paras = bodyParagraphs(fillPlaceholders(template.body, values));
   const rows: Row[] = [
-    ['Role', p.jobRoleName],
+    ...roleRows(p),
     ['Candidate code', p.candidateCode],
   ];
   const html = layout({

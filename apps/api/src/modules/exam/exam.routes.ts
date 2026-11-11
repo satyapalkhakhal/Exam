@@ -18,6 +18,7 @@ import { resolveApplication } from '../../shared/middleware/resolveApplication.j
 import { validate } from '../../shared/middleware/validate.js';
 import { createExamController } from './exam.controller.js';
 import { ApplicationParamsSchema, ApplicationQuestionParamsSchema, ExamEventsSchema, ExamStartSchema, SaveAnswerSchema, SubmitExamSchema } from './exam.schemas.js';
+import { SaveChoiceSchema } from '@exam/shared';
 import type { ExamService } from './exam.service.js';
 
 const BODY_LIMIT = '256kb';
@@ -45,6 +46,17 @@ export function createExamRouter(service: ExamService, auth: BeaconAuthDeps, own
     answerParams,
     validate({ body: SaveAnswerSchema }),
     c.save,
+  );
+  // An MCQ choice (spec 2026-11-10 MCQ questions): same guards and limits as the answer save.
+  r.put(
+    '/:applicationId/answers/:attemptQuestionId/choice',
+    strict,
+    appParams,
+    ownApp,
+    candidateExamWriteLimiter,
+    answerParams,
+    validate({ body: SaveChoiceSchema }),
+    c.choice,
   );
   r.post(
     '/:applicationId/answers/:attemptQuestionId/beacon',

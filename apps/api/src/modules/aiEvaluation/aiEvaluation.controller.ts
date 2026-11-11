@@ -19,7 +19,7 @@ const actorOf = (req: Request): AiActor => {
 export function createAiEvaluationController(service: AiEvaluationService) {
   return {
     start: wrap(async (req, res) => ok(res, await service.start(req.body, actorOf(req)))),
-    list: wrap(async (req, res) => ok(res, { items: await service.list((req.query as { jobRoleId?: string }).jobRoleId) })),
+    list: wrap(async (req, res) => ok(res, { items: await service.list((req.query as { driveId?: string }).driveId) })),
     cancel: wrap(async (req, res) => ok(res, await service.cancel((req.params as { runId: string }).runId, actorOf(req)))),
   };
 }

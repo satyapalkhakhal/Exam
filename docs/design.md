@@ -49,6 +49,11 @@ The seed creates one Super Admin from `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`
 
 ## 4. Job roles
 
+> **Superseded in part (2026-11-10):** exam settings moved from the job role to its rounds
+> (duration, weights, question lock; questions belong to a round) and drives (one college +
+> batch: window, open switch, instructions). Job roles (UI: job profiles) have a Placement /
+> Internship type. See `docs/superpowers/specs/2026-11-10-colleges-drives-rounds-design.md`.
+
 Seed these 7 (name, plus reference applicant count shown on the dashboard only):
 
 | Job role | Ref. applicants |
@@ -72,7 +77,7 @@ Every candidate belongs to exactly one role and only ever sees that role's quest
 
 ## 5. Questions
 
-- **Descriptive only.** No MCQ, no auto-marking, no code editor.
+- **Written or multiple choice.** Originally descriptive only; since 2026-11-10 a question can also be an **MCQ** (exactly 4 options A–D, one correct, auto-marked at submit, optional negative marking per round, MCQs first in a per-candidate shuffled order). See `docs/superpowers/specs/2026-11-10-mcq-questions-design.md`; that spec overrides this section where they differ. No code editor.
 - Fields: role, question text (multi-line plain text), max marks, optional evaluator guidance (never sent to candidates), display order, active/inactive.
 - Added on the admin dashboard either **one at a time** (form) or by **CSV/XLSX upload** for a role. Upload flow: download template → upload → server parses and validates → preview with row-level errors → confirm → import summary. Duplicate detection is by identical normalised text within the same role: duplicates are flagged in the preview and skipped.
 - **Every active question of the role is given to every candidate of that role, in display order.** (60 minutes realistically fits 2–3 such questions; that is HR's call when they author them.)

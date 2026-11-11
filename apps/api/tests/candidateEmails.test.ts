@@ -216,3 +216,28 @@ test('result portal line and link are on both outcome emails, not on the submiss
   const sub = buildSubmissionEmail(submission);
   assert.doesNotMatch(sub.html + sub.text, /Result Portal|onlineexam\.arihantplus\.com/);
 });
+
+// ---- job profile type and round (spec 2026-11-10 §5.3) -------------------------------
+
+test('internship shows "(Internship)" in Role row', () => {
+  const intern = { ...base, jobProfileType: 'INTERNSHIP' as const };
+  for (const e of [
+    buildRejectionEmail(intern),
+    buildShortlistEmail(intern),
+    buildSubmissionEmail({ ...intern, submittedAt: new Date(), submitType: 'MANUAL', answeredCount: 1, questionCount: 1 }),
+  ]) {
+    assert.match(e.html, /Backend Engineer \(Internship\)/);
+    assert.match(e.text, /Backend Engineer \(Internship\)/);
+  }
+  assert.doesNotMatch(buildRejectionEmail({ ...base, jobProfileType: 'PLACEMENT' }).html, /\(Placement\)|\(Internship\)/);
+  assert.equal(buildRejectionEmail(intern).subject, 'Update on your application — Backend Engineer', 'subjects keep the plain name');
+});
+
+test('Round row only when roundNumber set', () => {
+  const withRound = buildShortlistEmail({ ...base, roundNumber: 2 });
+  assert.match(withRound.html, />Round</);
+  assert.match(withRound.html, /Round 2/);
+  assert.match(withRound.text, /Round 2/);
+  assert.doesNotMatch(buildShortlistEmail({ ...base, roundNumber: null }).html, />Round</);
+  assert.doesNotMatch(buildRejectionEmail(base).html, />Round</);
+});

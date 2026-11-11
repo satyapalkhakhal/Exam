@@ -435,3 +435,32 @@ test('I4: Undo/Redo characters go as restoredChars, separate from typedChars, an
   await clock.advance(2000);
   assert.equal(fs.calls[1]!.payload.restoredChars, 0);
 });
+
+test('choice path: an MCQ choice is saved at once on flush, latest choice wins, clearing sends an empty value', async () => {
+  const clock = fakeClock();
+  const storage = memStorage();
+  const sent: SavePayload[] = [];
+  const saver = createAutosaver({
+    save: async (p) => {
+      sent.push(p);
+      return { accepted: true, serverNow: new Date(clock.now()).toISOString(), lastSavedAt: new Date(clock.now()).toISOString() };
+    },
+    debounceMs: 2000,
+    storage,
+    key: (id) => `k:${id}`,
+    now: clock.now,
+    timers: clock.timers,
+    resolveStale: async () => ({ text: '', clientSeq: 0 }),
+  });
+  saver.seed('m1', { clientSeq: 0, text: '' });
+  saver.update('m1', '1', 0);
+  saver.update('m1', '3', 0);
+  await saver.flush('m1');
+  assert.equal(sent.length, 1, 'one save, no debounce wait');
+  assert.deepEqual([sent[0]!.text, sent[0]!.clientSeq, sent[0]!.typedChars], ['3', 1, 0]);
+  saver.update('m1', '', 0);
+  await saver.flush('m1');
+  assert.deepEqual([sent[1]!.text, sent[1]!.clientSeq], ['', 2]);
+  assert.equal(saver.hasUnsaved(), false);
+  saver.dispose();
+});

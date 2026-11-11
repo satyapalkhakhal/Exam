@@ -17,6 +17,9 @@ export interface LeaderboardRow extends SaPii {
   submittedAt: string | null;
   totalMarks: number;
   maxMarks: number;
+  /** MCQ subtotal (auto-marked) and its max; null / 0 when the test has no MCQs. */
+  mcqMarks: number | null;
+  mcqMaxMarks: number;
   percentage: number;
   questionMarks: { order: number; marks: number | null; aiMarks: number | null; maxMarks: number }[];
   aiPercentage: number | null;
@@ -28,19 +31,20 @@ export interface LeaderboardRow extends SaPii {
 
 export type Decision = 'SHORTLISTED' | 'REJECTED';
 
-export function useLeaderboard(jobRoleId: string, sort: LeaderboardSort = 'human') {
+/** One drive's ranking (spec 2026-11-10: colleges, rounds and internships are never mixed). */
+export function useLeaderboard(driveId: string, sort: LeaderboardSort = 'human') {
   return useQuery({
-    queryKey: ['admin', 'leaderboard', jobRoleId, sort],
-    enabled: Boolean(jobRoleId),
+    queryKey: ['admin', 'leaderboard', driveId, sort],
+    enabled: Boolean(driveId),
     queryFn: async () => {
-      const r = await apiFetch<Paged<LeaderboardRow> | LeaderboardRow[]>('admin', `/leaderboard?jobRoleId=${encodeURIComponent(jobRoleId)}&sort=${sort}`);
+      const r = await apiFetch<Paged<LeaderboardRow> | LeaderboardRow[]>('admin', `/leaderboard?driveId=${encodeURIComponent(driveId)}&sort=${sort}`);
       return Array.isArray(r) ? r : r.items;
     },
   });
 }
 
-export const resultsExportUrl = (jobRoleId: string) => `/api/admin/exports/results.xlsx?jobRoleId=${encodeURIComponent(jobRoleId)}`;
-export const activityExportUrl = (jobRoleId: string) => `/api/admin/exports/activity.xlsx?jobRoleId=${encodeURIComponent(jobRoleId)}`;
+export const resultsExportUrl = (driveId: string) => `/api/admin/exports/results.xlsx?driveId=${encodeURIComponent(driveId)}`;
+export const activityExportUrl = (driveId: string) => `/api/admin/exports/activity.xlsx?driveId=${encodeURIComponent(driveId)}`;
 
 /** Shortlist / reject several candidates; with sendEmail the matching email is queued too. */
 export function useBulkDecision() {

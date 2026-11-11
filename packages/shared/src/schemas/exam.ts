@@ -64,6 +64,16 @@ export const SaveAnswerSchema = z.object({
 });
 export type SaveAnswerInput = z.infer<typeof SaveAnswerSchema>;
 
+/** An MCQ choice: the option index in the order this candidate sees them, or null to clear. */
+export const SaveChoiceSchema = z.object({
+  sessionId,
+  clientSeq: z.number().int().min(1).max(INT32_MAX),
+  selectedOption: z.number().int().min(0).max(3).nullable(),
+  markedForReview: z.boolean().optional(),
+  visited: z.boolean().optional(),
+});
+export type SaveChoiceInput = z.infer<typeof SaveChoiceSchema>;
+
 export const AttemptQuestionParamsSchema = z.object({ attemptQuestionId: z.string().uuid() });
 
 const METADATA_MAX_JSON = 2_000;
@@ -91,6 +101,8 @@ export const SubmitExamSchema = z.object({ sessionId });
 export interface ExamAnswerState {
   text: string;
   wordCount: number;
+  /** MCQ: the chosen option (index in the shown order) or null; always null for written. */
+  selectedOption: number | null;
   clientSeq: number;
   markedForReview: boolean;
   visited: boolean;
@@ -101,7 +113,10 @@ export interface ExamAnswerState {
 export interface ExamQuestionState {
   attemptQuestionId: string;
   order: number;
+  type: 'WRITTEN' | 'MCQ';
   text: string;
+  /** MCQ: the 4 options in this candidate's order; [] for written. Never says which is correct. */
+  options: string[];
   maxMarks: number;
   answer: ExamAnswerState;
 }
@@ -115,6 +130,8 @@ export interface ExamState {
   startedAt: string;
   endsAt: string;
   durationMinutes: number;
+  /** Marks lost per wrong MCQ answer (0 = none), shown to the candidate. */
+  mcqNegativeMarks: number;
   questions: ExamQuestionState[];
 }
 

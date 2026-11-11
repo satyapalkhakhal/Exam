@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { CANDIDATE_BULK_MAX, type CandidateResult } from './candidates.js';
 import { NextRoundSchema, type EmailSendResultDto } from './emails.js';
 import { LEADERBOARD_SORTS, type AiAttemptSummaryDto, type AiQuestionScoreDto } from './aiEvaluation.js';
+import { JOB_PROFILE_TYPES, type JobProfileType } from './drives.js';
 
 /** Submissions filter on the AI roll-up; NEEDS_REVIEW = AI done with concerns or LOW confidence. */
 export const AI_FILTERS = ['NONE', 'PARTIAL', 'DONE', 'NEEDS_REVIEW'] as const;
@@ -24,6 +25,15 @@ const pageSize = z.coerce.number().int().min(1).max(100).default(25);
 
 export const SubmissionListQuerySchema = z.object({
   jobRoleId: uuid.optional(),
+  roundId: uuid.optional(),
+  /** Super Admin only: an Evaluator sending driveId/collegeId gets 403 (blind marking). */
+  driveId: uuid.optional(),
+  collegeId: uuid.optional(),
+  /** Super Admin only, like collegeId (a batch names a drive). */
+  batch: z.string().trim().min(1).max(60).optional(),
+  /** Campus dashboard links (spec 2026-11-11); not college data, so Evaluators may use them. */
+  roundNumber: z.coerce.number().int().min(1).max(20).optional(),
+  jobProfileType: z.enum(JOB_PROFILE_TYPES).optional(),
   evaluation: z.enum(EVALUATION_STATES).optional(),
   ai: z.enum(AI_FILTERS).optional(),
   search: z.string().trim().max(100).optional(),
@@ -89,8 +99,13 @@ export interface CandidateDecisionBulkResultDto {
   emailSkipped: EmailSendResultDto['skipped'];
 }
 
-export const LeaderboardQuerySchema = z.object({ jobRoleId: uuid, sort: z.enum(LEADERBOARD_SORTS).default('human') });
-export const ExportQuerySchema = z.object({ jobRoleId: uuid.optional() });
+export const LeaderboardQuerySchema = z.object({ driveId: uuid, sort: z.enum(LEADERBOARD_SORTS).default('human') });
+export const ExportQuerySchema = z.object({
+  jobRoleId: uuid.optional(),
+  roundId: uuid.optional(),
+  collegeId: uuid.optional(),
+  driveId: uuid.optional(),
+});
 
 export interface CandidatePiiDto {
   candidateId: string;
@@ -108,9 +123,16 @@ export interface SubmissionViewDto extends Partial<CandidatePiiDto> {
   attemptId: string;
   candidateCode: string;
   jobRole: string;
+  jobProfileType: JobProfileType;
+  roundNumber: number;
+  /** Super Admin only (never sent to Evaluators). */
+  driveDisplayName?: string;
   submittedAt: string | null;
   timeTakenSec: number | null;
   submitType: 'MANUAL' | 'AUTO' | null;
+  /** MCQ subtotal (auto-marked at submit) and its maximum; null / 0 when the test has no MCQs. */
+  mcqMarks: number | null;
+  mcqMaxMarks: number;
   flagCounts: Record<string, number>;
   /** Other candidates who started within 100 m and ±2 h; null without a start location. */
   nearbyCount: number | null;
@@ -123,7 +145,13 @@ export interface SubmissionViewDto extends Partial<CandidatePiiDto> {
 export interface MarkingQuestionDto {
   attemptQuestionId: string;
   order: number;
+  type: 'WRITTEN' | 'MCQ';
   text: string;
+  /** MCQ (read-only for evaluators): options as the candidate saw them, their choice, the correct one and the auto mark. */
+  options: string[];
+  selectedOption: number | null;
+  correctOption: number | null;
+  autoMarks: number | null;
   maxMarks: number;
   evaluatorGuidance: string | null;
   answer: { text: string; wordCount: number; versions: { savedAt: string; wordCount: number }[] };
@@ -168,6 +196,10 @@ export interface LeaderboardRowDto extends CandidatePiiDto {
   totalMarks: number;
   maxMarks: number;
   percentage: number;
+  /** MCQ subtotal (auto-marked) and its maximum; null / 0 when the test has no MCQs. */
+  mcqMarks: number | null;
+  mcqMaxMarks: number;
+  /** Written questions only. */
   questionMarks: { order: number; marks: number | null; aiMarks: number | null; maxMarks: number }[];
   /** AI exam % when every question has an AI score. */
   aiPercentage: number | null;
@@ -179,9 +211,19 @@ export interface LeaderboardRowDto extends CandidatePiiDto {
   nearbyCount: number | null;
 }
 
-export interface DashboardRoleDto {
+/**
+ * One dashboard row: a drive for a Super Admin; for an Evaluator a round (its
+ * drives summed) with driveId, collegeShortCode and batch null (blind marking).
+ */
+export interface DashboardDriveDto {
+  driveId: string | null;
+  displayName: string;
   jobRoleId: string;
   jobRoleName: string;
+  jobProfileType: JobProfileType;
+  roundNumber: number;
+  collegeShortCode: string | null;
+  batch: string | null;
   refApplicantCount: number;
   imported: number;
   notStarted: number;
@@ -192,4 +234,11 @@ export interface DashboardRoleDto {
   shortlisted: number;
   rejected: number;
   pendingEvaluation: number;
+  // ---- Super Admin only (campus hiring dashboard, spec 2026-11-11); absent for Evaluators. ----
+  collegeId?: string;
+  collegeName?: string;
+  roundId?: string;
+  /** Sum and count of evaluated exam % (live attempts), so averages across drives weight by candidates. */
+  examPctSum?: number;
+  examPctCount?: number;
 }

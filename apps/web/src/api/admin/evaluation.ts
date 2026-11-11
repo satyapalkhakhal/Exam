@@ -29,6 +29,10 @@ export interface SubmissionRow extends Partial<SaPii> {
   attemptId: string;
   candidateCode: string;
   jobRole: string;
+  jobProfileType: 'PLACEMENT' | 'INTERNSHIP';
+  roundNumber: number;
+  /** Super Admin only (college + batch are hidden from Evaluators). */
+  driveDisplayName?: string;
   submittedAt: string | null;
   timeTakenSec: number | null;
   submitType: string;
@@ -37,11 +41,22 @@ export interface SubmissionRow extends Partial<SaPii> {
   nearbyCount: number | null;
   evaluationStatus: EvaluationFilter;
   totalMarks?: number | null;
+  /** MCQ subtotal (auto-marked) and its max; null / 0 when the test has no MCQs. */
+  mcqMarks: number | null;
+  mcqMaxMarks: number;
   ai: AiAttemptSummaryDto;
 }
 
 export interface SubmissionFilters {
   jobRoleId: string;
+  roundId: string;
+  /** Super Admin only: the API refuses a drive or college filter from an Evaluator. */
+  driveId: string;
+  /** Campus dashboard links (spec 2026-11-11). collegeId and batch are Super Admin only. */
+  collegeId: string;
+  batch: string;
+  jobProfileType: '' | 'PLACEMENT' | 'INTERNSHIP';
+  roundNumber: string;
   evaluation: '' | EvaluationFilter;
   ai: '' | AiFilter;
   search: string;
@@ -50,6 +65,12 @@ export interface SubmissionFilters {
 export function useSubmissions(f: SubmissionFilters, page: number, pageSize: number) {
   const q = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
   if (f.jobRoleId) q.set('jobRoleId', f.jobRoleId);
+  if (f.roundId) q.set('roundId', f.roundId);
+  if (f.driveId) q.set('driveId', f.driveId);
+  if (f.collegeId) q.set('collegeId', f.collegeId);
+  if (f.batch) q.set('batch', f.batch);
+  if (f.jobProfileType) q.set('jobProfileType', f.jobProfileType);
+  if (f.roundNumber) q.set('roundNumber', f.roundNumber);
   if (f.evaluation) q.set('evaluation', f.evaluation);
   if (f.ai) q.set('ai', f.ai);
   if (f.search) q.set('search', f.search);
@@ -63,7 +84,13 @@ export function useSubmissions(f: SubmissionFilters, page: number, pageSize: num
 export interface MarkingQuestion {
   attemptQuestionId: string;
   order: number;
+  type: 'WRITTEN' | 'MCQ';
   text: string;
+  /** MCQ, read-only: options as the candidate saw them, their choice, the correct one, the auto mark. */
+  options: string[];
+  selectedOption: number | null;
+  correctOption: number | null;
+  autoMarks: number | null;
   maxMarks: number;
   evaluatorGuidance: string | null;
   answer: { text: string; wordCount: number; versions: { savedAt: string; wordCount: number }[] };
@@ -80,6 +107,8 @@ export interface MarkingView extends Partial<SaPii> {
   submittedAt: string | null;
   evaluationStatus: EvaluationFilter;
   totalMarks?: number | null;
+  mcqMarks: number | null;
+  mcqMaxMarks: number;
   startedAt: string;
   questions: MarkingQuestion[];
   timeline: TimelineEvent[];

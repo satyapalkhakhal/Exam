@@ -7,13 +7,15 @@
 // in a dialog so the list stays the page's focus.
 
 import { useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useLocation } from 'react-router';
+import { LinkedFiltersChip } from '@/components/admin/LinkedFiltersChip';
+import { LINK_FILTER_VALIDATORS, filtersFromSearch, linkedFilterLabel } from '@/lib/urlFilters';
 import { useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react';
 import { ImportWizard } from '@/components/import/ImportWizard';
 import { AddCandidateDialog } from '@/components/admin/AddCandidateDialog';
 import { SendEmailDialog } from '@/components/admin/SendEmailDialog';
-import { BulkJobRoleDialog } from '@/components/admin/BulkJobRoleDialog';
+import { MoveToDriveDialog } from '@/components/admin/MoveToDriveDialog';
 import { DecisionDialog } from '@/components/admin/DecisionDialog';
 import { RESULT_TEXT, ResultBadge } from '@/components/admin/ResultBadge';
 import { Badge } from '@/components/ui/badge';
@@ -24,6 +26,9 @@ import { Pagination } from '@/components/ui/pagination';
 import { TableHeaderFilter, TableHeaderFilterOptions, TableHeaderFilterText } from '@/components/ui/table-header-filter';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useRoles } from '@/api/admin/roles';
+import { useColleges } from '@/api/admin/drives';
+import { allDrives, batchOf, jobProfileLabel, roundOptions } from '@/lib/drivePicker';
+import { JOB_PROFILE_TYPE_LABELS } from '@exam/shared';
 import {
   CANDIDATE_STATUSES,
   CANDIDATE_TEMPLATE_URL,
@@ -81,10 +86,12 @@ function SortHead({
 
 /** "Also applied: Backend Engineer (Rejected), Data Analyst (Submitted)". */
 const otherAppsText = (c: CandidateListItem) =>
-  c.otherApplications.map((o) => `${o.jobRoleName} (${o.result ? RESULT_TEXT[o.result] : statusText(o.status)})`).join(', ');
+  c.otherApplications.map((o) => `${o.driveDisplayName} (${o.result ? RESULT_TEXT[o.result] : statusText(o.status)})`).join(', ');
 
 export default function Candidates() {
-  const [f, setF] = useState<CandidateFilters>(EMPTY_CANDIDATE_FILTERS);
+  const location = useLocation();
+  // Starting filters may come from a campus-dashboard link (validated keys only).
+  const [f, setF] = useState<CandidateFilters>(() => filtersFromSearch(location.search, EMPTY_CANDIDATE_FILTERS, LINK_FILTER_VALIDATORS));
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [importing, setImporting] = useState(false);
@@ -92,12 +99,13 @@ export default function Candidates() {
   // Ticked candidates, kept across pages and filter changes so several pages can be moved together.
   const [emailing, setEmailing] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
-  // Job profile of each ticked candidate, so the decision dialog can say when a selection spans several.
-  const [roleOf, setRoleOf] = useState<Map<string, string>>(() => new Map());
+  // Drive of each ticked candidate, so the decision dialog can say when a selection spans several.
+  const [driveOf, setDriveOf] = useState<Map<string, string>>(() => new Map());
   const [moving, setMoving] = useState(false);
   const [deciding, setDeciding] = useState<CandidateResult | null>(null);
   const [matching, setMatching] = useState<{ loading: boolean; error: string | null; total: number | null }>({ loading: false, error: null, total: null });
   const roles = useRoles();
+  const colleges = useColleges();
   const { data, isPending, error } = useCandidates(f, page, pageSize);
   const qc = useQueryClient();
 
@@ -112,14 +120,14 @@ export default function Candidates() {
   const activeCount = FILTER_KEYS.filter((k) => f[k] !== '').length;
   const pageIds = data?.items.map((c) => c.id) ?? [];
   const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
-  const jobProfileCount = new Set([...selected].map((id) => roleOf.get(id)).filter(Boolean)).size;
+  const driveCount = new Set([...selected].map((id) => driveOf.get(id)).filter(Boolean)).size;
   const clearSelection = () => {
     setSelected(new Set());
     setMatching({ loading: false, error: null, total: null });
   };
   const toggle = (c: CandidateListItem) => {
     setMatching((m) => ({ ...m, total: null }));
-    setRoleOf((cur) => new Map(cur).set(c.id, c.jobRoleId));
+    setDriveOf((cur) => new Map(cur).set(c.id, c.driveId));
     setSelected((cur) => {
       const next = new Set(cur);
       if (next.has(c.id)) next.delete(c.id);
@@ -129,9 +137,9 @@ export default function Candidates() {
   };
   const togglePage = () => {
     setMatching((m) => ({ ...m, total: null }));
-    setRoleOf((cur) => {
+    setDriveOf((cur) => {
       const next = new Map(cur);
-      for (const c of data?.items ?? []) next.set(c.id, c.jobRoleId);
+      for (const c of data?.items ?? []) next.set(c.id, c.driveId);
       return next;
     });
     setSelected((cur) => {
@@ -147,9 +155,9 @@ export default function Candidates() {
     setMatching({ loading: true, error: null, total: null });
     try {
       const r = await fetchMatchingCandidateIds(f);
-      setRoleOf((cur) => {
+      setDriveOf((cur) => {
         const next = new Map(cur);
-        for (const [id, roleId] of Object.entries(r.jobRoleIdById)) next.set(id, roleId);
+        for (const [id, driveId] of Object.entries(r.driveIdById)) next.set(id, driveId);
         return next;
       });
       setSelected(new Set(r.ids));
@@ -165,6 +173,8 @@ export default function Candidates() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold text-foreground">Candidates</h1>
         <div className="flex items-center gap-2">
+          {/* College, profile and programme have column filters; batch and round number do not. */}
+          <LinkedFiltersChip label={linkedFilterLabel({ batch: f.batch, roundNumber: f.roundNumber })} onClear={() => set({ batch: '', roundNumber: '' })} />
           <ClearFiltersButton count={activeCount} onClear={() => set(CLEARED)} />
           {selected.size > 0 && (
             <>
@@ -172,7 +182,7 @@ export default function Candidates() {
               <Button variant="ghost" size="sm" onClick={clearSelection}>Clear</Button>
               <Button variant="outline" onClick={() => setDeciding('SHORTLISTED')}>Shortlist</Button>
               <Button variant="outline" onClick={() => setDeciding('REJECTED')}>Reject</Button>
-              <Button variant="outline" onClick={() => setMoving(true)}>Change job role</Button>
+              <Button variant="outline" onClick={() => setMoving(true)}>Move to drive</Button>
               <Button variant="outline" onClick={() => setEmailing(true)}>Send email</Button>
             </>
           )}
@@ -218,9 +228,44 @@ export default function Candidates() {
               </TableHead>
               <TableHead>
                 <span className="inline-flex items-center gap-1.5">
-                  Role
-                  <TableHeaderFilter active={Boolean(f.jobRoleId)} ariaLabel="Filter by role" className="w-72">
-                    <TableHeaderFilterOptions value={f.jobRoleId} options={(roles.data ?? []).map((r) => ({ value: r.id, label: r.name }))} onChange={(v) => set({ jobRoleId: v })} />
+                  Job profile
+                  <TableHeaderFilter active={Boolean(f.jobRoleId || f.jobProfileType)} ariaLabel="Filter by job profile or type" className="w-72">
+                    <p className="px-2 pt-1 text-xs font-medium text-muted-foreground">Type</p>
+                    <TableHeaderFilterOptions
+                      value={f.jobProfileType}
+                      allLabel="Placement and internship"
+                      options={(['PLACEMENT', 'INTERNSHIP'] as const).map((t) => ({ value: t, label: JOB_PROFILE_TYPE_LABELS[t] }))}
+                      onChange={(v) => set({ jobProfileType: v as CandidateFilters['jobProfileType'] })}
+                    />
+                    <p className="px-2 pt-2 text-xs font-medium text-muted-foreground">Job profile</p>
+                    <TableHeaderFilterOptions value={f.jobRoleId} options={(roles.data ?? []).map((r) => ({ value: r.id, label: jobProfileLabel(r) }))} onChange={(v) => set({ jobRoleId: v })} />
+                  </TableHeaderFilter>
+                </span>
+              </TableHead>
+              <TableHead>
+                <span className="inline-flex items-center gap-1.5">
+                  Round
+                  <TableHeaderFilter active={Boolean(f.roundId)} ariaLabel="Filter by round" className="w-72">
+                    <TableHeaderFilterOptions value={f.roundId} options={roundOptions(roles.data ?? []).map((o) => ({ value: o.id, label: o.label }))} onChange={(v) => set({ roundId: v })} />
+                  </TableHeaderFilter>
+                </span>
+              </TableHead>
+              <TableHead>
+                <span className="inline-flex items-center gap-1.5">
+                  College
+                  <TableHeaderFilter active={Boolean(f.collegeId || f.driveId)} ariaLabel="Filter by college or drive" className="w-80">
+                    <p className="px-2 pt-1 text-xs font-medium text-muted-foreground">College</p>
+                    <TableHeaderFilterOptions
+                      value={f.collegeId}
+                      options={(colleges.data ?? []).map((c) => ({ value: c.id, label: `${c.shortCode} · ${c.name}` }))}
+                      onChange={(v) => set({ collegeId: v })}
+                    />
+                    <p className="px-2 pt-2 text-xs font-medium text-muted-foreground">Drive</p>
+                    <TableHeaderFilterOptions
+                      value={f.driveId}
+                      options={allDrives(roles.data ?? []).map((d) => ({ value: d.id, label: d.displayName }))}
+                      onChange={(v) => set({ driveId: v })}
+                    />
                   </TableHeaderFilter>
                 </span>
               </TableHead>
@@ -270,8 +315,8 @@ export default function Candidates() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {isPending && <TableRow><TableCell colSpan={14} className="text-muted-foreground">Loading…</TableCell></TableRow>}
-            {data?.items.length === 0 && <TableRow><TableCell colSpan={14} className="text-muted-foreground">No candidates match.</TableCell></TableRow>}
+            {isPending && <TableRow><TableCell colSpan={16} className="text-muted-foreground">Loading…</TableCell></TableRow>}
+            {data?.items.length === 0 && <TableRow><TableCell colSpan={16} className="text-muted-foreground">No candidates match.</TableCell></TableRow>}
             {data?.items.map((c) => (
               <TableRow key={c.id} data-state={selected.has(c.id) ? 'selected' : undefined}>
                 <TableCell>
@@ -281,9 +326,17 @@ export default function Candidates() {
                 <TableCell>
                   <Link to={`/admin/candidates/${c.id}`} className="font-medium text-primary hover:underline">{c.fullName}</Link>
                   <div className="text-xs text-muted-foreground">{c.email}</div>
-                  {c.otherApplications.length > 0 && <div className="text-xs text-muted-foreground">Also applied: {otherAppsText(c)}</div>}
+                  {c.otherApplications.length > 0 && <div className="text-xs text-muted-foreground">Also in: {otherAppsText(c)}</div>}
                 </TableCell>
-                <TableCell>{c.jobRoleName}</TableCell>
+                <TableCell>
+                  {c.jobRoleName}
+                  {c.jobProfileType === 'INTERNSHIP' && <Badge variant="secondary" className="ml-1">Internship</Badge>}
+                </TableCell>
+                <TableCell className="whitespace-nowrap">Round {c.roundNumber}</TableCell>
+                <TableCell className="whitespace-nowrap" title={c.driveDisplayName}>
+                  {c.collegeShortCode}
+                  <div className="text-xs text-muted-foreground">{batchOf(c.driveDisplayName, c.collegeShortCode)}</div>
+                </TableCell>
                 <TableCell>
                   <Badge variant="outline">{statusText(c.status)}</Badge>
                   {!c.eligible && <Badge variant="outline" className="ml-1">Not eligible</Badge>}
@@ -316,26 +369,19 @@ export default function Candidates() {
           }}
         />
       )}
-      <BulkJobRoleDialog
-        open={moving}
-        candidateIds={[...selected]}
-        roles={roles.data ?? []}
-        onClose={() => setMoving(false)}
-        onDone={clearSelection}
-      />
+      <MoveToDriveDialog open={moving} candidateIds={[...selected]} onClose={() => setMoving(false)} onDone={clearSelection} />
       <SendEmailDialog open={emailing} candidateIds={[...selected]} onClose={() => setEmailing(false)} onDone={clearSelection} />
       <DecisionDialog
         open={deciding !== null}
         decision={deciding ?? 'SHORTLISTED'}
         candidateIds={[...selected]}
-        jobProfileCount={jobProfileCount}
+        driveCount={driveCount}
         onClose={() => setDeciding(null)}
         onDone={clearSelection}
       />
       <AddCandidateDialog
         open={adding}
-        roles={roles.data ?? []}
-        defaultJobRoleId={f.jobRoleId || undefined}
+        defaultDriveId={f.driveId || undefined}
         onClose={() => setAdding(false)}
       />
       <Dialog open={importing} onOpenChange={setImporting}>
@@ -347,7 +393,8 @@ export default function Candidates() {
           <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">
             <ImportWizard
               kind="CANDIDATES"
-              jobRoles={roles.data ?? []}
+              targets={allDrives(roles.data ?? []).filter((d) => d.active).map((d) => ({ id: d.id, name: d.displayName }))}
+              defaultTargetId={f.driveId || undefined}
               templateUrl={CANDIDATE_TEMPLATE_URL}
               previewFn={previewCandidateImport}
               confirmFn={confirmCandidateImport}

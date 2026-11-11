@@ -21,6 +21,7 @@ import type {
   EmailTemplateUpdateInput,
   NextRoundInput,
   Paginated,
+  JobProfileType,
 } from '@exam/shared';
 import { EMAIL_TEMPLATE_KEYS, EMAIL_TEMPLATE_PLACEHOLDERS } from '@exam/shared';
 import { AppError, badRequest, conflict, unauthorized } from '../../shared/errors.js';
@@ -67,6 +68,9 @@ export interface EmailCandidate {
   /** HR's outcome, kept apart from the exam status. */
   result: 'SHORTLISTED' | 'REJECTED' | null;
   jobRoleName: string;
+  jobProfileType: JobProfileType;
+  /** The candidate's round, only when the job profile has more than one round (else null). */
+  roundNumber: number | null;
   /** The current (non-RESET) attempt, if any. */
   attempt: {
     status: string;
@@ -235,7 +239,7 @@ export function createEmailsService(deps: EmailsDeps) {
   }
 
   function render(key: EmailTemplateKey, c: EmailCandidate, template: EmailTemplate, contactEmail: string, nextRound: NextRoundDetails | undefined): EmailContent {
-    const base = { fullName: c.fullName, candidateCode: c.candidateCode, jobRoleName: c.jobRoleName, contactEmail };
+    const base = { fullName: c.fullName, candidateCode: c.candidateCode, jobRoleName: c.jobRoleName, jobProfileType: c.jobProfileType, roundNumber: c.roundNumber, contactEmail };
     if (key === 'SHORTLISTED') {
       const a = c.attempt;
       const assessment: AssessmentSummary | undefined = a

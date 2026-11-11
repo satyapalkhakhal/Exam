@@ -1,12 +1,21 @@
 // modules/candidates/candidates.repository.ts
 // candidates (applications) + their logs, and the candidate accounts that own
 // their email and mobile. Every write commits with its audit row. The unique
-// indexes (account email/mobile, account x role) are the final arbiter of
+// indexes (account email/mobile, account x drive) are the final arbiter of
 // duplicates, so concurrent imports or edits cannot slip one past the service.
-// Lock order is account row, then candidate rows (as the exam start does), so
-// admin writes cannot deadlock with a start.
+// "One person per round and batch" (no entries in two colleges' drives of the
+// same round + batch) has no index: every write that creates or moves an entry
+// checks it under the account row lock. Lock order is account row, then
+// candidate rows (as the exam start does), so admin writes cannot deadlock
+// with a start.
 
-import { CANDIDATE_BULK_MAX, type CandidateBulkJobRoleResultDto, type CandidateListQuery, type CandidateRowDto } from '@exam/shared';
+import {
+  CANDIDATE_BULK_MAX,
+  driveDisplayName,
+  type CandidateListQuery,
+  type CandidateMoveResultDto,
+  type CandidateRowDto,
+} from '@exam/shared';
 import { prisma } from '../../infrastructure/db/prisma.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { conflict } from '../../shared/errors.js';
@@ -15,14 +24,62 @@ import { attemptCounts } from '../exam/attemptCounts.js';
 import type { CandidatesRepository } from './candidates.service.js';
 import type { ExistingAccount } from './candidateImport.parser.js';
 
-const include = { jobRole: { select: { name: true } } } as const;
-const HELD = 'This person already has a candidate for this job role.';
+const include = {
+  jobRole: { select: { name: true, type: true } },
+  drive: { select: { batch: true, roundId: true, round: { select: { roundNumber: true } }, college: { select: { shortCode: true } } } },
+} as const;
+/** The same select for a sibling/other entry, to build its drive display name. */
+const driveNameSelect = {
+  jobRole: { select: { name: true } },
+  drive: { select: { batch: true, round: { select: { roundNumber: true } }, college: { select: { shortCode: true } } } },
+} as const;
+type DriveNamed = { jobRole: { name: string }; drive: { batch: string; round: { roundNumber: number }; college: { shortCode: string } } };
+const nameOf = (c: DriveNamed): string =>
+  driveDisplayName({ jobRoleName: c.jobRole.name, roundNumber: c.drive.round.roundNumber, collegeShortCode: c.drive.college.shortCode, batch: c.drive.batch });
+
+const HELD = 'This person is already in this drive.';
+const SAME_ROUND_BATCH = (s: { collegeShortCode: string; batch: string }) =>
+  conflict(`This person is already in ${s.collegeShortCode}'s ${s.batch} drive for this round.`, 'SAME_ROUND_BATCH');
 const MOBILE_TAKEN = 'Another candidate already has this mobile number.';
 const isUnique = (err: unknown): boolean => err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
+
+/**
+ * The person's entry in another college's drive of the target drive's round
+ * and batch (case-insensitive), ignoring `exceptCandidateId`. Call it holding
+ * the account row lock so two writes for one person cannot both pass.
+ */
+export async function siblingEntry(
+  tx: Prisma.TransactionClient,
+  accountId: string,
+  driveId: string,
+  exceptCandidateId?: string,
+): Promise<{ collegeShortCode: string; batch: string } | null> {
+  const except = exceptCandidateId ? Prisma.sql`AND c.id <> ${exceptCandidateId}::uuid` : Prisma.empty;
+  const rows = await tx.$queryRaw<{ short_code: string; batch: string }[]>`
+    SELECT co.short_code, d.batch FROM candidates c
+    JOIN drives d ON d.id = c.drive_id
+    JOIN colleges co ON co.id = d.college_id
+    JOIN drives t ON t.id = ${driveId}::uuid
+    WHERE c.account_id = ${accountId}::uuid AND d.round_id = t.round_id AND lower(d.batch) = lower(t.batch) AND d.id <> t.id ${except}
+    LIMIT 1`;
+  return rows[0] ? { collegeShortCode: rows[0].short_code, batch: rows[0].batch } : null;
+}
 
 function listWhere(q: CandidateListQuery): Prisma.CandidateWhereInput {
   return {
     ...(q.jobRoleId ? { jobRoleId: q.jobRoleId } : {}),
+    ...(q.driveId ? { driveId: q.driveId } : {}),
+    ...(q.roundId || q.collegeId || q.batch || q.roundNumber
+      ? {
+          drive: {
+            ...(q.roundId ? { roundId: q.roundId } : {}),
+            ...(q.collegeId ? { collegeId: q.collegeId } : {}),
+            ...(q.batch ? { batch: { equals: q.batch, mode: 'insensitive' as const } } : {}),
+            ...(q.roundNumber ? { round: { roundNumber: q.roundNumber } } : {}),
+          },
+        }
+      : {}),
+    ...(q.jobProfileType ? { jobRole: { type: q.jobProfileType } } : {}),
     ...(q.status ? { status: q.status } : {}),
     ...(q.result ? { result: q.result === 'NONE' ? null : q.result } : {}),
     // gte never matches NULL, so a set minimum also drops rows without a value.
@@ -73,35 +130,43 @@ async function listByAttempt(q: CandidateListQuery, where: Prisma.CandidateWhere
 }
 
 export const candidatesRepository: CandidatesRepository = {
-  async jobRoleExists(id) {
-    return (await prisma.jobRole.count({ where: { id } })) > 0;
+  async findDrive(id) {
+    const d = await prisma.drive.findUnique({ where: { id }, select: { id: true, roundId: true, active: true, round: { select: { jobRoleId: true } } } });
+    return d ? { id: d.id, roundId: d.roundId, active: d.active, jobRoleId: d.round.jobRoleId } : null;
   },
 
-  async rolesByLowerName() {
-    const roles = await prisma.jobRole.findMany({ select: { id: true, name: true } });
-    return new Map(roles.map((r) => [r.name.trim().toLowerCase(), r.id]));
-  },
-
-  async existingAccounts() {
+  async existingAccounts(driveId) {
+    const target = await prisma.drive.findUniqueOrThrow({ where: { id: driveId }, select: { roundId: true, batch: true } });
     const accounts = await prisma.candidateAccount.findMany({
-      select: { id: true, email: true, mobile: true, applications: { select: { id: true, jobRoleId: true, status: true } } },
+      select: {
+        id: true,
+        email: true,
+        mobile: true,
+        applications: {
+          select: { id: true, driveId: true, status: true, drive: { select: { roundId: true, batch: true, college: { select: { shortCode: true } } } } },
+        },
+      },
     });
     const accountsByEmail = new Map<string, ExistingAccount>();
     const mobileOwners = new Map<string, string>();
     for (const a of accounts) {
+      const sibling = a.applications.find(
+        (c) => c.driveId !== driveId && c.drive.roundId === target.roundId && c.drive.batch.toLowerCase() === target.batch.toLowerCase(),
+      );
       accountsByEmail.set(a.email.toLowerCase(), {
         accountId: a.id,
         mobile: a.mobile,
-        roles: new Map(a.applications.map((c) => [c.jobRoleId, { id: c.id, status: c.status }])),
+        entries: new Map(a.applications.map((c) => [c.driveId, { id: c.id, status: c.status }])),
+        sibling: sibling ? { collegeShortCode: sibling.drive.college.shortCode, batch: sibling.drive.batch } : null,
       });
       if (a.mobile) mobileOwners.set(a.mobile, a.id);
     }
     return { accountsByEmail, mobileOwners };
   },
 
-  async lastImportOf(jobRoleId, fileHash) {
+  async lastImportOf(driveId, fileHash) {
     const batch = await prisma.importBatch.findFirst({
-      where: { kind: 'CANDIDATES', jobRoleId, fileHash },
+      where: { kind: 'CANDIDATES', driveId, fileHash },
       orderBy: { createdAt: 'desc' },
       select: { createdAt: true },
     });
@@ -113,7 +178,7 @@ export const candidatesRepository: CandidatesRepository = {
       const batch = await tx.importBatch.create({
         data: {
           kind: 'CANDIDATES',
-          jobRoleId: input.jobRoleId,
+          driveId: input.driveId,
           fileName: input.fileName,
           fileHash: input.fileHash,
           uploadedById: input.uploadedById,
@@ -134,7 +199,16 @@ export const candidatesRepository: CandidatesRepository = {
         where: { email: { in: [...firstByEmail.keys()] } },
         select: { id: true, email: true, mobile: true },
       });
-      const byEmail = new Map(accounts.map((a) => [a.email, a]));
+      // Account rows locked in id order, then the same-round-and-batch rule: a
+      // concurrent import of the same person into another college's drive of
+      // this round either committed first (seen here, row skipped) or waits.
+      const accountIds = accounts.map((a) => a.id);
+      if (accountIds.length > 0) {
+        await tx.$queryRaw`SELECT id FROM candidate_accounts WHERE id = ANY(${accountIds}::uuid[]) ORDER BY id FOR UPDATE`;
+      }
+      const blocked = new Set<string>();
+      for (const a of accounts) if (await siblingEntry(tx, a.id, input.driveId)) blocked.add(a.id);
+      const byEmail = new Map(accounts.filter((a) => !blocked.has(a.id)).map((a) => [a.email, a]));
       const { count } = await tx.candidate.createMany({
         data: input.rows.flatMap((r) => {
           const account = byEmail.get(r.email);
@@ -154,7 +228,8 @@ export const candidatesRepository: CandidatesRepository = {
               discipline: r.discipline,
               programme: r.programme,
               extra: r.extra as Prisma.InputJsonValue,
-              jobRoleId: r.jobRoleId,
+              jobRoleId: input.jobRoleId,
+              driveId: input.driveId,
               importBatchId: batch.id,
             },
           ];
@@ -169,8 +244,8 @@ export const candidatesRepository: CandidatesRepository = {
         const owner = await tx.candidate.findUnique({ where: { id: u.candidateId }, select: { accountId: true } });
         if (!owner) continue;
         await tx.$queryRaw`SELECT id FROM candidate_accounts WHERE id = ${owner.accountId}::uuid FOR UPDATE`;
-        const locked = await tx.$queryRaw<{ status: string; job_role_id: string }[]>`
-          SELECT status::text AS status, job_role_id::text FROM candidates WHERE id = ${u.candidateId}::uuid FOR UPDATE`;
+        const locked = await tx.$queryRaw<{ status: string }[]>`
+          SELECT status::text AS status FROM candidates WHERE id = ${u.candidateId}::uuid FOR UPDATE`;
         const current = locked[0];
         if (!current || current.status !== 'NOT_STARTED') continue;
         if (u.mobile !== null) {
@@ -188,7 +263,7 @@ export const candidatesRepository: CandidatesRepository = {
         if (u.discipline !== null) data.discipline = u.discipline;
         if (u.programme !== null) data.programme = u.programme;
         await tx.candidate.update({ where: { id: u.candidateId }, data });
-        await writeAudit(tx, input.updateAudit(u, current.job_role_id));
+        await writeAudit(tx, input.updateAudit(u));
         updated += 1;
       }
       await tx.importBatch.update({ where: { id: batch.id }, data: { imported: count, skipped: input.total - count - updated } });
@@ -234,8 +309,8 @@ export const candidatesRepository: CandidatesRepository = {
       }),
       prisma.candidate.findMany({
         where: { accountId: { in: [...new Set(rows.map((r) => r.accountId))] } },
-        orderBy: [{ jobRole: { name: 'asc' } }, { id: 'asc' }],
-        select: { id: true, accountId: true, status: true, result: true, jobRole: { select: { name: true } } },
+        orderBy: [{ jobRole: { name: 'asc' } }, { drive: { round: { roundNumber: 'asc' } } }, { id: 'asc' }],
+        select: { id: true, accountId: true, status: true, result: true, ...driveNameSelect },
       }),
     ]);
     const counts = await attemptCounts(attempts.map((a) => a.id));
@@ -245,10 +320,10 @@ export const candidatesRepository: CandidatesRepository = {
         { ...a, evaluated: a.evaluation?.status === 'SUBMITTED', ...(counts.get(a.id) ?? { answeredCount: 0, questionCount: 0 }) },
       ]),
     );
-    const others = new Map<string, { id: string; jobRoleName: string; status: CandidateRowDto['status']; result: CandidateRowDto['result'] }[]>();
+    const others = new Map<string, { id: string; driveDisplayName: string; status: CandidateRowDto['status']; result: CandidateRowDto['result'] }[]>();
     for (const c of siblings) {
       const list = others.get(c.accountId) ?? [];
-      list.push({ id: c.id, jobRoleName: c.jobRole.name, status: c.status, result: c.result });
+      list.push({ id: c.id, driveDisplayName: nameOf(c), status: c.status, result: c.result });
       others.set(c.accountId, list);
     }
     return { exams, others };
@@ -258,7 +333,7 @@ export const candidatesRepository: CandidatesRepository = {
     const where: Prisma.CandidateWhereInput = ids ? { AND: [listWhere(q), { id: ids }] } : listWhere(q);
     const total = await prisma.candidate.count({ where });
     if (total > CANDIDATE_BULK_MAX) return { total, rows: [] };
-    const rows = await prisma.candidate.findMany({ where, select: { id: true, jobRoleId: true }, orderBy: { id: 'asc' } });
+    const rows = await prisma.candidate.findMany({ where, select: { id: true, driveId: true }, orderBy: { id: 'asc' } });
     return { total, rows };
   },
 
@@ -280,11 +355,22 @@ export const candidatesRepository: CandidatesRepository = {
       }),
       prisma.candidate.findMany({
         where: { accountId: candidate.accountId, id: { not: id } },
-        orderBy: { jobRole: { name: 'asc' } },
-        select: { id: true, candidateCode: true, status: true, result: true, jobRole: { select: { id: true, name: true } } },
+        orderBy: [{ jobRole: { name: 'asc' } }, { drive: { round: { roundNumber: 'asc' } } }, { id: 'asc' }],
+        select: {
+          id: true, candidateCode: true, status: true, result: true,
+          jobRole: { select: { id: true, name: true } },
+          drive: driveNameSelect.drive,
+        },
       }),
     ]);
-    return { candidate, loginLogs, attempt, otherApplications, activity: { rows, total }, history };
+    return {
+      candidate,
+      loginLogs,
+      attempt,
+      otherApplications: otherApplications.map(({ drive, ...o }) => ({ ...o, driveDisplayName: nameOf({ jobRole: o.jobRole, drive }) })),
+      activity: { rows, total },
+      history,
+    };
   },
 
   findById(id) {
@@ -298,7 +384,9 @@ export const candidatesRepository: CandidatesRepository = {
         let account = await tx.candidateAccount.findUnique({ where: { email: data.email } });
         if (account) {
           await tx.$queryRaw`SELECT id FROM candidate_accounts WHERE id = ${account.id}::uuid FOR UPDATE`;
-          if ((await tx.candidate.count({ where: { accountId: account.id, jobRoleId: data.jobRoleId } })) > 0) throw conflict(HELD);
+          if ((await tx.candidate.count({ where: { accountId: account.id, driveId: data.driveId } })) > 0) throw conflict(HELD);
+          const sibling = await siblingEntry(tx, account.id, data.driveId);
+          if (sibling) throw SAME_ROUND_BATCH(sibling);
           if (mobile !== null && account.mobile !== null && account.mobile !== mobile) {
             throw conflict('This email is already registered with a different mobile number.');
           }
@@ -324,6 +412,7 @@ export const candidatesRepository: CandidatesRepository = {
             discipline: data.discipline ?? null,
             programme: data.programme ?? null,
             jobRoleId: data.jobRoleId,
+            driveId: data.driveId,
           },
           include,
         });
@@ -351,9 +440,11 @@ export const candidatesRepository: CandidatesRepository = {
           });
           await tx.candidate.updateMany({ where: { accountId }, data: { email: account.email, mobile: account.mobile } });
         }
-        if (own.jobRoleId !== undefined) {
-          const held = await tx.candidate.count({ where: { accountId, jobRoleId: own.jobRoleId, NOT: { id } } });
+        if (own.driveId !== undefined) {
+          const held = await tx.candidate.count({ where: { accountId, driveId: own.driveId, NOT: { id } } });
           if (held > 0) throw conflict(HELD);
+          const sibling = await siblingEntry(tx, accountId, own.driveId, id);
+          if (sibling) throw SAME_ROUND_BATCH(sibling);
         }
         const row = await tx.candidate.update({ where: { id }, data: own, include });
         await writeAudit(tx, audit);
@@ -365,20 +456,21 @@ export const candidatesRepository: CandidatesRepository = {
     }
   },
 
-  bulkSetJobRole(ids, jobRoleId, audit) {
+  moveToDrive(ids, target, audit) {
     return prisma.$transaction(async (tx) => {
       // Accounts first, then candidates, each in id order (the exam start locks account
-      // then candidate too), so overlapping bulk moves and starts cannot deadlock; a start
+      // then candidate too), so overlapping moves and starts cannot deadlock; a start
       // or reset on one of these candidates serialises on the same row locks.
       await tx.$queryRaw`
         SELECT a.id FROM candidate_accounts a
         WHERE a.id IN (SELECT account_id FROM candidates WHERE id = ANY(${ids}::uuid[]))
         ORDER BY a.id FOR UPDATE`;
-      const rows = await tx.$queryRaw<{ id: string; status: string; job_role_id: string; candidate_code: string; full_name: string }[]>`
-        SELECT id::text, status::text AS status, job_role_id::text, candidate_code, full_name
-        FROM candidates WHERE id = ANY(${ids}::uuid[]) ORDER BY id FOR UPDATE`;
+      const rows = await tx.$queryRaw<{ id: string; account_id: string; status: string; drive_id: string; round_id: string; candidate_code: string; full_name: string }[]>`
+        SELECT c.id::text, c.account_id::text, c.status::text AS status, c.drive_id::text, d.round_id::text, c.candidate_code, c.full_name
+        FROM candidates c JOIN drives d ON d.id = c.drive_id
+        WHERE c.id = ANY(${ids}::uuid[]) ORDER BY c.id FOR UPDATE OF c`;
       const found = new Map(rows.map((r) => [r.id, r]));
-      const skipped: CandidateBulkJobRoleResultDto['skipped'] = [];
+      const skipped: CandidateMoveResultDto['skipped'] = [];
       let updated = 0;
       for (const id of ids) {
         const r = found.get(id);
@@ -386,18 +478,17 @@ export const candidatesRepository: CandidatesRepository = {
           skipped.push({ candidateId: id, candidateCode: null, fullName: null, reason: 'NOT_FOUND' });
           continue;
         }
-        let reason: CandidateBulkJobRoleResultDto['skipped'][number]['reason'] | null =
-          r.status !== 'NOT_STARTED' ? 'STARTED' : r.job_role_id === jobRoleId ? 'SAME_ROLE' : null;
-        if (reason === null) {
-          const { accountId } = await tx.candidate.findUniqueOrThrow({ where: { id }, select: { accountId: true } });
-          if ((await tx.candidate.count({ where: { accountId, jobRoleId } })) > 0) reason = 'SAME_PERSON_HAS_ROLE';
-        }
+        let reason: CandidateMoveResultDto['skipped'][number]['reason'] | null = null;
+        if (r.drive_id === target.id) reason = 'SAME_DRIVE';
+        else if (r.round_id !== target.roundId && r.status !== 'NOT_STARTED') reason = 'STARTED';
+        else if ((await tx.candidate.count({ where: { accountId: r.account_id, driveId: target.id } })) > 0) reason = 'SAME_DRIVE';
+        else if (await siblingEntry(tx, r.account_id, target.id, id)) reason = 'SAME_ROUND_BATCH';
         if (reason) {
           skipped.push({ candidateId: id, candidateCode: r.candidate_code, fullName: r.full_name, reason });
           continue;
         }
-        await tx.candidate.update({ where: { id }, data: { jobRoleId } });
-        await writeAudit(tx, audit(id, r.job_role_id));
+        await tx.candidate.update({ where: { id }, data: { driveId: target.id, jobRoleId: target.jobRoleId } });
+        await writeAudit(tx, audit(id, r.drive_id));
         updated += 1;
       }
       return { updated, skipped };

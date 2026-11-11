@@ -23,10 +23,10 @@ import {
   type SubmissionListQuery,
   type SubmissionViewDto,
 } from '@exam/shared';
-import { AppError, badRequest, conflict, notFound } from '../../shared/errors.js';
+import { AppError, badRequest, conflict, forbidden, notFound } from '../../shared/errors.js';
 import { num, toMarkingView, toSubmissionView } from './evaluation.mapper.js';
 import type { EvaluationRepository, EvaluationTx, LockHolder } from './evaluation.repository.js';
-import { percentageOf, validateMarks } from './marks.js';
+import { combinedTotals, validateMarks } from './marks.js';
 
 export const LOCK_TTL_MS = EVALUATION_LOCK_MINUTES * 60_000;
 const ENTITY = 'exam_attempt';
@@ -66,6 +66,8 @@ export function createEvaluationService(deps: EvaluationDeps) {
   const cutoffFrom = (at: Date) => new Date(at.getTime() - LOCK_TTL_MS);
 
   async function list(q: SubmissionListQuery, role: AdminRole): Promise<Paginated<SubmissionViewDto>> {
+    // Blind marking: filtering by college would tell an Evaluator where a script comes from.
+    if (role !== 'SUPER_ADMIN' && (q.driveId || q.collegeId || q.batch)) throw forbidden("Evaluators can't filter by college.");
     const { rows, total } = await repo.listSubmissions(q, role === 'SUPER_ADMIN');
     const flags = await deps.flagCounts(rows.map((r) => r.candidate.id));
     return {
@@ -118,9 +120,15 @@ export function createEvaluationService(deps: EvaluationDeps) {
         throw evaluationLocked(await tx.liveHolder(attemptId, cutoffFrom(at)));
       }
 
-      const questions = await tx.questions(attemptId);
+      const all = await tx.questions(attemptId);
+      const mcqIds = new Set(all.filter((q) => q.typeSnapshot === 'MCQ').map((q) => q.id));
+      // MCQs are auto-marked at submit; only written questions take an evaluator's marks.
+      const questions = all.filter((q) => !mcqIds.has(q.id));
       const maxOf = new Map(questions.map((q) => [q.id, num(q.maxMarksSnapshot) ?? 0]));
       for (const item of input.items) {
+        if (mcqIds.has(item.attemptQuestionId)) {
+          throw badRequest('MCQ questions are marked automatically', 'MCQ_NOT_MARKABLE', { attemptQuestionId: item.attemptQuestionId });
+        }
         const max = maxOf.get(item.attemptQuestionId);
         if (max === undefined) {
           throw badRequest('This question is not part of the submission', 'VALIDATION_ERROR', { attemptQuestionId: item.attemptQuestionId });
@@ -151,12 +159,14 @@ export function createEvaluationService(deps: EvaluationDeps) {
   }
 
   /**
-   * The completion step shared by Submit and bulk accept: needs every question
-   * marked, writes totals, moves the candidate to EVALUATED (history) and audits.
+   * The completion step shared by Submit and bulk accept: needs every written
+   * question marked (`questions` holds the written ones only), writes totals
+   * (written + the MCQ subtotal, floored at 0), moves the candidate to
+   * EVALUATED (history) and audits.
    */
   async function complete(
     tx: EvaluationTx,
-    attempt: { candidateId: string },
+    attempt: { candidateId: string; mcqMarks: Parameters<typeof num>[0]; mcqMaxMarks: Parameters<typeof num>[0] },
     attemptId: string,
     questions: { id: string; order?: number; maxMarksSnapshot: Parameters<typeof num>[0] }[],
     actor: Actor,
@@ -164,7 +174,9 @@ export function createEvaluationService(deps: EvaluationDeps) {
     auditExtra: Record<string, unknown>,
   ): Promise<{ totalMarks: number; maxMarks: number; percentage: number }> {
     const maxOf = new Map(questions.map((q) => [q.id, num(q.maxMarksSnapshot) ?? 0]));
-    const marks = new Map((await tx.marks(attemptId)).map((m) => [m.attemptQuestionId, num(m.marks) ?? 0]));
+    const marks = new Map(
+      (await tx.marks(attemptId)).filter((m) => maxOf.has(m.attemptQuestionId)).map((m) => [m.attemptQuestionId, num(m.marks) ?? 0]),
+    );
     // a comment-only row (null marks) still counts as unmarked
     const missing = questions.filter((q) => !marks.has(q.id)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
     if (missing.length > 0) {
@@ -172,9 +184,12 @@ export function createEvaluationService(deps: EvaluationDeps) {
         missing: missing.map((q) => q.id),
       });
     }
-    const totalMarks = [...marks.values()].reduce((a, b) => a + b, 0);
-    const maxMarks = [...maxOf.values()].reduce((a, b) => a + b, 0);
-    const totals = { totalMarks, maxMarks, percentage: percentageOf(totalMarks, maxMarks) };
+    const totals = combinedTotals(
+      [...marks.values()].reduce((a, b) => a + b, 0),
+      [...maxOf.values()].reduce((a, b) => a + b, 0),
+      num(attempt.mcqMarks),
+      num(attempt.mcqMaxMarks) ?? 0,
+    );
     await tx.complete(attemptId, actor.id, at, totals);
     if (!(await tx.transitionCandidate(attempt.candidateId, attemptId, 'EVALUATED', actor.id, null))) {
       throw conflict('This attempt was reset while it was being marked.');
@@ -187,12 +202,16 @@ export function createEvaluationService(deps: EvaluationDeps) {
    * Super Admin bulk accept of AI marks. Each script runs in its own
    * transaction and is either accepted or skipped with a reason; one script's
    * problem never blocks the rest. LOCKED means someone else holds a live lock.
-   * By role, only scripts whose evaluation is not yet submitted are considered;
-   * by attempt ids, an already submitted one is reported ALREADY_EVALUATED.
+   * By drive, only scripts whose evaluation is not yet submitted are considered;
+   * by attempt ids (all from one drive, else 400 MIXED_DRIVES), an already
+   * submitted one is reported ALREADY_EVALUATED.
    */
   async function acceptAi(input: AiAcceptInput, actor: Actor): Promise<AiAcceptResultDto> {
     const onlyClean = input.onlyClean !== false;
-    const attemptIds = input.jobRoleId ? await repo.openAttemptIdsForRole(input.jobRoleId) : (input.attemptIds ?? []);
+    if (input.attemptIds && (await repo.driveIdsOfAttempts(input.attemptIds)).length > 1) {
+      throw badRequest('Select submissions from one drive.', 'MIXED_DRIVES');
+    }
+    const attemptIds = input.driveId ? await repo.openAttemptIdsForDrive(input.driveId) : (input.attemptIds ?? []);
     const candidateOf = await repo.candidateIdsOf(attemptIds);
     // "Clean" means no integrity flags; the nearby-candidates count is informational, not a flag.
     const flags = onlyClean
@@ -220,7 +239,7 @@ export function createEvaluationService(deps: EvaluationDeps) {
       adminId: actor.id,
       action: 'EVALUATIONS_BULK_ACCEPTED_AI',
       entity: ENTITY,
-      metadata: { jobRoleId: input.jobRoleId ?? null, onlyClean, requested: attemptIds.length, accepted, skipped: skipped.length, byReason },
+      metadata: { driveId: input.driveId ?? null, onlyClean, requested: attemptIds.length, accepted, skipped: skipped.length, byReason },
       ip: actor.ip,
     });
     return { accepted, skipped };
@@ -271,6 +290,10 @@ export function createEvaluationService(deps: EvaluationDeps) {
     return repo.transaction(async (tx) => {
       const attempt = await tx.attempt(attemptId);
       if (!attempt) throw notFound('Submission not found');
+      // An MCQ-only attempt was auto-evaluated: there is nothing for an evaluator to redo.
+      if (!(await tx.questions(attemptId)).some((q) => q.typeSnapshot !== 'MCQ')) {
+        throw conflict('Nothing to mark: this test is MCQ only. Reset the attempt instead.');
+      }
       if (!(await tx.reopen(attemptId))) throw conflict('Only a submitted evaluation can be reopened');
       const to = attempt.status === 'AUTO_SUBMITTED' ? 'AUTO_SUBMITTED' : 'SUBMITTED';
       const moved = await tx.transitionCandidate(attempt.candidateId, attemptId, to, actor.id, reason, { clearResult: true });

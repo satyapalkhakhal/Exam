@@ -33,7 +33,7 @@ interface Score extends ScoreForGrading {
   outputTokens?: number;
 }
 
-function fakeRepo(seed: { questions?: { id: string; max: number; hasDone?: boolean; hasQueued?: boolean }[]; roleState?: { inProgress: number; isOpen: boolean; windowEnd: Date | null } | null } = {}) {
+function fakeRepo(seed: { questions?: { id: string; max: number; hasDone?: boolean; hasQueued?: boolean }[]; roleState?: { inProgress: number; isOpen: boolean; windowEnd: Date | null } | null; drivesOfAttempts?: string[] } = {}) {
   const runs = new Map<string, RunRow>();
   const scores = new Map<string, Score>();
   let n = 0;
@@ -45,8 +45,11 @@ function fakeRepo(seed: { questions?: { id: string; max: number; hasDone?: boole
     }
   };
   const repo: AiEvaluationRepository = {
-    async roleExamState() {
+    async driveExamState() {
       return seed.roleState === undefined ? { inProgress: 0, isOpen: false, windowEnd: null } : seed.roleState;
+    },
+    async driveIdsOfAttempts() {
+      return seed.drivesOfAttempts ?? ['drive-1'];
     },
     async gradableQuestions() {
       return (seed.questions ?? []).map((q) => ({ attemptQuestionId: q.id, maxMarks: q.max, hasDone: q.hasDone ?? false, hasQueued: q.hasQueued ?? false }));
@@ -54,7 +57,7 @@ function fakeRepo(seed: { questions?: { id: string; max: number; hasDone?: boole
     async createRun(d) {
       const id = `run-${++n}`;
       const run: RunRow = {
-        id, jobRole: d.jobRoleId ? { id: d.jobRoleId, name: 'Role' } : null, model: d.model, promptVersion: d.promptVersion, status: 'RUNNING',
+        id, drive: d.driveId ? { id: d.driveId, displayName: 'Role · Round 1 · IITG · Nov 2026' } : null, model: d.model, promptVersion: d.promptVersion, status: 'RUNNING',
         total: d.items.length, done: 0, failed: 0, inputTokens: 0, outputTokens: 0, createdBy: { name: 'Admin' }, createdAt: NOW, finishedAt: null,
       };
       runs.set(id, run);
@@ -157,20 +160,20 @@ test('isExamOver: needs nobody in progress AND (closed OR window ended)', () => 
   assert.equal(isExamOver({ inProgress: 1, isOpen: false, windowEnd: past }, NOW), false);
 });
 
-test('start by role: someone still in progress, or still open -> 409 EXAM_NOT_OVER', async () => {
+test('start by drive: someone still in progress, or still open -> 409 EXAM_NOT_OVER', async () => {
   for (const roleState of [
     { inProgress: 2, isOpen: false, windowEnd: null },
     { inProgress: 0, isOpen: true, windowEnd: new Date(NOW.getTime() + 60_000) },
   ]) {
     const { service, enqueued } = setup({ seed: { questions: qs(10), roleState } });
-    await assert.rejects(() => service.start({ jobRoleId: ROLE }, ACTOR), expectCode('EXAM_NOT_OVER', 409));
+    await assert.rejects(() => service.start({ driveId: ROLE }, ACTOR), expectCode('EXAM_NOT_OVER', 409));
     assert.equal(enqueued.length, 0);
   }
 });
 
-test('start by role: unknown role -> 404; attempt ids skip the exam-over gate', async () => {
+test('start by drive: unknown drive -> 404; attempt ids skip the exam-over gate', async () => {
   const unknown = setup({ seed: { roleState: null } });
-  await assert.rejects(() => unknown.service.start({ jobRoleId: ROLE }, ACTOR), expectCode('NOT_FOUND', 404));
+  await assert.rejects(() => unknown.service.start({ driveId: ROLE }, ACTOR), expectCode('NOT_FOUND', 404));
   const open = setup({ seed: { questions: qs(10), roleState: { inProgress: 5, isOpen: true, windowEnd: null } } });
   const r = await open.service.start({ attemptIds: ['a'] }, ACTOR);
   assert.equal(r.queued, 1);
@@ -180,7 +183,7 @@ test('start by role: unknown role -> 404; attempt ids skip the exam-over gate', 
 
 test('start: queues one job per question, records the run and audits counts only', async () => {
   const { service, enqueued, audits, runs } = setup({ seed: { questions: qs(10, 5, 5) } });
-  const r = await service.start({ jobRoleId: ROLE }, ACTOR);
+  const r = await service.start({ driveId: ROLE }, ACTOR);
   assert.equal(r.queued, 3);
   assert.equal(r.alreadyScored, 0);
   assert.equal(r.run?.total, 3);
@@ -384,4 +387,10 @@ test('mergeAi fills defaults and repairs a bad concurrency', () => {
   assert.deepEqual(mergeAi({}), AI_DEFAULTS);
   assert.equal(mergeAi({ concurrency: 0 }).concurrency, 3);
   assert.equal(mergeAi({ concurrency: 2, model: 'm' }).model, 'm');
+});
+
+test('start on chosen attempts from two drives -> 400 MIXED_DRIVES and nothing is queued', async () => {
+  const { service, enqueued } = setup({ seed: { questions: qs(10), drivesOfAttempts: ['drive-1', 'drive-2'] } });
+  await assert.rejects(() => service.start({ attemptIds: ['a', 'b'] }, ACTOR), expectCode('MIXED_DRIVES', 400));
+  assert.equal(enqueued.length, 0);
 });

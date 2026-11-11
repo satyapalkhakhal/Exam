@@ -5,16 +5,18 @@
 // session (same tab keeps it, a new tab takes over), restores unsaved text from storage,
 // batches activity events, and runs the time-up and submit flows. The server's auto-submit is
 // the real deadline; the client only flushes what it has and gets out of the way.
+// MCQs (spec 2026-11-10) come first; a choice is held as an encoded value in the same
+// answer state and autosaver (lib/examMcq), saved at once through the choice endpoint.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Navigate, useNavigate, useParams } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Flag } from 'lucide-react';
-import { countWords } from '@exam/shared';
 import { Button } from '@/components/ui/button';
 import { AnswerBox } from '@/components/exam/AnswerBox';
 import { ExamHeader } from '@/components/exam/ExamHeader';
-import { QuestionPalette, type PaletteItem } from '@/components/exam/QuestionPalette';
+import { QuestionPalette } from '@/components/exam/QuestionPalette';
+import { McqCard } from '@/components/exam/McqCard';
 import { SubmitDialog } from '@/components/exam/SubmitDialog';
 import {
   beaconAnswer,
@@ -27,9 +29,11 @@ import {
   readSessionId,
   resumeExam,
   saveAnswer,
+  saveChoice,
   submitExam,
 } from '@/api/candidate/exam';
 import { ApiError } from '@/lib/api';
+import { examTitle } from '@/lib/submissionReceipt';
 import { createAutosaver, readMirror, shouldRestoreMirror, type Autosaver, type MirrorStorage, type SaveStatus } from '@/lib/autosave';
 import { createEventQueue, type ExamEventType } from '@/lib/eventQueue';
 import { attachPasteGuard, type BlockedKind } from '@/lib/pasteGuard';
@@ -39,6 +43,7 @@ import { tabPresenceFor } from '@/lib/tabPresence';
 import { cn } from '@/lib/utils';
 import { useCandidateAuth } from '@/stores/candidateAuth';
 import { examPaths } from '@/lib/examSections';
+import { answerValue, decodeChoice, encodeChoice, isAnswered, negativeMarkingText, paletteGroups } from '@/lib/examMcq';
 import type { ExamState } from '@/types/exam';
 
 interface Boot {
@@ -165,12 +170,13 @@ function ExamRunner({ applicationId, boot, onTakeOver }: { applicationId: string
   const invalidateExams = useInvalidateExams();
   const questions = useMemo(() => [...state.questions].sort((a, b) => a.order - b.order), [state.questions]);
   const mirrorKey = useCallback((aqId: string) => `exam:${state.attemptId}:${aqId}`, [state.attemptId]);
+  const [mcqIds] = useState(() => new Set(state.questions.filter((q) => q.type === 'MCQ').map((q) => q.attemptQuestionId)));
 
   // Decide once, before the first render, which questions get their stored text back.
   const [plan] = useState(() =>
     questions.map((q) => {
       const mirror = readMirror(safeLocal, mirrorKey(q.attemptQuestionId));
-      const server = { text: q.answer.text, clientSeq: q.answer.clientSeq, lastSavedAt: q.answer.lastSavedAt };
+      const server = { text: answerValue(q), clientSeq: q.answer.clientSeq, lastSavedAt: q.answer.lastSavedAt };
       return { q, mirror, restore: shouldRestoreMirror(mirror, server) };
     }),
   );
@@ -178,7 +184,7 @@ function ExamRunner({ applicationId, boot, onTakeOver }: { applicationId: string
     Object.fromEntries(
       plan.map(({ q, mirror, restore }) => [
         q.attemptQuestionId,
-        { text: restore && mirror ? mirror.text : q.answer.text, markedForReview: q.answer.markedForReview, visited: q.answer.visited },
+        { text: restore && mirror ? mirror.text : answerValue(q), markedForReview: q.answer.markedForReview, visited: q.answer.visited },
       ]),
     ),
   );
@@ -211,8 +217,10 @@ function ExamRunner({ applicationId, boot, onTakeOver }: { applicationId: string
   // ---- autosaver + event queue + lifecycle (one set per session) ------------------------
   useEffect(() => {
     const saver = createAutosaver({
-      save: (p) => saveAnswer(applicationId, sessionId, p),
-      beacon: (p) => beaconAnswer(applicationId, sessionId, p),
+      save: (p) => (mcqIds.has(p.attemptQuestionId) ? saveChoice(applicationId, sessionId, p) : saveAnswer(applicationId, sessionId, p)),
+      // The beacon endpoint takes text only; a choice is saved at once anyway, and an unsent
+      // one stays in the storage mirror and is restored on the next load.
+      beacon: (p) => (mcqIds.has(p.attemptQuestionId) ? false : beaconAnswer(applicationId, sessionId, p)),
       debounceMs: 2000,
       storage: safeLocal,
       key: mirrorKey,
@@ -221,9 +229,9 @@ function ExamRunner({ applicationId, boot, onTakeOver }: { applicationId: string
         const fresh = await getExamState(applicationId);
         clockRef.current = createServerClock(fresh.serverNow);
         if (fresh.status !== 'IN_PROGRESS') throw Object.assign(new Error('locked'), { code: 'ATTEMPT_LOCKED' });
-        const a = fresh.questions.find((q) => q.attemptQuestionId === id)?.answer;
-        if (!a) throw Object.assign(new Error('missing'), { code: 'NOT_FOUND', status: 404 });
-        return { text: a.text, clientSeq: a.clientSeq };
+        const fq = fresh.questions.find((q) => q.attemptQuestionId === id);
+        if (!fq) throw Object.assign(new Error('missing'), { code: 'NOT_FOUND', status: 404 });
+        return { text: answerValue(fq), clientSeq: fq.answer.clientSeq };
       },
       onAccepted: (r) => {
         clockRef.current = createServerClock(r.serverNow);
@@ -234,11 +242,11 @@ function ExamRunner({ applicationId, boot, onTakeOver }: { applicationId: string
       const id = q.attemptQuestionId;
       const clientSeq = Math.max(q.answer.clientSeq, mirror?.seq ?? 0);
       if (restore && mirror) {
-        saver.seed(id, { clientSeq, text: q.answer.text }, { typed: mirror.typed, restored: mirror.restored, since: mirror.since });
+        saver.seed(id, { clientSeq, text: answerValue(q) }, { typed: mirror.typed, restored: mirror.restored, since: mirror.since });
         saver.update(id, mirror.text, 0);
         restored = true;
       } else {
-        saver.seed(id, { clientSeq, text: q.answer.text });
+        saver.seed(id, { clientSeq, text: answerValue(q) });
         if (mirror) safeLocal.removeItem(mirrorKey(id));
       }
     }
@@ -419,6 +427,15 @@ function ExamRunner({ applicationId, boot, onTakeOver }: { applicationId: string
     saverRef.current?.update(id, text, typedDelta, restoredDelta);
   };
 
+  /** A choice is saved at once (no debounce): nothing to lose by waiting, and it is one click. */
+  const onChoose = (option: number | null) => {
+    const id = currentId;
+    const text = encodeChoice(option);
+    setAnswers((prev) => ({ ...prev, [id]: { ...prev[id]!, text } }));
+    saverRef.current?.update(id, text, 0);
+    void saverRef.current?.flush(id);
+  };
+
   const toggleReview = () => {
     const id = currentId;
     const next = !answers[id]?.markedForReview;
@@ -426,17 +443,11 @@ function ExamRunner({ applicationId, boot, onTakeOver }: { applicationId: string
     saverRef.current?.setFlags(id, { markedForReview: next });
   };
 
-  const palette: PaletteItem[] = useMemo(
-    () =>
-      questions.map((q, i) => {
-        const a = answers[q.attemptQuestionId];
-        const state = a?.markedForReview ? 'marked' : a && countWords(a.text) > 0 ? 'answered' : a?.visited ? 'unanswered' : 'not-visited';
-        return { id: q.attemptQuestionId, number: i + 1, state };
-      }),
-    [questions, answers],
-  );
-  const unanswered = palette.filter((p) => answers[p.id] && countWords(answers[p.id]!.text) === 0).length;
-  const marked = palette.filter((p) => answers[p.id]?.markedForReview).length;
+  const palette = useMemo(() => paletteGroups(questions, answers), [questions, answers]);
+  const unanswered = questions.filter((q) => answers[q.attemptQuestionId] && !isAnswered(q.type, answers[q.attemptQuestionId]!.text)).length;
+  const marked = questions.filter((q) => answers[q.attemptQuestionId]?.markedForReview).length;
+  const mcqCount = mcqIds.size;
+  const negativeNote = negativeMarkingText(state.mcqNegativeMarks);
 
   // ---- submit ---------------------------------------------------------------------------
   const onSubmit = async () => {
@@ -495,7 +506,7 @@ function ExamRunner({ applicationId, boot, onTakeOver }: { applicationId: string
       <ExamHeader
         name={candidate?.fullName ?? ''}
         code={examInfo?.candidateCode ?? ''}
-        role={examInfo?.jobRole.name ?? ''}
+        role={examInfo ? examTitle(examInfo) : ''}
         remainingMs={remaining}
         status={status}
       />
@@ -507,22 +518,41 @@ function ExamRunner({ applicationId, boot, onTakeOver }: { applicationId: string
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h1 id="question-heading" className="text-base font-semibold">
                   Question {index + 1} of {questions.length}
-                  <span className="ml-2 text-sm font-normal text-muted-foreground">({question.maxMarks} marks)</span>
+                  <span className="ml-2 text-sm font-normal text-muted-foreground">
+                    ({question.maxMarks} marks{question.type === 'MCQ' ? ' · multiple choice' : ''})
+                  </span>
                 </h1>
                 <Button type="button" variant="outline" size="sm" onClick={toggleReview} disabled={locked} aria-pressed={current.markedForReview}>
                   <Flag className={cn('mr-1.5 h-4 w-4', current.markedForReview && 'fill-violet-500 text-violet-600')} aria-hidden="true" />
                   {current.markedForReview ? 'Marked for review' : 'Mark for review'}
                 </Button>
               </div>
+              {question.type === 'MCQ' && (
+                <p className="text-sm text-muted-foreground">
+                  Multiple choice · questions 1–{mcqCount}. Choose one answer.{negativeNote ? ` ${negativeNote}` : ''}
+                </p>
+              )}
               <p className="select-none whitespace-pre-line rounded-lg border bg-card p-4 text-[15px] leading-relaxed">{question.text}</p>
-              <AnswerBox
-                key={question.attemptQuestionId}
-                id={`answer-${question.attemptQuestionId}`}
-                label={`Answer to question ${index + 1}`}
-                value={current.text}
-                readOnly={locked}
-                onChange={onAnswer}
-              />
+              {question.type === 'MCQ' ? (
+                <McqCard
+                  key={question.attemptQuestionId}
+                  id={`choice-${question.attemptQuestionId}`}
+                  label={`Answer to question ${index + 1}`}
+                  options={question.options}
+                  selected={decodeChoice(current.text)}
+                  readOnly={locked}
+                  onChoose={onChoose}
+                />
+              ) : (
+                <AnswerBox
+                  key={question.attemptQuestionId}
+                  id={`answer-${question.attemptQuestionId}`}
+                  label={`Answer to question ${index + 1}`}
+                  value={current.text}
+                  readOnly={locked}
+                  onChange={onAnswer}
+                />
+              )}
               <div className="flex items-center justify-between gap-2">
                 <Button type="button" variant="outline" disabled={index <= 0} onClick={() => goTo(questions[index - 1]!.attemptQuestionId)}>
                   <ChevronLeft className="mr-1 h-4 w-4" aria-hidden="true" /> Previous
@@ -543,7 +573,7 @@ function ExamRunner({ applicationId, boot, onTakeOver }: { applicationId: string
 
         <aside className="order-first space-y-4 lg:order-last">
           <div className="rounded-lg border bg-card p-4">
-            <QuestionPalette items={palette} currentId={currentId} onSelect={goTo} />
+            <QuestionPalette groups={palette} currentId={currentId} onSelect={goTo} />
           </div>
           <Button type="button" className="w-full" onClick={() => setSubmitOpen(true)} disabled={locked}>
             Submit exam

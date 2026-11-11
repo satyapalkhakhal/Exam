@@ -1,6 +1,6 @@
-// Job roles and exam settings end to end against exam_test: RBAC (any admin
-// reads, only Super Admin writes), settings validation, auditing and the
-// getSettings hand-off used by the exam engine.
+// Job roles (job profiles) end to end against exam_test: RBAC (any admin reads,
+// only Super Admin writes), Round 1 created with the role, counts. Round and
+// drive settings are covered by drives.int.test.ts.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,7 +11,6 @@ import { env } from '../../src/infrastructure/config/env.js';
 import { prisma } from '../../src/infrastructure/db/prisma.js';
 import { getRedis } from '../../src/infrastructure/redis/redis.js';
 import { createApp } from '../../src/app.js';
-import { jobRoles } from '../../src/modules/jobRoles/index.js';
 
 const SA = { email: 'super@roles.test', password: 'super-pass-123' };
 const EV = { email: 'eval@roles.test', password: 'eval-pass-123' };
@@ -37,7 +36,7 @@ before(async () => {
   assert.match(env.DATABASE_URL, /\/exam_test(\?|$)/);
   assert.match(env.REDIS_URL, /\/15$/);
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE admin_audit_logs, exam_settings, job_roles, admin_users RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE admin_audit_logs, drives, colleges, exam_rounds, job_roles, admin_users RESTART IDENTITY CASCADE',
   );
   await getRedis().flushdb();
   const sa = await prisma.adminUser.create({
@@ -57,14 +56,6 @@ after(async () => {
   await getRedis().quit();
 });
 
-const settingsBody = {
-  durationMinutes: 90,
-  windowStart: '2026-11-10T04:00:00.000Z',
-  windowEnd: '2026-11-10T10:00:00.000Z',
-  instructions: 'Read carefully.',
-  isOpen: true,
-};
-
 test('unauthenticated is 401; any admin can list roles', async () => {
   assert.equal((await request(app).get('/api/admin/roles')).status, 401);
   const res = await evAgent.get('/api/admin/roles');
@@ -79,15 +70,13 @@ test('Super Admin creates a role with default settings; duplicate name is 409; e
   assert.equal(res.body.data.name, 'Backend Engineer');
   assert.equal(res.body.data.refApplicantCount, 36);
   assert.equal(res.body.data.active, true);
-  assert.deepEqual(res.body.data.settings, {
-    durationMinutes: 60,
-    windowStart: null,
-    windowEnd: null,
-    instructions: '',
-    isOpen: false,
-    questionsLocked: false,
-  });
-  assert.deepEqual(res.body.data.counts, { questions: 0, candidates: 0 });
+  assert.equal(res.body.data.type, 'PLACEMENT');
+  assert.equal(res.body.data.rounds.length, 1);
+  assert.deepEqual(
+    { n: res.body.data.rounds[0].roundNumber, d: res.body.data.rounds[0].durationMinutes, l: res.body.data.rounds[0].questionsLocked, w: res.body.data.rounds[0].weights, drives: res.body.data.rounds[0].drives },
+    { n: 1, d: 60, l: false, w: { exam: 70, x: 10, xii: 10, cpi: 10 }, drives: [] },
+  );
+  assert.deepEqual(res.body.data.counts, { candidates: 0 });
   assert.equal((await saAgent.post('/api/admin/roles').send({ name: 'Backend Engineer' })).status, 409);
   assert.equal((await saAgent.post('/api/admin/roles').send({ name: ' ' })).status, 400);
 });
@@ -106,58 +95,13 @@ test('PATCH renames and deactivates; unknown id is 404; evaluator 403', async ()
   assert.equal((await saAgent.patch(`/api/admin/roles/${id}`).send({})).status, 400);
 });
 
-test('Evaluator PUT settings is 403; durationMinutes 5 is 400; bad window is 400', async () => {
+test('round question counts reflect questions', async () => {
   const role = await prisma.jobRole.findFirstOrThrow({ where: { name: 'Backend Engineer' } });
-  const url = `/api/admin/roles/${role.id}/settings`;
-  assert.equal((await evAgent.put(url).send(settingsBody)).status, 403);
-  assert.equal((await saAgent.put(url).send({ ...settingsBody, durationMinutes: 5 })).status, 400);
-  assert.equal((await saAgent.put(url).send({ ...settingsBody, durationMinutes: 241 })).status, 400);
-  assert.equal((await saAgent.put(url).send({ ...settingsBody, instructions: 'x'.repeat(10_001) })).status, 400);
-  assert.equal(
-    (await saAgent.put(url).send({ ...settingsBody, windowEnd: settingsBody.windowStart })).status,
-    400,
-  );
-  const unchanged = await prisma.examSetting.findUniqueOrThrow({ where: { jobRoleId: role.id } });
-  assert.equal(unchanged.durationMinutes, 60);
-});
-
-test('Super Admin PUT settings persists, is audited, shows in list and getSettings; unknown role is 404', async () => {
-  const role = await prisma.jobRole.findFirstOrThrow({ where: { name: 'Backend Engineer' } });
-  const url = `/api/admin/roles/${role.id}/settings`;
-  const res = await saAgent.put(url).send(settingsBody);
-  assert.equal(res.status, 200, JSON.stringify(res.body));
-  assert.deepEqual(res.body.data, { ...settingsBody, questionsLocked: false });
-
-  const listed = (await evAgent.get('/api/admin/roles')).body.data.find((r: { id: string }) => r.id === role.id);
-  assert.equal(listed.settings.durationMinutes, 90);
-  assert.equal(listed.settings.windowStart, '2026-11-10T04:00:00.000Z');
-
-  const s = await jobRoles.getSettings(role.id);
-  assert.equal(s?.durationMinutes, 90);
-  assert.equal(s?.isOpen, true);
-  assert.ok(s?.windowStart instanceof Date);
-
-  const audited = await prisma.adminAuditLog.findMany({
-    where: { adminId: superId, action: 'EXAM_SETTINGS_UPDATED', entityId: role.id },
-  });
-  assert.equal(audited.length, 1);
-  assert.ok(!JSON.stringify(audited[0]?.metadata).includes('Read carefully'));
-
-  const cleared = await saAgent.put(url).send({ ...settingsBody, windowStart: null, windowEnd: null });
-  assert.equal(cleared.status, 200);
-  assert.equal(cleared.body.data.windowStart, null);
-
-  assert.equal(
-    (await saAgent.put('/api/admin/roles/00000000-0000-4000-8000-000000000000/settings').send(settingsBody)).status,
-    404,
-  );
-});
-
-test('counts reflect questions and candidates', async () => {
-  const role = await prisma.jobRole.findFirstOrThrow({ where: { name: 'Backend Engineer' } });
+  const round = await prisma.examRound.findFirstOrThrow({ where: { jobRoleId: role.id, roundNumber: 1 } });
   await prisma.question.create({
-    data: { jobRoleId: role.id, text: 'Q1', normalizedTextHash: 'h1', maxMarks: 10 },
+    data: { roundId: round.id, text: 'Q1', normalizedTextHash: 'h1', maxMarks: 10 },
   });
   const listed = (await saAgent.get('/api/admin/roles')).body.data.find((r: { id: string }) => r.id === role.id);
-  assert.deepEqual(listed.counts, { questions: 1, candidates: 0 });
+  assert.deepEqual(listed.rounds[0].counts, { questions: 1 });
+  assert.deepEqual(listed.counts, { candidates: 0 });
 });

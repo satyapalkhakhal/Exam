@@ -1,5 +1,14 @@
 # Multiple exams per candidate (2026-11-03)
 
+> **Amended 2026-11-10 (colleges, placement/internship and campus drives):** an application
+> is now **account × drive**, not account × job role. A drive is one round of a job profile
+> at one college in one batch; job profiles have rounds (question bank, duration, weights,
+> question lock) and each round has one drive per college + batch (window, open switch,
+> instructions). Imports, "Move to drive", leaderboards, exports and AI runs work per drive;
+> a person can't be in two colleges' drives of the same round and batch. Where this page
+> says "role" for an application, read "drive". Full design:
+> `docs/superpowers/specs/2026-11-10-colleges-drives-rounds-design.md`.
+
 Decided by the user: **one exam per job role, a person may hold several roles; HR/Super Admin enrols them** (import or the candidate page). Candidates never pick exams themselves. This amends design.md §3, §4 ("every candidate belongs to exactly one role") and §6.
 
 ## Model

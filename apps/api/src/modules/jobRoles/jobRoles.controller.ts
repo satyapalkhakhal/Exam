@@ -19,11 +19,8 @@ const idOf = (req: Request): string => (req.params as { id: string }).id;
 
 export function createJobRolesController(service: JobRolesService) {
   return {
-    list: wrap(async (_req, res) => ok(res, await service.list())),
+    list: wrap(async (req, res) => ok(res, await service.list(req.admin?.role === 'SUPER_ADMIN' ? 'SUPER_ADMIN' : 'EVALUATOR'))),
     create: wrap(async (req, res) => ok(res, await service.create(req.body, actorId(req), req.ip ?? null), 201)),
     update: wrap(async (req, res) => ok(res, await service.update(idOf(req), req.body, actorId(req), req.ip ?? null))),
-    updateSettings: wrap(async (req, res) =>
-      ok(res, await service.updateSettings(idOf(req), req.body, actorId(req), req.ip ?? null)),
-    ),
   };
 }

@@ -6,7 +6,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { apiFetch } from '@/lib/api';
 import type { ImportPreview, ImportResult } from '@/lib/importState';
 import type { Paged } from './users';
-import type { CandidateExamStatsDto, CandidateMatchingIdsDto } from '@exam/shared';
+import type { CandidateExamStatsDto, CandidateMatchingIdsDto, CandidateMoveResultDto } from '@exam/shared';
 import { candidateQuery, type CandidateFilters } from '@/lib/candidateQuery';
 
 /** Exam progress only; shortlist / reject live in `result`. */
@@ -30,6 +30,12 @@ export interface CandidateRow {
   programme: string | null;
   jobRoleId: string;
   jobRoleName: string;
+  jobProfileType: 'PLACEMENT' | 'INTERNSHIP';
+  /** The drive (round of a job profile at one college, one batch; spec 2026-11-10). */
+  driveId: string;
+  driveDisplayName: string;
+  roundNumber: number;
+  collegeShortCode: string;
   status: CandidateStatus;
   result: CandidateResult | null;
   eligible: boolean;
@@ -43,7 +49,7 @@ export interface CandidateListItem extends CandidateRow {
   exam: CandidateExamStatsDto | null;
   /** Other candidates who started within 100 m and ±2 h; null without a start location. */
   nearbyCount: number | null;
-  otherApplications: { jobRoleName: string; status: CandidateStatus; result: CandidateResult | null }[];
+  otherApplications: { driveDisplayName: string; status: CandidateStatus; result: CandidateResult | null }[];
 }
 
 export interface CandidateDetailProfile extends CandidateRow {
@@ -109,7 +115,7 @@ export interface CandidateDetailDto {
   flags: CandidateFlags | null;
   history: HistoryRow[];
   /** The same person's applications under other job roles (docs/multi-exam.md). Optional until the API ships. */
-  otherApplications?: { id: string; candidateCode: string; jobRole: { id: string; name: string }; status: string; result: CandidateResult | null }[];
+  otherApplications?: { id: string; candidateCode: string; jobRole: { id: string; name: string }; driveDisplayName: string; status: string; result: CandidateResult | null }[];
 }
 
 export interface CandidateEdit {
@@ -122,7 +128,8 @@ export interface CandidateEdit {
   majorCpi?: number | null;
   discipline?: string | null;
   programme?: string | null;
-  jobRoleId?: string;
+  /** Move to another drive (any status within the same round; before the start otherwise). */
+  driveId?: string;
 }
 
 export const CANDIDATE_TEMPLATE_URL = '/api/admin/candidates/template.csv';
@@ -164,24 +171,24 @@ function useCandidateMutation<V>(fn: (v: V) => Promise<unknown>) {
   });
 }
 
-/** One candidate added by hand: name, email and role are required, the rest optional. */
-export interface CandidateCreate extends Omit<CandidateEdit, 'fullName' | 'email' | 'jobRoleId'> {
+/** One candidate added by hand: name, email and drive are required, the rest optional. */
+export interface CandidateCreate extends Omit<CandidateEdit, 'fullName' | 'email' | 'driveId'> {
   fullName: string;
   email: string;
-  jobRoleId: string;
+  driveId: string;
 }
 
-export interface BulkJobRoleResult {
-  updated: number;
-  skipped: { candidateId: string; candidateCode: string | null; fullName: string | null; reason: 'STARTED' | 'SAME_ROLE' | 'SAME_PERSON_HAS_ROLE' | 'NOT_FOUND' }[];
-}
+export type MoveSkipReason = CandidateMoveResultDto['skipped'][number]['reason'];
 
-/** Moves the given candidates to one job role; those who started (or already hold it) are skipped. */
-export function useBulkJobRole() {
+/**
+ * Moves the given candidates into one drive. Within the same round anyone moves (same
+ * questions); into another round only those who have not started.
+ */
+export function useMoveToDrive() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { candidateIds: string[]; jobRoleId: string }) =>
-      apiFetch<BulkJobRoleResult>('admin', '/candidates/bulk/job-role', { method: 'POST', json: body }),
+    mutationFn: (body: { candidateIds: string[]; driveId: string }) =>
+      apiFetch<CandidateMoveResultDto>('admin', '/candidates/bulk/move', { method: 'POST', json: body }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin'] }),
   });
 }
@@ -215,12 +222,12 @@ export const useResetAttempt = (id: string) =>
 
 export function previewCandidateImport(
   file: File,
-  jobRoleId: string,
+  driveId: string,
   opts: { updateExisting?: boolean } = {},
 ): Promise<ImportPreview<Record<string, unknown>>> {
   const body = new FormData();
   body.append('file', file);
-  body.append('jobRoleId', jobRoleId);
+  body.append('driveId', driveId);
   if (opts.updateExisting) body.append('updateExisting', 'true');
   return apiFetch('admin', '/candidates/import/preview', { method: 'POST', body });
 }

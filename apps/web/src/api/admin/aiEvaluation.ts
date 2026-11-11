@@ -7,14 +7,15 @@ import type { AiAcceptInput, AiAcceptResultDto, AiRunDto, AiRunStartInput, AiRun
 import { apiFetch } from '@/lib/api';
 import { runsRefetchInterval } from '@/lib/aiEvaluation';
 
-export const aiRunsKey = (jobRoleId: string) => ['admin', 'ai-runs', jobRoleId] as const;
+export const aiRunsKey = (driveId: string) => ['admin', 'ai-runs', driveId] as const;
 
-export function useAiRuns(jobRoleId: string, enabled: boolean) {
+/** Runs of one drive (spec 2026-11-10: AI grading is per drive). */
+export function useAiRuns(driveId: string, enabled: boolean) {
   return useQuery({
-    queryKey: aiRunsKey(jobRoleId),
+    queryKey: aiRunsKey(driveId),
     enabled,
     queryFn: async () => {
-      const q = jobRoleId ? `?jobRoleId=${encodeURIComponent(jobRoleId)}` : '';
+      const q = driveId ? `?driveId=${encodeURIComponent(driveId)}` : '';
       return (await apiFetch<{ items: AiRunDto[] }>('admin', `/ai-evaluations${q}`)).items;
     },
     refetchInterval: (query) => runsRefetchInterval(query.state.data),

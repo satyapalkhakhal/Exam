@@ -30,7 +30,7 @@ export function createCandidatesController(service: CandidatesService) {
     detail: wrap(async (req, res) => ok(res, await service.detail(idOf(req), req.query as never))),
     create: wrap(async (req, res) => ok(res, await service.create(req.body, actorId(req), ipOf(req)), 201)),
     update: wrap(async (req, res) => ok(res, await service.update(idOf(req), req.body, actorId(req), ipOf(req)))),
-    bulkJobRole: wrap(async (req, res) => ok(res, await service.bulkSetJobRole(req.body, actorId(req), ipOf(req)))),
+    moveToDrive: wrap(async (req, res) => ok(res, await service.moveToDrive(req.body, actorId(req), ipOf(req)))),
     eligibility: wrap(async (req, res) =>
       ok(res, await service.setEligibility(idOf(req), (req.body as { eligible: boolean }).eligible, actorId(req), ipOf(req))),
     ),
@@ -43,8 +43,8 @@ export function createCandidatesController(service: CandidatesService) {
     ),
     preview: wrap(async (req, res) => {
       if (!req.file) throw badRequest('A file is required');
-      const { jobRoleId, updateExisting } = req.body as { jobRoleId: string; updateExisting: boolean };
-      return ok(res, await service.previewImport(req.file, jobRoleId, actorId(req), updateExisting));
+      const { driveId, updateExisting } = req.body as { driveId: string; updateExisting: boolean };
+      return ok(res, await service.previewImport(req.file, driveId, actorId(req), updateExisting));
     }),
     confirm: wrap(async (req, res) => ok(res, await service.confirmImport(req.body, actorId(req), ipOf(req)))),
     template: wrap((_req, res) => {

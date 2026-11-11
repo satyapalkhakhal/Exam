@@ -6,6 +6,7 @@
 
 import { prisma } from '../../infrastructure/db/prisma.js';
 import type { Prisma } from '../../generated/prisma/client.js';
+import { driveDisplayName } from '@exam/shared';
 import type { AiEvaluationRepository, RunRow, ScoreResult } from './aiEvaluation.service.js';
 
 const SUBMITTED_STATUSES = ['SUBMITTED', 'AUTO_SUBMITTED'] as const;
@@ -22,9 +23,27 @@ const runSelect = {
   outputTokens: true,
   createdAt: true,
   finishedAt: true,
-  jobRole: { select: { id: true, name: true } },
+  drive: {
+    select: { id: true, batch: true, college: { select: { shortCode: true } }, round: { select: { roundNumber: true, jobRole: { select: { name: true } } } } },
+  },
   createdBy: { select: { name: true } },
 } as const;
+
+type RunRecord = Prisma.AiEvaluationRunGetPayload<{ select: typeof runSelect }>;
+const toRunRow = ({ drive, ...r }: RunRecord): RunRow => ({
+  ...r,
+  drive: drive
+    ? {
+        id: drive.id,
+        displayName: driveDisplayName({
+          jobRoleName: drive.round.jobRole.name,
+          roundNumber: drive.round.roundNumber,
+          collegeShortCode: drive.college.shortCode,
+          batch: drive.batch,
+        }),
+      }
+    : null,
+});
 
 type Tx = Prisma.TransactionClient;
 
@@ -38,20 +57,26 @@ async function finishIfSettled(tx: Tx, runId: string, at: Date): Promise<void> {
 }
 
 export const aiEvaluationRepository: AiEvaluationRepository = {
-  async roleExamState(jobRoleId) {
-    const role = await prisma.jobRole.findUnique({ where: { id: jobRoleId }, select: { id: true, examSetting: { select: { isOpen: true, windowEnd: true } } } });
-    if (!role) return null;
-    const inProgress = await prisma.examAttempt.count({ where: { status: 'IN_PROGRESS', candidate: { jobRoleId } } });
-    return { inProgress, isOpen: role.examSetting?.isOpen ?? false, windowEnd: role.examSetting?.windowEnd ?? null };
+  async driveExamState(driveId) {
+    const drive = await prisma.drive.findUnique({ where: { id: driveId }, select: { isOpen: true, windowEnd: true } });
+    if (!drive) return null;
+    const inProgress = await prisma.examAttempt.count({ where: { status: 'IN_PROGRESS', candidate: { driveId } } });
+    return { inProgress, isOpen: drive.isOpen, windowEnd: drive.windowEnd };
+  },
+
+  async driveIdsOfAttempts(attemptIds) {
+    const rows = await prisma.examAttempt.findMany({ where: { id: { in: attemptIds } }, select: { candidate: { select: { driveId: true } } } });
+    return [...new Set(rows.map((r) => r.candidate.driveId))];
   },
 
   async gradableQuestions(scope) {
     const attemptWhere: Prisma.ExamAttemptWhereInput =
-      'jobRoleId' in scope
-        ? { status: { in: [...SUBMITTED_STATUSES] }, candidate: { jobRoleId: scope.jobRoleId } }
+      'driveId' in scope
+        ? { status: { in: [...SUBMITTED_STATUSES] }, candidate: { driveId: scope.driveId } }
         : { status: { in: [...SUBMITTED_STATUSES] }, id: { in: scope.attemptIds } };
+    // MCQs are auto-marked at submit and never sent to the AI.
     const rows = await prisma.attemptQuestion.findMany({
-      where: { attempt: attemptWhere },
+      where: { attempt: attemptWhere, typeSnapshot: 'WRITTEN' },
       orderBy: [{ attemptId: 'asc' }, { order: 'asc' }],
       select: {
         id: true,
@@ -72,7 +97,7 @@ export const aiEvaluationRepository: AiEvaluationRepository = {
       async (tx) => {
         const created = await tx.aiEvaluationRun.create({
           data: {
-            jobRoleId: data.jobRoleId,
+            driveId: data.driveId,
             model: data.model,
             promptVersion: data.promptVersion,
             createdById: data.createdById,
@@ -85,19 +110,20 @@ export const aiEvaluationRepository: AiEvaluationRepository = {
           select: { id: true },
         });
         const run = await tx.aiEvaluationRun.findUniqueOrThrow({ where: { id: created.id }, select: runSelect });
-        return { run, scoreIds: scores.map((s) => s.id) };
+        return { run: toRunRow(run), scoreIds: scores.map((s) => s.id) };
       },
       { timeout: 60_000 },
     );
   },
 
-  listRuns(jobRoleId) {
-    return prisma.aiEvaluationRun.findMany({
-      where: jobRoleId ? { jobRoleId } : {},
+  async listRuns(driveId) {
+    const rows = await prisma.aiEvaluationRun.findMany({
+      where: driveId ? { driveId } : {},
       orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
       take: 50,
       select: runSelect,
     });
+    return rows.map(toRunRow);
   },
 
   async loadForGrading(scoreId) {
@@ -182,7 +208,7 @@ export const aiEvaluationRepository: AiEvaluationRepository = {
         data: { status: 'CANCELLED', finishedAt: at, failed: { increment: queued.length } },
       });
       const run = await tx.aiEvaluationRun.findUniqueOrThrow({ where: { id: runId }, select: runSelect });
-      return { run, cancelledScoreIds: queued.map((q) => q.id) };
+      return { run: toRunRow(run), cancelledScoreIds: queued.map((q) => q.id) };
     });
   },
 };

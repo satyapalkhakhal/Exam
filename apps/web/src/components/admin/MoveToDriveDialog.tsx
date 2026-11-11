@@ -1,68 +1,60 @@
-// src/components/admin/BulkJobRoleDialog.tsx
-// Why: move many candidates to another job role at once (e.g. a file imported under the
-// wrong one). The server moves only candidates who have not started an exam and reports
-// everyone it skipped, with the reason, which this dialog shows after the move.
+// src/components/admin/MoveToDriveDialog.tsx
+// Why: move many candidates into one drive (spec 2026-11-10), e.g. a file imported
+// under the wrong college. Within the same round anyone can move (same questions);
+// into another round only those who have not started. The server reports everyone
+// it skipped, with the reason, which this dialog shows after the move.
 
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Label } from '@/components/ui/label';
-import { Select } from '@/components/ui/select';
-import { useBulkJobRole, type BulkJobRoleResult } from '@/api/admin/candidates';
+import { DrivePicker } from '@/components/admin/DrivePicker';
+import { useMoveToDrive, type MoveSkipReason } from '@/api/admin/candidates';
+import type { CandidateMoveResultDto } from '@exam/shared';
 
-const REASON: Record<BulkJobRoleResult['skipped'][number]['reason'], string> = {
-  STARTED: 'Already started an exam',
-  SAME_ROLE: 'Already in this job role',
-  SAME_PERSON_HAS_ROLE: 'This person already has an application for this role',
-  NOT_FOUND: 'No longer exists',
+export const MOVE_REASON: Record<MoveSkipReason, string> = {
+  STARTED: 'Already started — can only move within the same round',
+  SAME_DRIVE: 'Already in this drive',
+  NOT_FOUND: 'Not found',
+  SAME_ROUND_BATCH: "Already in another college's drive for this round and batch",
 };
 
-export function BulkJobRoleDialog({
+export function MoveToDriveDialog({
   open,
   candidateIds,
-  roles,
   onClose,
   onDone,
 }: {
   open: boolean;
   candidateIds: string[];
-  roles: Array<{ id: string; name: string }>;
   onClose: () => void;
   /** Called after a successful move so the page can clear its selection. */
   onDone: () => void;
 }) {
-  const move = useBulkJobRole();
-  const [jobRoleId, setJobRoleId] = useState('');
-  const [result, setResult] = useState<BulkJobRoleResult | null>(null);
+  const move = useMoveToDrive();
+  const [driveId, setDriveId] = useState<string | null>(null);
+  const [result, setResult] = useState<CandidateMoveResultDto | null>(null);
   const close = () => {
-    setJobRoleId('');
+    setDriveId(null);
     setResult(null);
     move.reset();
     onClose();
   };
+  const n = candidateIds.length;
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && close()}>
-      <DialogContent>
+      <DialogContent className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>Change job role</DialogTitle>
+          <DialogTitle>Move to drive</DialogTitle>
           <DialogDescription>
             {result
               ? `Moved ${result.updated} candidate${result.updated === 1 ? '' : 's'}.`
-              : `Move ${candidateIds.length} selected candidate${candidateIds.length === 1 ? '' : 's'} to another job role. Candidates who have started an exam are skipped.`}
+              : `Move ${n} selected candidate${n === 1 ? '' : 's'} into another drive. Within the same round anyone can move; into another round only those who have not started.`}
           </DialogDescription>
         </DialogHeader>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-6">
           {!result ? (
-            <div className="space-y-1.5">
-              <Label htmlFor="bulk-role">New job role</Label>
-              <Select id="bulk-role" value={jobRoleId} onChange={(e) => setJobRoleId(e.target.value)}>
-                <option value="">Select a job role…</option>
-                {roles.map((r) => (
-                  <option key={r.id} value={r.id}>{r.name}</option>
-                ))}
-              </Select>
-            </div>
+            <DrivePicker value={driveId} onChange={setDriveId} idPrefix="move" />
           ) : (
             result.skipped.length > 0 && (
               <div className="space-y-1.5">
@@ -73,7 +65,7 @@ export function BulkJobRoleDialog({
                       <span>
                         {s.fullName ?? 'Unknown'} <span className="font-mono text-xs text-muted-foreground">{s.candidateCode ?? ''}</span>
                       </span>
-                      <span className="text-muted-foreground">{REASON[s.reason]}</span>
+                      <span className="text-right text-muted-foreground">{MOVE_REASON[s.reason]}</span>
                     </li>
                   ))}
                 </ul>
@@ -89,10 +81,11 @@ export function BulkJobRoleDialog({
                 <Button type="button" variant="outline" onClick={close}>Cancel</Button>
                 <Button
                   type="button"
-                  disabled={!jobRoleId || move.isPending}
+                  disabled={!driveId || move.isPending}
                   onClick={() =>
+                    driveId &&
                     move.mutate(
-                      { candidateIds, jobRoleId },
+                      { candidateIds, driveId },
                       {
                         onSuccess: (r) => {
                           setResult(r);
@@ -102,7 +95,7 @@ export function BulkJobRoleDialog({
                     )
                   }
                 >
-                  {move.isPending ? 'Moving…' : `Move ${candidateIds.length}`}
+                  {move.isPending ? 'Moving…' : `Move ${n}`}
                 </Button>
               </>
             )}

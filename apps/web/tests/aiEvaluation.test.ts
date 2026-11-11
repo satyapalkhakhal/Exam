@@ -42,9 +42,9 @@ test('summariseSkips groups reasons, most frequent first, in plain words', () =>
   assert.equal(s[0]?.label, 'AI raised concerns');
 });
 
-test('aiErrorMessage handles the two new codes only', () => {
+test('aiErrorMessage handles the AI codes only', () => {
   assert.equal(aiErrorMessage('AI_NOT_CONFIGURED')?.linkToIntegrations, true);
-  assert.equal(aiErrorMessage('EXAM_NOT_OVER')?.text, "This role's exam is still open or someone is still taking it.");
+  assert.equal(aiErrorMessage('EXAM_NOT_OVER')?.text, 'This drive is still open or someone is still taking it.');
   assert.equal(aiErrorMessage('INTERNAL'), null);
 });
 
@@ -74,4 +74,17 @@ test('run helpers', () => {
 test('isProvisional needs a composite', () => {
   assert.equal(isProvisional({ compositeScore: null, compositeProvisional: true }), false);
   assert.equal(isProvisional({ compositeScore: 60, compositeProvisional: true }), true);
+});
+
+test('selection from two drives is not AI-runnable', async () => {
+  const { selectionSpansDrives } = await import('../src/lib/aiEvaluation.js');
+  assert.equal(selectionSpansDrives(['Quant · Round 1 · IITG · Nov 2026', 'Quant · Round 1 · NITT · Nov 2026']), true);
+  assert.equal(selectionSpansDrives(['Quant · Round 1 · IITG · Nov 2026', 'Quant · Round 1 · IITG · Nov 2026']), false);
+  assert.equal(selectionSpansDrives([undefined, 'A']), false, 'unknown drive names do not count');
+  assert.equal(selectionSpansDrives([]), false);
+});
+
+test('aiErrorMessage explains MIXED_DRIVES and a drive still open', () => {
+  assert.equal(aiErrorMessage('MIXED_DRIVES')?.text, 'Select submissions from one drive.');
+  assert.match(aiErrorMessage('EXAM_NOT_OVER')!.text, /drive/);
 });

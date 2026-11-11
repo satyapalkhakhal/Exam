@@ -36,10 +36,11 @@ export function createQuestionsController(service: QuestionsService) {
     unlock: wrap(async (req, res) =>
       ok(res, await service.unlock(idOf(req), (req.body as { reason: string }).reason, actorId(req), ipOf(req))),
     ),
+    copyFrom: wrap(async (req, res) => ok(res, await service.copyFrom(idOf(req), req.body, actorId(req), ipOf(req)))),
     preview: wrap(async (req, res) => {
       if (!req.file) throw badRequest('A file is required');
-      const { jobRoleId } = req.body as { jobRoleId: string };
-      return ok(res, await service.previewImport(req.file, jobRoleId, actorId(req)));
+      const { roundId } = req.body as { roundId: string };
+      return ok(res, await service.previewImport(req.file, roundId, actorId(req)));
     }),
     confirm: wrap(async (req, res) => ok(res, await service.confirmImport(req.body, actorId(req), ipOf(req)))),
     template: wrap((_req, res) => {

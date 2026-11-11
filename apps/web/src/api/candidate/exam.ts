@@ -11,6 +11,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '@/lib/api';
 import type { SavePayload, SaveResult } from '@/lib/autosave';
+import { toChoiceBody } from '@/lib/examMcq';
 import type { QueuedEvent } from '@/lib/eventQueue';
 import { tabPresenceFor } from '@/lib/tabPresence';
 import type { CandidateExamDetailDto, CandidateExamListDto, ExamSummaryDto } from '@exam/shared';
@@ -112,6 +113,13 @@ export const saveAnswer = (applicationId: string, sessionId: string, p: SavePayl
   apiFetch<SaveResult>('candidate', `${base(applicationId)}/answers/${encodeURIComponent(p.attemptQuestionId)}`, {
     method: 'PUT',
     json: answerBody(sessionId, p),
+  });
+
+/** MCQ choice (and its flags): same clientSeq / STALE / session rules as the text save. */
+export const saveChoice = (applicationId: string, sessionId: string, p: SavePayload) =>
+  apiFetch<SaveResult>('candidate', `${base(applicationId)}/answers/${encodeURIComponent(p.attemptQuestionId)}/choice`, {
+    method: 'PUT',
+    json: { sessionId, ...toChoiceBody(p) },
   });
 
 /** pagehide save. A string body goes as text/plain, which the beacon endpoint parses as JSON. */

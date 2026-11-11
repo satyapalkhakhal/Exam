@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { useCandidateExams } from '@/api/candidate/exam';
 import { examPaths, groupExams } from '@/lib/examSections';
+import { examTitle } from '@/lib/submissionReceipt';
 import { formatIst } from '@/lib/istTime';
 import { createServerClock } from '@/lib/serverClock';
 import { useCandidateAuth } from '@/stores/candidateAuth';
@@ -24,14 +25,14 @@ function ExamRow({ exam, action, note }: { exam: CandidateExamDto; action: { lab
       <Card>
         <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 space-y-0.5">
-            <h3 className="truncate text-base font-semibold">{exam.jobRole.name}</h3>
+            <h3 className="truncate text-base font-semibold">{examTitle(exam)}</h3>
             <p className="text-xs text-muted-foreground">
               {exam.candidateCode} · {exam.durationMinutes} minutes
             </p>
             <p className="text-sm text-muted-foreground">{note}</p>
           </div>
           <Button asChild variant="outline" className="w-full sm:w-auto">
-            <Link to={action.to} aria-label={`${action.label}: ${exam.jobRole.name}`}>
+            <Link to={action.to} aria-label={`${action.label}: ${examTitle(exam)}`}>
               {action.label}
             </Link>
           </Button>

@@ -7,7 +7,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_COMPOSITE_WEIGHTS, compositeScore, type CompositeWeights } from '@exam/shared';
 import { createResultsService, scoreRow } from '../src/modules/results/results.service.js';
-import type { ResultsRepository, ScoredAttempt } from '../src/modules/results/results.repository.js';
+import type { ResultDrive, ResultsRepository, ScoredAttempt } from '../src/modules/results/results.repository.js';
+
+/** The one drive the fakes use (id 'role'); weights come from its round. */
+const testDrive = (weights: CompositeWeights = DEFAULT_COMPOSITE_WEIGHTS): ResultDrive => ({
+  id: 'role', jobRoleId: 'j', jobRoleName: 'Role', jobProfileType: 'PLACEMENT', roundId: 'r', roundNumber: 1,
+  collegeId: 'c1', collegeName: 'IIT Guwahati', collegeShortCode: 'IITG', batch: 'Nov 2026', refApplicantCount: 0, weights,
+});
 
 interface Spec {
   code: string;
@@ -33,10 +39,12 @@ function row(s: Spec): ScoredAttempt {
     totalMarks: total,
     maxMarks: MAX * s.ai.length,
     percentage: total === null ? null : (total / (MAX * s.ai.length)) * 100,
+    mcqMarks: null,
+    mcqMaxMarks: 0,
     candidate: {
       id: `cand-${s.code}`, candidateCode: s.code, fullName: 'N', email: 'n@example.com', mobile: null, rollNumber: null,
       xPercentage: s.x ?? null, xiiPercentage: s.xii ?? null, majorCpi: s.cpi ?? null, programme: null, discipline: null,
-      status: evaluated ? 'EVALUATED' : 'SUBMITTED', result: null, jobRoleId: 'role', jobRole: { name: 'R' },
+      status: evaluated ? 'EVALUATED' : 'SUBMITTED', result: null, jobRoleId: 'role', driveId: 'role', jobRole: { name: 'R' },
     },
     evaluation: { status: evaluated ? 'SUBMITTED' : 'DRAFT' },
     questions: s.ai.map((a, i) => ({
@@ -56,7 +64,7 @@ function build(specs: Spec[], weights?: CompositeWeights) {
       calls.push(withAiOnly);
       return withAiOnly ? rows : rows.filter((r) => r.evaluation?.status === 'SUBMITTED');
     },
-    weightsFor: async () => (weights ? new Map([['role', weights]]) : new Map()),
+    drives: async () => [testDrive(weights)],
   } as unknown as ResultsRepository;
   const service = createResultsService({
     repo,
@@ -123,7 +131,7 @@ test('sort=composite: human % when submitted, AI % (provisional) otherwise; acad
   assert.deepEqual(by.C!.questionMarks.map((q) => q.marks), [null, null], 'no human marks before the evaluation is submitted');
 });
 
-test("the role's own weights drive the composite, so a change applies on the next read", async () => {
+test("leaderboard uses round weights: the drive's round weights drive the composite, so a change applies on the next read", async () => {
   const { service } = build(SPECS, { exam: 100, x: 0, xii: 0, cpi: 0 });
   const { items } = await service.leaderboard('role', 'composite');
   assert.equal(order(items), 'ACBD');
@@ -150,12 +158,11 @@ test('scoreRow: AI % only when every question has a DONE AI score', () => {
 test('results export: AI marks per question, AI %, composite, basis and the weights used', async () => {
   const rows = SPECS.map(row);
   const repo = {
-    roles: async () => [{ id: 'role', name: 'Role', refApplicantCount: 0 }],
+    drives: async () => [testDrive({ exam: 60, x: 20, xii: 10, cpi: 10 })],
     submittedAttempts: async () => rows,
-    weightsFor: async () => new Map([['role', { exam: 60, x: 20, xii: 10, cpi: 10 }]]),
   } as unknown as ResultsRepository;
   const service = createResultsService({ repo, getFlagsBatch: async () => new Map(), emailReady: async () => true, sendEmails: async () => ({ batchId: 'b', queued: 0, skipped: [] }) });
-  const { sheets } = await service.resultsExport(undefined);
+  const { sheets } = await service.resultsExport({});
   const sheet = sheets[0]!;
   const headers = sheet.columns.map((c) => c.header);
   for (const h of ['Q1 AI marks', 'Q2 AI marks', 'AI %', 'Composite', 'Composite basis', 'Weights (exam/X/XII/CPI)']) assert.ok(headers.includes(h), h);
@@ -166,4 +173,81 @@ test('results export: AI marks per question, AI %, composite, basis and the weig
   assert.equal(cell('C', 'Composite basis'), 'AI (provisional)');
   assert.equal(cell('D', 'Composite'), null);
   assert.equal(cell('A', 'Weights (exam/X/XII/CPI)'), '60/20/10/10');
+});
+
+test('results export: one sheet per drive, named by the drive, with Job profile/Type/Round/College/Batch', async () => {
+  const rows = SPECS.map(row);
+  const repo = {
+    drives: async () => [testDrive()],
+    submittedAttempts: async () => rows,
+  } as unknown as ResultsRepository;
+  const service = createResultsService({ repo, getFlagsBatch: async () => new Map(), emailReady: async () => true, sendEmails: async () => ({ batchId: 'b', queued: 0, skipped: [] }) });
+  const { label, sheets } = await service.resultsExport({ driveId: 'role' });
+  assert.equal(label, 'Role · Round 1 · IITG · Nov 2026');
+  assert.equal(sheets[0]!.name, 'Role · Round 1 · IITG · Nov 2026');
+  const headers = sheets[0]!.columns.map((c) => c.header);
+  assert.deepEqual(headers.slice(1, 7), ['Candidate code', 'Job profile', 'Type', 'Round', 'College', 'Batch']);
+  assert.deepEqual(sheets[0]!.rows[0]!.slice(2, 7), ['Role', 'Placement', 1, 'IITG', 'Nov 2026']);
+});
+
+// ---- MCQ questions (spec 2026-11-10) ----------------------------------------
+
+/**
+ * Two MCQs first (orders 1–2: 2 marks right, -0.5 wrong → 1.5 of 3), then the
+ * written questions of `s` (orders 3…). Not human-evaluated unless `s.human`.
+ */
+function mcqRow(s: Spec): ScoredAttempt {
+  const base = row(s) as unknown as { questions: Record<string, unknown>[]; [k: string]: unknown };
+  const mcqs = [
+    { order: 1, typeSnapshot: 'MCQ', maxMarksSnapshot: 2, correctSnapshot: 1, autoMarks: 2, answer: { selectedOption: 1 }, evaluation: null, aiScores: [] },
+    { order: 2, typeSnapshot: 'MCQ', maxMarksSnapshot: 1, correctSnapshot: 0, autoMarks: -0.5, answer: { selectedOption: 3 }, evaluation: null, aiScores: [] },
+  ];
+  const written = base.questions.map((q) => ({ ...q, order: (q.order as number) + 2, typeSnapshot: 'WRITTEN', correctSnapshot: null, autoMarks: null, answer: { selectedOption: null } }));
+  return { ...base, mcqMarks: 1.5, mcqMaxMarks: 3, maxMarks: (base.maxMarks as number) + 3, questions: [...mcqs, ...written] } as unknown as ScoredAttempt;
+}
+const MIXED: Spec = { code: 'M', submittedAt: '2026-11-01T10:00:00Z', human: null, ai: [8, 8] };
+
+test('AI % ignores MCQs', async () => {
+  const w = DEFAULT_COMPOSITE_WEIGHTS;
+  assert.equal(scoreRow(mcqRow(MIXED), w).aiPercentage, 80, 'AI % is over the written questions only');
+  assert.equal(scoreRow(mcqRow({ ...MIXED, ai: [8, null] }), w).aiPercentage, null);
+  const repo = { leaderboard: async () => [mcqRow(MIXED)], drives: async () => [testDrive()] } as unknown as ResultsRepository;
+  const service = createResultsService({ repo, getFlagsBatch: async () => new Map(), emailReady: async () => true, sendEmails: async () => ({ batchId: 'b', queued: 0, skipped: [] }) });
+  const [item] = (await service.leaderboard('role', 'ai')).items;
+  assert.deepEqual(item!.questionMarks.map((q) => q.order), [3, 4], 'written questions only');
+  assert.deepEqual([item!.mcqMarks, item!.mcqMaxMarks], [1.5, 3]);
+});
+
+test('provisional composite includes MCQ marks', () => {
+  const s = scoreRow(mcqRow(MIXED), { exam: 100, x: 0, xii: 0, cpi: 0 });
+  // (1.5 MCQ + 16 AI written) / (3 + 20)
+  assert.equal(s.composite, 76.09);
+  assert.equal(s.provisional, true);
+  // Written questions not all AI-scored: no provisional exam %.
+  assert.equal(scoreRow(mcqRow({ ...MIXED, ai: [8, null] }), { exam: 100, x: 0, xii: 0, cpi: 0 }).composite, null);
+});
+
+test('export has MCQ columns and no per-MCQ columns', async () => {
+  const noMcq = row({ code: 'W', submittedAt: '2026-11-01T11:00:00Z', human: { total: 12, marks: [6, 6] }, ai: [6, 6] });
+  const repo = { drives: async () => [testDrive()], submittedAttempts: async () => [mcqRow(MIXED), noMcq] } as unknown as ResultsRepository;
+  const service = createResultsService({ repo, getFlagsBatch: async () => new Map(), emailReady: async () => true, sendEmails: async () => ({ batchId: 'b', queued: 0, skipped: [] }) });
+  const sheet = (await service.resultsExport({})).sheets[0]!;
+  const headers = sheet.columns.map((c) => c.header);
+  const at = headers.indexOf('Percentage');
+  assert.deepEqual(headers.slice(at + 1, at + 6), ['MCQ marks', 'MCQ max', 'MCQ correct', 'MCQ wrong', 'MCQ unanswered']);
+  // noMcq's written questions are orders 1–2; the mixed row's are 3–4. No MCQ order is a column of its own.
+  const cell = (i: number, h: string) => sheet.rows[i]![headers.indexOf(h)];
+  assert.deepEqual(['MCQ marks', 'MCQ max', 'MCQ correct', 'MCQ wrong', 'MCQ unanswered'].map((h) => cell(0, h)), [1.5, 3, 1, 1, 0]);
+  assert.deepEqual(['MCQ marks', 'MCQ max', 'MCQ correct', 'MCQ wrong', 'MCQ unanswered'].map((h) => cell(1, h)), [null, null, null, null, null]);
+  assert.equal(cell(0, 'Q1 marks'), null, 'the MCQ at order 1 has no per-question mark');
+  assert.equal(cell(0, 'Q1 AI marks'), null);
+  assert.equal(cell(0, 'Q3 AI marks'), 8);
+});
+
+test('export of an MCQ-only drive has no per-question columns', async () => {
+  const only = mcqRow({ code: 'O', submittedAt: '2026-11-01T10:00:00Z', human: null, ai: [] });
+  const repo = { drives: async () => [testDrive()], submittedAttempts: async () => [only] } as unknown as ResultsRepository;
+  const service = createResultsService({ repo, getFlagsBatch: async () => new Map(), emailReady: async () => true, sendEmails: async () => ({ batchId: 'b', queued: 0, skipped: [] }) });
+  const headers = (await service.resultsExport({})).sheets[0]!.columns.map((c) => c.header);
+  assert.deepEqual(headers.filter((h) => /^Q\d/.test(h)), []);
 });

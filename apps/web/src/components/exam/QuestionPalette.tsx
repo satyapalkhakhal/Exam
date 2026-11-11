@@ -26,31 +26,43 @@ const LABEL: Record<PaletteState, string> = {
   marked: 'marked for review',
 };
 
-export function QuestionPalette({ items, currentId, onSelect }: { items: PaletteItem[]; currentId: string; onSelect: (id: string) => void }) {
+export interface PaletteSection {
+  title: string;
+  items: PaletteItem[];
+}
+
+export function QuestionPalette({ groups, currentId, onSelect }: { groups: PaletteSection[]; currentId: string; onSelect: (id: string) => void }) {
+  // One untitled list when there is only one kind of question.
+  const titled = groups.length > 1;
   return (
     <nav aria-label="Questions" className="space-y-3">
-      <ol className="flex flex-wrap gap-2">
-        {items.map((it) => {
-          const current = it.id === currentId;
-          return (
-            <li key={it.id}>
-              <button
-                type="button"
-                onClick={() => onSelect(it.id)}
-                aria-current={current ? 'step' : undefined}
-                aria-label={`Question ${it.number}, ${LABEL[it.state]}${current ? ', current' : ''}`}
-                className={cn(
-                  'h-10 w-10 rounded-lg border text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
-                  STYLE[it.state],
-                  current && 'ring-2 ring-primary ring-offset-2',
-                )}
-              >
-                {it.number}
-              </button>
-            </li>
-          );
-        })}
-      </ol>
+      {groups.map((g) => (
+        <div key={g.title} className="space-y-1.5">
+          {titled && <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{g.title}</h2>}
+          <ol className="flex flex-wrap gap-2" aria-label={titled ? g.title : undefined}>
+            {g.items.map((it) => {
+              const current = it.id === currentId;
+              return (
+                <li key={it.id}>
+                  <button
+                    type="button"
+                    onClick={() => onSelect(it.id)}
+                    aria-current={current ? 'step' : undefined}
+                    aria-label={`Question ${it.number}, ${LABEL[it.state]}${current ? ', current' : ''}`}
+                    className={cn(
+                      'h-10 w-10 rounded-lg border text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+                      STYLE[it.state],
+                      current && 'ring-2 ring-primary ring-offset-2',
+                    )}
+                  >
+                    {it.number}
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      ))}
       <ul className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-muted-foreground" aria-label="Legend">
         {(Object.keys(STYLE) as PaletteState[]).map((s) => (
           <li key={s} className="flex items-center gap-1.5">

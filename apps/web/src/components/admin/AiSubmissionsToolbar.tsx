@@ -1,6 +1,7 @@
 // src/components/admin/AiSubmissionsToolbar.tsx
 // Why: Super Admin controls for AI evaluation on the Submissions page (docs/ai-evaluation.md
-// §2, §9): start a run for the filtered role, watch its progress, and bulk-accept AI marks.
+// §2, §9): start a run for the filtered drive (spec 2026-11-10: AI grading is per
+// drive), watch its progress, and bulk-accept AI marks.
 // The server enforces everything (exam over, AI configured, locks); this only explains it.
 
 import { useEffect, useRef, useState } from 'react';
@@ -12,7 +13,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { ApiError } from '@/lib/api';
-import { aiErrorMessage, formatTokens, hasRunningRun, runPercent, runProgressLabel, summariseSkips } from '@/lib/aiEvaluation';
+import { aiErrorMessage, formatTokens, hasRunningRun, runPercent, runProgressLabel, selectionSpansDrives, summariseSkips } from '@/lib/aiEvaluation';
 import { useAiRuns, useBulkAcceptAi, useCancelAiRun, useStartAiRun } from '@/api/admin/aiEvaluation';
 
 function ErrorText({ error }: { error: Error }) {
@@ -27,16 +28,19 @@ function ErrorText({ error }: { error: Error }) {
 }
 
 interface Props {
-  jobRoleId: string;
+  /** The drive chosen in the list filter ('' = none). */
+  driveId: string;
+  /** Drive names of the selected rows, to refuse a selection that spans drives. */
+  selectedDriveNames: Array<string | undefined>;
   /** Submissions matching the current filters; used to approximate how many will be graded. */
   total: number;
   selectedIds: string[];
   onClearSelection: () => void;
 }
 
-export function AiSubmissionsToolbar({ jobRoleId, total, selectedIds, onClearSelection }: Props) {
+export function AiSubmissionsToolbar({ driveId, total, selectedIds, selectedDriveNames, onClearSelection }: Props) {
   const qc = useQueryClient();
-  const runs = useAiRuns(jobRoleId, Boolean(jobRoleId));
+  const runs = useAiRuns(driveId, Boolean(driveId));
   const start = useStartAiRun();
   const cancel = useCancelAiRun();
   const accept = useBulkAcceptAi();
@@ -60,23 +64,25 @@ export function AiSubmissionsToolbar({ jobRoleId, total, selectedIds, onClearSel
   const closeEvaluate = () => { setEvaluating(false); setForce(false); start.reset(); };
   const closeAccept = () => { setAccepting(false); accept.reset(); };
   const useSelected = scope === 'selected' && selectedIds.length > 0;
+  const mixed = selectionSpansDrives(selectedDriveNames);
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <Button disabled={!jobRoleId || running} onClick={() => setEvaluating(true)} title={jobRoleId ? undefined : 'Filter by one role first'}>
+        <Button disabled={!driveId || running} onClick={() => setEvaluating(true)} title={driveId ? undefined : 'Filter by one drive first'}>
           Evaluate with AI
         </Button>
-        <Button variant="outline" onClick={() => { setScope(selectedIds.length > 0 ? 'selected' : 'role'); setAccepting(true); }} disabled={!jobRoleId && selectedIds.length === 0}>
+        <Button variant="outline" onClick={() => { setScope(selectedIds.length > 0 ? 'selected' : 'role'); setAccepting(true); }} disabled={!driveId && selectedIds.length === 0}>
           Bulk accept AI marks
         </Button>
-        {!jobRoleId && <span className="text-xs text-muted-foreground">Pick a role in the Role column filter to evaluate it.</span>}
+        {!driveId && <span className="text-xs text-muted-foreground">Pick a drive in the Job profile column filter to evaluate it.</span>}
+        {mixed && <span className="text-xs text-destructive" role="status">Select submissions from one drive.</span>}
       </div>
 
       {active.map((r) => (
         <div key={r.id} className="space-y-2 rounded-lg border border-border bg-card p-3" role="status" aria-live="polite">
           <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-            <span><span className="font-medium">AI evaluation running</span>{r.jobRole ? ` for ${r.jobRole.name}` : ''}: {runProgressLabel(r)}</span>
+            <span><span className="font-medium">AI evaluation running</span>{r.drive ? ` for ${r.drive.displayName}` : ''}: {runProgressLabel(r)}</span>
             <span className="text-xs text-muted-foreground">Tokens in {formatTokens(r.inputTokens)} / out {formatTokens(r.outputTokens)}</span>
             <Button size="sm" variant="outline" disabled={cancel.isPending} onClick={() => cancel.mutate(r.id)}>Cancel</Button>
           </div>
@@ -99,11 +105,11 @@ export function AiSubmissionsToolbar({ jobRoleId, total, selectedIds, onClearSel
         variant="default"
         confirmLabel="Start evaluation"
         isPending={start.isPending}
-        onConfirm={() => start.mutate({ jobRoleId, force }, { onSuccess: closeEvaluate })}
+        onConfirm={() => start.mutate({ driveId, force }, { onSuccess: closeEvaluate })}
         description={
           <>
             <p>
-              About {total} submission{total === 1 ? '' : 's'} match the current filters. The AI will grade the submitted answers of this role,
+              About {total} submission{total === 1 ? '' : 's'} match the current filters. The AI will grade the submitted answers of this drive,
               which sends their text (without names or academics) to OpenAI. It only suggests marks; a person confirms them.
             </p>
             <div className="flex items-center gap-2">
@@ -133,8 +139,8 @@ export function AiSubmissionsToolbar({ jobRoleId, total, selectedIds, onClearSel
                     <Label htmlFor="ba-sel">Selected rows ({selectedIds.length})</Label>
                   </div>
                   <div className="flex items-center gap-2">
-                    <input type="radio" id="ba-role" name="ba-scope" className="accent-primary" checked={scope === 'role'} disabled={!jobRoleId} onChange={() => setScope('role')} />
-                    <Label htmlFor="ba-role">The whole role{jobRoleId ? '' : ' (pick a role in the filter first)'}</Label>
+                    <input type="radio" id="ba-role" name="ba-scope" className="accent-primary" checked={scope === 'role'} disabled={!driveId} onChange={() => setScope('role')} />
+                    <Label htmlFor="ba-role">The whole drive{driveId ? '' : ' (pick a drive in the filter first)'}</Label>
                   </div>
                 </fieldset>
                 <div className="flex items-center gap-2">
@@ -165,8 +171,8 @@ export function AiSubmissionsToolbar({ jobRoleId, total, selectedIds, onClearSel
               <>
                 <Button variant="outline" onClick={closeAccept} disabled={accept.isPending}>Cancel</Button>
                 <Button
-                  disabled={accept.isPending || (!useSelected && !jobRoleId)}
-                  onClick={() => accept.mutate(useSelected ? { attemptIds: selectedIds, onlyClean } : { jobRoleId, onlyClean })}
+                  disabled={accept.isPending || (!useSelected && !driveId) || (useSelected && mixed)}
+                  onClick={() => accept.mutate(useSelected ? { attemptIds: selectedIds, onlyClean } : { driveId, onlyClean })}
                 >
                   {accept.isPending ? 'Accepting…' : 'Accept AI marks'}
                 </Button>

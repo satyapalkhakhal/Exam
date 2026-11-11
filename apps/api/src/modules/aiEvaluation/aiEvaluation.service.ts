@@ -27,7 +27,8 @@ import { PROMPT_VERSION, buildPrompt } from './aiEvaluation.prompt.js';
 
 export interface RunRow {
   id: string;
-  jobRole: { id: string; name: string } | null;
+  /** The whole drive graded; null for a run on chosen submissions. */
+  drive: { id: string; displayName: string } | null;
   model: string;
   promptVersion: string;
   status: AiRunStatus;
@@ -73,23 +74,26 @@ export interface ScoreResult {
   outputTokens: number;
 }
 
-export interface RoleExamState {
+/** A drive's exam state: is anyone still mid-exam, is it open, when does its window end. */
+export interface DriveExamState {
   inProgress: number;
   isOpen: boolean;
   windowEnd: Date | null;
 }
 
 export interface AiEvaluationRepository {
-  roleExamState(jobRoleId: string): Promise<RoleExamState | null>;
-  gradableQuestions(scope: { jobRoleId: string } | { attemptIds: string[] }): Promise<GradableQuestion[]>;
+  driveExamState(driveId: string): Promise<DriveExamState | null>;
+  /** The distinct drives the attempts belong to (a selection must be one drive). */
+  driveIdsOfAttempts(attemptIds: string[]): Promise<string[]>;
+  gradableQuestions(scope: { driveId: string } | { attemptIds: string[] }): Promise<GradableQuestion[]>;
   createRun(data: {
-    jobRoleId: string | null;
+    driveId: string | null;
     model: string;
     promptVersion: string;
     createdById: string;
     items: { attemptQuestionId: string; maxMarks: number }[];
   }): Promise<{ run: RunRow; scoreIds: string[] }>;
-  listRuns(jobRoleId: string | undefined): Promise<RunRow[]>;
+  listRuns(driveId: string | undefined): Promise<RunRow[]>;
   loadForGrading(scoreId: string): Promise<ScoreForGrading | null>;
   /** QUEUED -> DONE plus run counters; false when the score was no longer QUEUED (e.g. cancelled). */
   completeScore(scoreId: string, result: ScoreResult, at: Date): Promise<boolean>;
@@ -121,7 +125,7 @@ const ENTITY = 'ai_evaluation_run';
 
 export const toRunDto = (r: RunRow): AiRunDto => ({
   id: r.id,
-  jobRole: r.jobRole,
+  drive: r.drive,
   model: r.model,
   promptVersion: r.promptVersion,
   status: r.status,
@@ -135,8 +139,8 @@ export const toRunDto = (r: RunRow): AiRunDto => ({
   finishedAt: r.finishedAt?.toISOString() ?? null,
 });
 
-/** The exam is over for a role: nobody is mid-exam and it is closed or past its window. */
-export function isExamOver(state: RoleExamState, now: Date): boolean {
+/** The exam is over for a drive: nobody is mid-exam and it is closed or past its window. */
+export function isExamOver(state: DriveExamState, now: Date): boolean {
   if (state.inProgress > 0) return false;
   return !state.isOpen || (state.windowEnd !== null && state.windowEnd.getTime() < now.getTime());
 }
@@ -151,16 +155,20 @@ export function createAiEvaluationService(deps: AiEvaluationDeps) {
     const cfg = await deps.getConfig();
     if (!isAiReady(cfg)) throw new AppError(409, 'AI_NOT_CONFIGURED', NOT_CONFIGURED);
 
-    let scope: { jobRoleId: string } | { attemptIds: string[] };
-    if (input.jobRoleId) {
-      const state = await repo.roleExamState(input.jobRoleId);
-      if (!state) throw notFound('Job role not found');
+    let scope: { driveId: string } | { attemptIds: string[] };
+    if (input.driveId) {
+      const state = await repo.driveExamState(input.driveId);
+      if (!state) throw notFound('Drive not found');
       if (!isExamOver(state, now())) {
         throw new AppError(409, 'EXAM_NOT_OVER', 'The exam is not over yet. Close it (or wait for the window to end) and make sure nobody is still attempting it.');
       }
-      scope = { jobRoleId: input.jobRoleId };
+      scope = { driveId: input.driveId };
     } else {
-      scope = { attemptIds: input.attemptIds ?? [] };
+      const attemptIds = input.attemptIds ?? [];
+      if ((await repo.driveIdsOfAttempts(attemptIds)).length > 1) {
+        throw new AppError(400, 'MIXED_DRIVES', 'Select submissions from one drive.');
+      }
+      scope = { attemptIds };
     }
 
     const questions = await repo.gradableQuestions(scope);
@@ -169,7 +177,7 @@ export function createAiEvaluationService(deps: AiEvaluationDeps) {
     if (todo.length === 0) return { run: null, queued: 0, alreadyScored };
 
     const { run, scoreIds } = await repo.createRun({
-      jobRoleId: input.jobRoleId ?? null,
+      driveId: input.driveId ?? null,
       model: cfg.model,
       promptVersion: PROMPT_VERSION,
       createdById: actor.id,
@@ -186,14 +194,14 @@ export function createAiEvaluationService(deps: AiEvaluationDeps) {
       action: 'AI_EVALUATION_STARTED',
       entity: ENTITY,
       entityId: run.id,
-      metadata: { jobRoleId: input.jobRoleId ?? null, model: cfg.model, promptVersion: PROMPT_VERSION, questions: scoreIds.length, force: input.force === true },
+      metadata: { driveId: input.driveId ?? null, model: cfg.model, promptVersion: PROMPT_VERSION, questions: scoreIds.length, force: input.force === true },
       ip: actor.ip,
     });
     return { run: toRunDto(run), queued: scoreIds.length, alreadyScored };
   }
 
-  async function list(jobRoleId: string | undefined): Promise<AiRunDto[]> {
-    return (await repo.listRuns(jobRoleId)).map(toRunDto);
+  async function list(driveId: string | undefined): Promise<AiRunDto[]> {
+    return (await repo.listRuns(driveId)).map(toRunDto);
   }
 
   async function cancel(runId: string, actor: AiActor): Promise<AiRunDto> {

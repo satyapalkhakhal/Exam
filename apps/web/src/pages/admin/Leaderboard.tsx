@@ -1,17 +1,22 @@
 // src/pages/admin/Leaderboard.tsx
-// Why: Super Admin's per-role ranking (design §8): one tab per job role, shortlist/reject
-// through the shared decision dialog (which also sends the email), and the two XLSX
-// exports as plain GET links (the browser downloads them with the session cookie).
+// Why: Super Admin's per-drive ranking (design §8; spec 2026-11-10: one round of a job
+// profile at one college and batch, so colleges, rounds and internships never mix):
+// shortlist/reject through the shared decision dialog (which also sends the email),
+// "Move shortlisted to Round n+1", and the two XLSX exports of the drive as plain GET
+// links (the browser downloads them with the session cookie).
 
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { LEADERBOARD_SORTS, type LeaderboardSort } from '@exam/shared';
 import { isProvisional } from '@/lib/aiEvaluation';
+import { mcqCell } from '@/lib/marking';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { DrivePicker } from '@/components/admin/DrivePicker';
+import { PromoteDialog } from '@/components/admin/PromoteDialog';
+import { locateDrive } from '@/lib/drivePicker';
 import { SendEmailDialog } from '@/components/admin/SendEmailDialog';
 import { DecisionDialog } from '@/components/admin/DecisionDialog';
 import { ResultBadge } from '@/components/admin/ResultBadge';
@@ -27,10 +32,15 @@ const pct = (n: number | null) => (n === null ? '-' : String(n));
 
 export default function Leaderboard() {
   const roles = useRoles();
-  const [picked, setPicked] = useState('');
-  const jobRoleId = picked || roles.data?.[0]?.id || '';
+  const [driveId, setDriveId] = useState<string | null>(null);
   const [sort, setSort] = useState<LeaderboardSort>('human');
-  const board = useLeaderboard(jobRoleId, sort);
+  const board = useLeaderboard(driveId ?? '', sort);
+  const [promoting, setPromoting] = useState(false);
+  const located = driveId ? locateDrive(roles.data ?? [], driveId) : null;
+  const drive = located?.drive ?? null;
+  const hasNextRound = Boolean(
+    drive && roles.data?.find((r) => r.id === located?.jobRoleId)?.rounds.some((r) => r.roundNumber === drive.roundNumber + 1),
+  );
   const [target, setTarget] = useState<{ row: LeaderboardRow; decision: Decision } | null>(null);
   const [emailRow, setEmailRow] = useState<LeaderboardRow | null>(null);
   const [search, setSearch] = useState('');
@@ -42,18 +52,20 @@ export default function Leaderboard() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold text-foreground">Leaderboard</h1>
-        {jobRoleId && (
-          <div className="flex gap-2">
-            <Button asChild variant="outline"><a href={resultsExportUrl(jobRoleId)}>Export results XLSX</a></Button>
-            <Button asChild variant="outline"><a href={activityExportUrl(jobRoleId)}>Export activity XLSX</a></Button>
+        {driveId && (
+          <div className="flex flex-wrap gap-2">
+            {hasNextRound && drive && (
+              <Button onClick={() => setPromoting(true)}>Move shortlisted to Round {drive.roundNumber + 1}</Button>
+            )}
+            <Button asChild variant="outline"><a href={resultsExportUrl(driveId)}>Export results XLSX</a></Button>
+            <Button asChild variant="outline"><a href={activityExportUrl(driveId)}>Export activity XLSX</a></Button>
           </div>
         )}
       </div>
-      <Tabs value={jobRoleId} onValueChange={setPicked}>
-        <TabsList aria-label="Job role">
-          {(roles.data ?? []).map((r) => <TabsTrigger key={r.id} value={r.id}>{r.name}</TabsTrigger>)}
-        </TabsList>
-      </Tabs>
+      <div className="max-w-3xl">
+        <DrivePicker value={driveId} onChange={setDriveId} includeInactive idPrefix="lb" inline />
+      </div>
+      {!driveId && <p className="text-sm text-muted-foreground">Pick a drive: each college's drive of a round has its own ranking.</p>}
       <div className="flex items-center gap-2">
         <Label htmlFor="lb-sort">Sort by</Label>
         <select
@@ -80,6 +92,7 @@ export default function Leaderboard() {
                 </span>
               </TableHead>
               {questionCols.map((c) => <TableHead key={c.order}>Q{c.order}</TableHead>)}
+              <TableHead title="Multiple-choice marks (auto-marked at submit)">MCQ</TableHead>
               <TableHead>Total</TableHead>
               <TableHead>%</TableHead>
               <TableHead>AI %</TableHead>
@@ -91,10 +104,10 @@ export default function Leaderboard() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {board.isPending && jobRoleId && <TableRow><TableCell colSpan={10 + questionCols.length} className="text-muted-foreground">Loading…</TableCell></TableRow>}
-            {board.data?.length === 0 && <TableRow><TableCell colSpan={10 + questionCols.length} className="text-muted-foreground">No evaluated candidates yet.</TableCell></TableRow>}
+            {board.isPending && driveId && <TableRow><TableCell colSpan={11 + questionCols.length} className="text-muted-foreground">Loading…</TableCell></TableRow>}
+            {board.data?.length === 0 && <TableRow><TableCell colSpan={11 + questionCols.length} className="text-muted-foreground">No evaluated candidates yet.</TableCell></TableRow>}
             {board.data && board.data.length > 0 && rows.length === 0 && (
-              <TableRow><TableCell colSpan={10 + questionCols.length} className="text-muted-foreground">No candidate matches the search.</TableCell></TableRow>
+              <TableRow><TableCell colSpan={11 + questionCols.length} className="text-muted-foreground">No candidate matches the search.</TableCell></TableRow>
             )}
             {rows.map((r) => (
               <TableRow key={r.candidateId}>
@@ -109,13 +122,14 @@ export default function Leaderboard() {
                     {m.aiMarks !== null && <div className="text-xs text-muted-foreground" title="AI suggested marks">AI {m.aiMarks}</div>}
                   </TableCell>
                 ))}
+                <TableCell className="whitespace-nowrap">{mcqCell(r)}</TableCell>
                 <TableCell>{r.totalMarks} / {r.maxMarks}</TableCell>
                 <TableCell>{r.percentage}</TableCell>
                 <TableCell>{pct(r.aiPercentage)}</TableCell>
                 <TableCell>
                   {pct(r.compositeScore)}
                   {isProvisional(r) && (
-                    <Badge variant="outline" className="ml-1" title="Based on the AI exam % because no human evaluation is submitted yet">provisional</Badge>
+                    <Badge variant="outline" className="ml-1" title="Based on the AI marks (plus any MCQ marks) because no human evaluation is submitted yet">provisional</Badge>
                   )}
                 </TableCell>
                 <TableCell title={flagTitle(r.flagCounts)}>{totalFlags(r.flagCounts) > 0 ? <Badge variant="default">{totalFlags(r.flagCounts)}</Badge> : '-'}</TableCell>
@@ -152,6 +166,7 @@ export default function Leaderboard() {
         candidateIds={target ? [target.row.candidateId] : []}
         onClose={() => setTarget(null)}
       />
+      <PromoteDialog drive={promoting ? drive : null} onClose={() => setPromoting(false)} />
     </div>
   );
 }

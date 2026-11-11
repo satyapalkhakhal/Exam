@@ -1,50 +1,52 @@
 // modules/jobRoles/jobRoles.repository.ts
-// job_roles + exam_settings access. A role and its default settings row are
-// created together, and every write commits with its audit row.
+// job_roles access. A role and its Round 1 are created together, and every
+// write commits with its audit row. (lower(name), type) is unique through the
+// raw index job_roles_name_type_key, which Prisma reports as P2002.
 
 import { prisma } from '../../infrastructure/db/prisma.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { conflict } from '../../shared/errors.js';
 import { writeAudit } from '../audit/index.js';
-import type { JobRolesRepository } from './jobRoles.service.js';
-
-const settingSelect = {
-  durationMinutes: true,
-  windowStart: true,
-  windowEnd: true,
-  instructions: true,
-  isOpen: true,
-  questionsLocked: true,
-  weightExam: true,
-  weightX: true,
-  weightXii: true,
-  weightCpi: true,
-} as const;
+import { toRoundRow } from '../drives/drives.repository.js';
+import type { JobRoleRow, JobRolesRepository } from './jobRoles.service.js';
 
 const include = {
-  examSetting: { select: settingSelect },
-  _count: { select: { questions: true, candidates: true } },
+  rounds: { include: { _count: { select: { questions: true } } }, orderBy: { roundNumber: 'asc' } },
+  _count: { select: { candidates: true } },
 } as const;
+type Record_ = Prisma.JobRoleGetPayload<{ include: typeof include }>;
 
-const NAME_TAKEN = 'A job role with this name already exists.';
+const toRow = (r: Record_): JobRoleRow => ({
+  id: r.id,
+  name: r.name,
+  type: r.type,
+  refApplicantCount: r.refApplicantCount,
+  active: r.active,
+  rounds: r.rounds.map(toRoundRow),
+  candidateCount: r._count.candidates,
+});
+
+const NAME_TAKEN = 'A job profile with this name and type already exists.';
 const isUnique = (err: unknown): boolean =>
   err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 
 export const jobRolesRepository: JobRolesRepository = {
-  list() {
-    return prisma.jobRole.findMany({ include, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+  async list() {
+    const rows = await prisma.jobRole.findMany({ include, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+    return rows.map(toRow);
   },
 
-  findById(id) {
-    return prisma.jobRole.findUnique({ where: { id }, include });
+  async findById(id) {
+    const row = await prisma.jobRole.findUnique({ where: { id }, include });
+    return row ? toRow(row) : null;
   },
 
   async create(data, audit) {
     try {
       return await prisma.$transaction(async (tx) => {
-        const row = await tx.jobRole.create({ data: { ...data, examSetting: { create: {} } }, include });
+        const row = await tx.jobRole.create({ data: { ...data, rounds: { create: { roundNumber: 1 } } }, include });
         await writeAudit(tx, audit(row.id));
-        return row;
+        return toRow(row);
       });
     } catch (err) {
       if (isUnique(err)) throw conflict(NAME_TAKEN);
@@ -57,30 +59,11 @@ export const jobRolesRepository: JobRolesRepository = {
       return await prisma.$transaction(async (tx) => {
         const row = await tx.jobRole.update({ where: { id }, data, include });
         await writeAudit(tx, audit);
-        return row;
+        return toRow(row);
       });
     } catch (err) {
       if (isUnique(err)) throw conflict(NAME_TAKEN);
       throw err;
     }
-  },
-
-  async upsertSettings(jobRoleId, data, audit) {
-    const { weights, ...rest } = data;
-    const w = weights ? { weightExam: weights.exam, weightX: weights.x, weightXii: weights.xii, weightCpi: weights.cpi } : {};
-    return prisma.$transaction(async (tx) => {
-      const row = await tx.examSetting.upsert({
-        where: { jobRoleId },
-        create: { jobRoleId, ...rest, ...w },
-        update: { ...rest, ...w },
-        select: settingSelect,
-      });
-      await writeAudit(tx, audit);
-      return row;
-    });
-  },
-
-  getSettings(jobRoleId) {
-    return prisma.examSetting.findUnique({ where: { jobRoleId }, select: settingSelect });
   },
 };

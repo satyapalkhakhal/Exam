@@ -1,9 +1,10 @@
 // src/components/admin/AddCandidateDialog.tsx
 // Why: add one candidate by hand instead of a CSV import. Same fields and limits as the
-// candidate edit form; name, email and job role are required, everything else optional.
+// candidate edit form; name, email and drive (job profile · round · college · batch;
+// spec 2026-11-10) are required, everything else optional.
 // The server mints the candidate code and rejects an email or mobile already in use.
 
-import { useForm } from 'react-hook-form';
+import { Controller, useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { normalizeMobile } from '@exam/shared';
@@ -11,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Select } from '@/components/ui/select';
+import { DrivePicker } from '@/components/admin/DrivePicker';
 import { useCreateCandidate, type CandidateRow } from '@/api/admin/candidates';
 
 const optNum = (min: number, max: number, label: string) =>
@@ -27,34 +28,32 @@ const schema = z.object({
   majorCpi: optNum(0, 10, 'CPI'),
   discipline: z.string().trim().max(200),
   programme: z.string().trim().max(200),
-  jobRoleId: z.string().min(1, 'Choose a job role'),
+  driveId: z.string().min(1, 'Choose a drive'),
 });
 type Values = z.infer<typeof schema>;
 
 const EMPTY: Values = {
   fullName: '', email: '', mobile: '', rollNumber: '', xPercentage: '', xiiPercentage: '',
-  majorCpi: '', discipline: '', programme: '', jobRoleId: '',
+  majorCpi: '', discipline: '', programme: '', driveId: '',
 };
 const num = (v: string) => (v === '' ? null : Number(v));
 const txt = (v: string) => (v === '' ? null : v);
 
 export function AddCandidateDialog({
   open,
-  roles,
-  defaultJobRoleId,
+  defaultDriveId,
   onClose,
   onCreated,
 }: {
   open: boolean;
-  roles: Array<{ id: string; name: string }>;
-  defaultJobRoleId?: string;
+  defaultDriveId?: string;
   onClose: () => void;
   onCreated?: (c: CandidateRow) => void;
 }) {
   const create = useCreateCandidate();
-  const { register, handleSubmit, reset, formState: { errors } } = useForm<Values>({
+  const { register, control, handleSubmit, reset, formState: { errors } } = useForm<Values>({
     resolver: zodResolver(schema),
-    values: { ...EMPTY, jobRoleId: defaultJobRoleId ?? '' },
+    values: { ...EMPTY, driveId: defaultDriveId ?? '' },
   });
   const close = () => {
     reset();
@@ -90,7 +89,7 @@ export function AddCandidateDialog({
                 majorCpi: num(v.majorCpi),
                 discipline: txt(v.discipline),
                 programme: txt(v.programme),
-                jobRoleId: v.jobRoleId,
+                driveId: v.driveId,
               },
               {
                 onSuccess: (c) => {
@@ -104,14 +103,13 @@ export function AddCandidateDialog({
           <div className="grid gap-3 sm:grid-cols-2">
             {field('fullName', 'Name', 'text', true)}
             {field('email', 'Email', 'email', true)}
-            <div className="space-y-1.5">
-              <Label htmlFor="ac-jobRoleId">Job role<span className="text-destructive"> *</span></Label>
-              <Select id="ac-jobRoleId" error={errors.jobRoleId?.message} {...register('jobRoleId')}>
-                <option value="">Select a role…</option>
-                {roles.map((r) => (
-                  <option key={r.id} value={r.id}>{r.name}</option>
-                ))}
-              </Select>
+            <div className="space-y-1.5 sm:col-span-2">
+              <Controller
+                control={control}
+                name="driveId"
+                render={({ field: f }) => <DrivePicker value={f.value || null} onChange={(id) => f.onChange(id ?? '')} idPrefix="ac" inline />}
+              />
+              {errors.driveId && <p className="text-xs text-destructive">{errors.driveId.message}</p>}
             </div>
             {field('mobile', 'Mobile', 'tel')}
             {field('rollNumber', 'Roll number')}
