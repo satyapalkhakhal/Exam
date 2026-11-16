@@ -19,7 +19,8 @@ export interface CandidateFilters {
   roundNumber: string;
   jobProfileType: '' | 'PLACEMENT' | 'INTERNSHIP';
   status: string;
-  result: '' | 'SHORTLISTED' | 'REJECTED' | 'NONE';
+  /** EVALUATED / NOT_EVALUATED = no decision yet, marks confirmed or not (NONE: either, old links). */
+  result: '' | 'SHORTLISTED' | 'REJECTED' | 'EVALUATED' | 'NOT_EVALUATED' | 'NONE';
   flagged: '' | 'true' | 'false';
   xMin: string;
   xiiMin: string;

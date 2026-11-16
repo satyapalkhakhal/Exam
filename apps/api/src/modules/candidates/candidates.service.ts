@@ -112,7 +112,7 @@ export interface CandidateDetailRows {
     id: string; stage: 'LOGIN' | 'EXAM_START'; createdAt: Date; permission: string; latitude: Num; longitude: Num;
     accuracyM: number | null; ip: string; browser: string; os: string; deviceType: string;
   }[];
-  attempt: { id: string; status: string; startedAt: Date; submittedAt: Date | null } | null;
+  attempt: { id: string; status: string; startedAt: Date; submittedAt: Date | null; evaluated: boolean } | null;
   otherApplications: { id: string; candidateCode: string; status: string; result: CandidateRowDto['result']; jobRole: { id: string; name: string }; driveDisplayName: string }[];
   activity: { rows: { id: string; eventType: string; createdAt: Date; metadata: unknown }[]; total: number };
   history: {
@@ -252,6 +252,7 @@ const toExamStats = (a: ListExamRow | undefined): CandidateExamStatsDto | null =
         totalMarks: a.evaluated ? num(a.totalMarks) : null,
         maxMarks: num(a.maxMarks) ?? 0,
         percentage: a.evaluated ? num(a.percentage) : null,
+        evaluated: a.evaluated,
       }
     : null;
 
@@ -345,6 +346,7 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
             status: d.attempt.status,
             startedAt: d.attempt.startedAt.toISOString(),
             submittedAt: d.attempt.submittedAt?.toISOString() ?? null,
+            evaluated: d.attempt.evaluated,
           }
         : null,
       activity: {

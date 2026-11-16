@@ -14,10 +14,11 @@ const drive = (id: string, over: Partial<ResultDrive> = {}): ResultDrive => ({
   weights: DEFAULT_COMPOSITE_WEIGHTS, ...over,
 });
 
-function service() {
+type Count = { driveId: string; status: string; result: string | null; evaluated?: boolean; count: number };
+function service(counts: Count[] = [{ driveId: 'd1', status: 'EVALUATED', result: null, count: 2 }]) {
   const repo = {
     drives: async () => [drive('d1'), drive('d2', { collegeId: 'c2', collegeName: 'NIT Trichy', collegeShortCode: 'NITT' })],
-    statusCounts: async () => [{ driveId: 'd1', status: 'EVALUATED', result: null, count: 2 }],
+    statusCounts: async () => counts,
     examPercentStats: async () => [{ driveId: 'd1', sum: 150, count: 2 }],
   } as unknown as ResultsRepository;
   return createResultsService({ repo, getFlagsBatch: async () => new Map(), emailReady: async () => true, sendEmails: async () => ({ batchId: 'b', queued: 0, skipped: [] }) });
@@ -43,4 +44,19 @@ test('evaluator rows carry no college, batch or exam % keys', async () => {
   assert.equal(drives[0]!.collegeShortCode, null);
   assert.equal(drives[0]!.batch, null);
   assert.ok(!/IIT|NIT/.test(JSON.stringify(drives)));
+});
+
+test('counts: evaluated (marks confirmed, no decision) under "evaluated", not under its exam status; decided under the result', async () => {
+  const { drives } = await service([
+    { driveId: 'd1', status: 'SUBMITTED', result: null, evaluated: true, count: 3 },
+    { driveId: 'd1', status: 'AUTO_SUBMITTED', result: null, evaluated: true, count: 1 },
+    { driveId: 'd1', status: 'SUBMITTED', result: null, evaluated: false, count: 4 },
+    { driveId: 'd1', status: 'SUBMITTED', result: 'SHORTLISTED', evaluated: true, count: 2 },
+    { driveId: 'd1', status: 'EVALUATED', result: null, evaluated: true, count: 1 },
+  ]).dashboard('SUPER_ADMIN');
+  const d1 = drives.find((d) => d.driveId === 'd1')!;
+  assert.deepEqual(
+    { imported: d1.imported, submitted: d1.submitted, auto: d1.autoSubmitted, evaluated: d1.evaluated, shortlisted: d1.shortlisted, pending: d1.pendingEvaluation },
+    { imported: 11, submitted: 4, auto: 0, evaluated: 5, shortlisted: 2, pending: 4 },
+  );
 });

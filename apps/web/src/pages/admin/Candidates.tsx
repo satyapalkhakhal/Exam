@@ -328,7 +328,8 @@ export default function Candidates() {
                       options={[
                         { value: 'SHORTLISTED', label: 'Shortlisted' },
                         { value: 'REJECTED', label: 'Rejected' },
-                        { value: 'NONE', label: 'No decision' },
+                        { value: 'EVALUATED', label: 'Evaluated (awaiting decision)' },
+                        { value: 'NOT_EVALUATED', label: 'Not evaluated' },
                       ]}
                       onChange={(v) => set({ result: v as CandidateFilters['result'] })}
                     />
@@ -383,7 +384,7 @@ export default function Candidates() {
                   <Badge variant="outline">{statusText(c.status)}</Badge>
                   {!c.eligible && <Badge variant="outline" className="ml-1">Not eligible</Badge>}
                 </TableCell>
-                <TableCell><ResultBadge result={c.result} /></TableCell>
+                <TableCell><ResultBadge result={c.result} evaluated={c.exam?.evaluated} /></TableCell>
                 <TableCell className="whitespace-nowrap">{c.exam ? timeTaken(c.exam.startedAt, c.exam.submittedAt) : '-'}</TableCell>
                 <TableCell className="whitespace-nowrap">{c.exam ? `${c.exam.answeredCount} / ${c.exam.questionCount}` : '-'}</TableCell>
                 <TableCell className="whitespace-nowrap">{marksText(c.exam)}</TableCell>

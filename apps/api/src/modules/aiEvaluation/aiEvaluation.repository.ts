@@ -81,6 +81,7 @@ export const aiEvaluationRepository: AiEvaluationRepository = {
       select: {
         id: true,
         maxMarksSnapshot: true,
+        answer: { select: { text: true } },
         aiScores: { where: { OR: [{ status: 'DONE' }, { status: 'QUEUED', run: { status: 'RUNNING' } }] }, select: { status: true } },
       },
     });
@@ -89,6 +90,7 @@ export const aiEvaluationRepository: AiEvaluationRepository = {
       maxMarks: r.maxMarksSnapshot.toNumber(),
       hasDone: r.aiScores.some((s) => s.status === 'DONE'),
       hasQueued: r.aiScores.some((s) => s.status === 'QUEUED'),
+      blank: (r.answer?.text ?? '').trim() === '',
     }));
   },
 
@@ -107,10 +109,12 @@ export const aiEvaluationRepository: AiEvaluationRepository = {
         });
         const scores = await tx.aiQuestionScore.createManyAndReturn({
           data: data.items.map((i) => ({ runId: created.id, attemptQuestionId: i.attemptQuestionId, maxMarks: i.maxMarks, model: data.model })),
-          select: { id: true },
+          select: { id: true, attemptQuestionId: true },
         });
         const run = await tx.aiEvaluationRun.findUniqueOrThrow({ where: { id: created.id }, select: runSelect });
-        return { run: toRunRow(run), scoreIds: scores.map((s) => s.id) };
+        // In the order of items (the caller matches them up by index).
+        const byQuestion = new Map(scores.map((s) => [s.attemptQuestionId, s.id]));
+        return { run: toRunRow(run), scoreIds: data.items.map((i) => byQuestion.get(i.attemptQuestionId)!) };
       },
       { timeout: 60_000 },
     );
@@ -135,13 +139,14 @@ export const aiEvaluationRepository: AiEvaluationRepository = {
         maxMarks: true,
         run: { select: { status: true } },
         attemptQuestion: {
-          select: { textSnapshot: true, question: { select: { evaluatorGuidance: true } }, answer: { select: { text: true, wordCount: true } } },
+          select: { textSnapshot: true, questionId: true, question: { select: { evaluatorGuidance: true } }, answer: { select: { text: true, wordCount: true } } },
         },
       },
     });
     if (!s) return null;
     return {
       id: s.id,
+      questionId: s.attemptQuestion.questionId,
       status: s.status,
       runStatus: s.run.status,
       maxMarks: s.maxMarks.toNumber(),

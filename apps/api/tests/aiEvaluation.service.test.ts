@@ -33,7 +33,7 @@ interface Score extends ScoreForGrading {
   outputTokens?: number;
 }
 
-function fakeRepo(seed: { questions?: { id: string; max: number; hasDone?: boolean; hasQueued?: boolean }[]; roleState?: { inProgress: number; isOpen: boolean; windowEnd: Date | null } | null; drivesOfAttempts?: string[] } = {}) {
+function fakeRepo(seed: { questions?: { id: string; max: number; hasDone?: boolean; hasQueued?: boolean; blank?: boolean }[]; roleState?: { inProgress: number; isOpen: boolean; windowEnd: Date | null } | null; drivesOfAttempts?: string[] } = {}) {
   const runs = new Map<string, RunRow>();
   const scores = new Map<string, Score>();
   let n = 0;
@@ -52,7 +52,7 @@ function fakeRepo(seed: { questions?: { id: string; max: number; hasDone?: boole
       return seed.drivesOfAttempts ?? ['drive-1'];
     },
     async gradableQuestions() {
-      return (seed.questions ?? []).map((q) => ({ attemptQuestionId: q.id, maxMarks: q.max, hasDone: q.hasDone ?? false, hasQueued: q.hasQueued ?? false }));
+      return (seed.questions ?? []).map((q) => ({ attemptQuestionId: q.id, maxMarks: q.max, hasDone: q.hasDone ?? false, hasQueued: q.hasQueued ?? false, blank: q.blank ?? false }));
     },
     async createRun(d) {
       const id = `run-${++n}`;
@@ -63,7 +63,7 @@ function fakeRepo(seed: { questions?: { id: string; max: number; hasDone?: boole
       runs.set(id, run);
       const scoreIds = d.items.map((i) => {
         const sid = `score-${++n}`;
-        scores.set(sid, { id: sid, runId: id, status: 'QUEUED', runStatus: 'RUNNING', maxMarks: i.maxMarks, questionText: `Q ${i.attemptQuestionId}`, guidance: 'rubric', answerText: 'my answer', wordCount: 2 });
+        scores.set(sid, { id: sid, runId: id, status: 'QUEUED', runStatus: 'RUNNING', maxMarks: i.maxMarks, questionText: `Q ${i.attemptQuestionId}`, guidance: 'rubric', answerText: 'my answer', wordCount: 2, questionId: `bank-${i.attemptQuestionId}` });
         return sid;
       });
       return { run, scoreIds };
@@ -225,6 +225,26 @@ test('start: a queue failure cancels the run and rethrows', async () => {
   assert.equal([...t.runs.values()][0]?.status, 'CANCELLED');
 });
 
+test('start: blank answers are scored 0 (TOO_SHORT) without a model call; only the rest are queued', async () => {
+  const t = setup({ seed: { questions: [{ id: 'q1', max: 10, blank: true }, { id: 'q2', max: 10 }, { id: 'q3', max: 5, blank: true }] } });
+  const r = await t.service.start({ attemptIds: ['a'] }, ACTOR);
+  assert.equal(r.queued, 3);
+  assert.equal(t.enqueued[0]?.length, 1);
+  const blanks = [...t.scores.values()].filter((s) => !t.enqueued[0]!.includes(s.id));
+  assert.equal(blanks.length, 2);
+  assert.ok(blanks.every((s) => s.status === 'DONE' && s.marks === 0 && JSON.stringify(s.concerns) === '["TOO_SHORT"]'));
+  assert.equal([...t.runs.values()][0]?.done, 2);
+  assert.equal(t.requests.length, 0);
+  assert.equal(t.audits[0]?.metadata?.blankAnswers, 2);
+});
+
+test('start: all answers blank -> run finishes at once and nothing is queued', async () => {
+  const t = setup({ seed: { questions: [{ id: 'q1', max: 10, blank: true }] } });
+  await t.service.start({ attemptIds: ['a'] }, ACTOR);
+  assert.equal(t.enqueued.length, 0);
+  assert.equal([...t.runs.values()][0]?.status, 'DONE');
+});
+
 // ---- queue job body ---------------------------------------------------------------
 
 async function startOne(opts: Parameters<typeof setup>[0] = {}, max = 10) {
@@ -254,6 +274,9 @@ test('process: the grader receives the prompt built from the question and rubric
   assert.equal(req.model, 'gpt-test');
   assert.ok(req.user.includes('my answer') && req.user.includes('rubric') && req.user.includes('MAXIMUM MARKS: 10'));
   assert.ok(req.system.includes('Be strict.'));
+  assert.equal(req.reasoningEffort, 'low');
+  assert.equal(req.cacheKey, 'exam-q-bank-aq-1', 'one cache key per bank question');
+  assert.ok(req.user.lastIndexOf('ANSWER WORD COUNT') > req.user.indexOf('<<<ANSWER_END>>>'), 'per-answer values come after the shared prefix');
 });
 
 test('normaliseMarks clamps to 0…max in 0.5 steps and rejects non-numbers', () => {
@@ -383,9 +406,12 @@ test('backoffDelayMs: exponential, never sooner than a 429 retry-after, capped',
   assert.equal(backoffDelayMs(1, new Error('plain')), 10_000);
 });
 
-test('mergeAi fills defaults and repairs a bad concurrency', () => {
+test('mergeAi fills defaults and repairs a bad concurrency or reasoning effort', () => {
   assert.deepEqual(mergeAi({}), AI_DEFAULTS);
-  assert.equal(mergeAi({ concurrency: 0 }).concurrency, 3);
+  assert.equal(mergeAi({ concurrency: 0 }).concurrency, 5);
+  assert.equal(mergeAi({ concurrency: 99 }).concurrency, 20);
+  assert.equal(mergeAi({}).reasoningEffort, 'low');
+  assert.equal(mergeAi({ reasoningEffort: 'turbo' as never }).reasoningEffort, 'low');
   assert.equal(mergeAi({ concurrency: 2, model: 'm' }).model, 'm');
 });
 
@@ -393,4 +419,10 @@ test('start on chosen attempts from two drives -> 400 MIXED_DRIVES and nothing i
   const { service, enqueued } = setup({ seed: { questions: qs(10), drivesOfAttempts: ['drive-1', 'drive-2'] } });
   await assert.rejects(() => service.start({ attemptIds: ['a', 'b'] }, ACTOR), expectCode('MIXED_DRIVES', 400));
   assert.equal(enqueued.length, 0);
+});
+
+test('isReasoningModel: o-series and gpt-5 take a reasoning effort; others do not', async () => {
+  const { isReasoningModel } = await import('@exam/shared');
+  for (const m of ['o3', 'o4-mini', 'gpt-5', 'gpt-5-mini', ' GPT-5.1 ']) assert.equal(isReasoningModel(m), true, m);
+  for (const m of ['gpt-4o', 'gpt-4.1-mini', 'gpt-test', '']) assert.equal(isReasoningModel(m), false, m);
 });

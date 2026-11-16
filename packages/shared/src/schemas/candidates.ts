@@ -6,10 +6,14 @@
 import { z } from 'zod';
 import { JOB_PROFILE_TYPES, type JobProfileType } from './drives.js';
 
-/** Exam progress, the only statuses written since results moved to their own column. */
-export const CANDIDATE_PROGRESS_STATUSES = ['NOT_STARTED', 'IN_PROGRESS', 'SUBMITTED', 'AUTO_SUBMITTED', 'EVALUATED'] as const;
-/** Every DB value: SHORTLISTED / REJECTED survive only on old history rows. */
-const CANDIDATE_STATUSES = [...CANDIDATE_PROGRESS_STATUSES, 'SHORTLISTED', 'REJECTED'] as const;
+/**
+ * Exam progress, the only statuses written. Being evaluated (marks confirmed) is not a
+ * status: it is read from the attempt's submitted evaluation and shown under Result
+ * (user decision 2026-11-16), so the status keeps saying how the exam ended.
+ */
+export const CANDIDATE_PROGRESS_STATUSES = ['NOT_STARTED', 'IN_PROGRESS', 'SUBMITTED', 'AUTO_SUBMITTED'] as const;
+/** Every DB value: EVALUATED / SHORTLISTED / REJECTED survive only on old history rows. */
+const CANDIDATE_STATUSES = [...CANDIDATE_PROGRESS_STATUSES, 'EVALUATED', 'SHORTLISTED', 'REJECTED'] as const;
 export type CandidateStatus = (typeof CANDIDATE_STATUSES)[number];
 
 /** HR's outcome for an application, kept apart from its exam progress (status). */
@@ -123,8 +127,11 @@ export const CandidateResetSchema = z.object({ reason: z.string().trim().min(10)
 const bool = z.enum(['true', 'false']).transform((v) => v === 'true');
 
 export const CANDIDATE_SORT_KEYS = ['fullName', 'majorCpi', 'xPercentage', 'xiiPercentage', 'createdAt', 'timeTaken', 'marks'] as const;
-/** Result filter: NONE = no decision yet. */
-export const CANDIDATE_RESULT_FILTERS = ['SHORTLISTED', 'REJECTED', 'NONE'] as const;
+/**
+ * Result filter. EVALUATED = marks confirmed, no decision yet; NOT_EVALUATED = marks not
+ * confirmed (includes not started); NONE = no decision (either of those), kept for old links.
+ */
+export const CANDIDATE_RESULT_FILTERS = ['SHORTLISTED', 'REJECTED', 'EVALUATED', 'NOT_EVALUATED', 'NONE'] as const;
 const pctMin = z.coerce.number().min(0).max(100).optional();
 export const CandidateListQuerySchema = z.object({
   search: z.string().trim().max(100).optional(),
@@ -193,6 +200,8 @@ export interface CandidateExamStatsDto {
   totalMarks: number | null;
   maxMarks: number;
   percentage: number | null;
+  /** The evaluation is submitted (marks confirmed); shown as "Evaluated" under Result. */
+  evaluated: boolean;
 }
 
 export interface CandidateListItemDto extends CandidateRowDto {
@@ -239,7 +248,7 @@ export interface CandidateFlagsDto {
 export interface CandidateDetailDto {
   candidate: CandidateRowDto & { extra: Record<string, string> };
   loginLogs: CandidateLoginLogDto[];
-  attempt: { id: string; status: string; startedAt: string; submittedAt: string | null } | null;
+  attempt: { id: string; status: string; startedAt: string; submittedAt: string | null; evaluated: boolean } | null;
   activity: { items: { id: string; type: string; createdAt: string; detail: unknown }[]; total: number; page: number; pageSize: number };
   flags: CandidateFlagsDto;
   /** The same person's other applications (same account), excluding this one. */

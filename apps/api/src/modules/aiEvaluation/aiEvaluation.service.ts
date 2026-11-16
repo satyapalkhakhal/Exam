@@ -7,7 +7,8 @@
 // attempts are ever graded. The processor is the queue job body: it asks the
 // injected grader for one question, validates and clamps the marks, and writes
 // the score and the run counters together. A malformed reply throws so the job
-// retries; the last attempt stores FAILED with a safe reason. The AI never
+// retries; the last attempt stores FAILED with a safe reason. A blank answer is
+// never sent: it is scored 0 at start (flagged TOO_SHORT so a person still looks). The AI never
 // writes human marks: a person accepts them through the marking flow.
 
 import {
@@ -49,10 +50,14 @@ export interface GradableQuestion {
   hasDone: boolean;
   /** Has a QUEUED score in a RUNNING run. */
   hasQueued: boolean;
+  /** No answer, or only whitespace: scored 0 without calling the model. */
+  blank?: boolean;
 }
 
 export interface ScoreForGrading {
   id: string;
+  /** The question bank id, the prompt cache key (same prefix for every answer to it). */
+  questionId?: string;
   status: 'QUEUED' | 'DONE' | 'FAILED';
   runStatus: AiRunStatus;
   maxMarks: number;
@@ -92,7 +97,7 @@ export interface AiEvaluationRepository {
     promptVersion: string;
     createdById: string;
     items: { attemptQuestionId: string; maxMarks: number }[];
-  }): Promise<{ run: RunRow; scoreIds: string[] }>;
+  }): Promise<{ run: RunRow; scoreIds: string[] }>; // scoreIds in the order of items
   listRuns(driveId: string | undefined): Promise<RunRow[]>;
   loadForGrading(scoreId: string): Promise<ScoreForGrading | null>;
   /** QUEUED -> DONE plus run counters; false when the score was no longer QUEUED (e.g. cancelled). */
@@ -147,6 +152,19 @@ export function isExamOver(state: DriveExamState, now: Date): boolean {
 
 const KNOWN_CONCERNS = new Set<string>(AI_CONCERNS);
 
+/** The score stored for a blank answer instead of a model call. */
+export const blankAnswerScore = (): ScoreResult => ({
+  marks: 0,
+  rationale: 'No answer was written, so no marks are awarded. Scored automatically without the AI.',
+  strengths: [],
+  improvements: ['Write an answer to the question.'],
+  confidence: 'HIGH',
+  concerns: ['TOO_SHORT'],
+  model: 'none (blank answer)',
+  inputTokens: 0,
+  outputTokens: 0,
+});
+
 export function createAiEvaluationService(deps: AiEvaluationDeps) {
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
@@ -183,8 +201,12 @@ export function createAiEvaluationService(deps: AiEvaluationDeps) {
       createdById: actor.id,
       items: todo.map((q) => ({ attemptQuestionId: q.attemptQuestionId, maxMarks: q.maxMarks })),
     });
+    // Blank answers are scored 0 here; only the rest become model calls.
+    const blankIds = scoreIds.filter((_, i) => todo[i]!.blank === true);
+    const gradeIds = scoreIds.filter((_, i) => todo[i]!.blank !== true);
     try {
-      await deps.enqueue(scoreIds);
+      for (const id of blankIds) await repo.completeScore(id, blankAnswerScore(), now());
+      if (gradeIds.length > 0) await deps.enqueue(gradeIds);
     } catch (err) {
       await repo.cancelRun(run.id, now());
       throw err;
@@ -194,7 +216,14 @@ export function createAiEvaluationService(deps: AiEvaluationDeps) {
       action: 'AI_EVALUATION_STARTED',
       entity: ENTITY,
       entityId: run.id,
-      metadata: { driveId: input.driveId ?? null, model: cfg.model, promptVersion: PROMPT_VERSION, questions: scoreIds.length, force: input.force === true },
+      metadata: {
+        driveId: input.driveId ?? null,
+        model: cfg.model,
+        promptVersion: PROMPT_VERSION,
+        questions: scoreIds.length,
+        blankAnswers: blankIds.length,
+        force: input.force === true,
+      },
       ip: actor.ip,
     });
     return { run: toRunDto(run), queued: scoreIds.length, alreadyScored };
@@ -239,7 +268,13 @@ export function createAiEvaluationService(deps: AiEvaluationDeps) {
         wordCount: row.wordCount,
         extraInstructions: cfg.gradingInstructions,
       });
-      const graded = await deps.grader.grade({ model: cfg.model, system: prompt.system, user: prompt.user });
+      const graded = await deps.grader.grade({
+        model: cfg.model,
+        system: prompt.system,
+        user: prompt.user,
+        reasoningEffort: cfg.reasoningEffort,
+        ...(row.questionId ? { cacheKey: `exam-q-${row.questionId}` } : {}),
+      });
       const parsed = AiGradeOutputSchema.safeParse(graded.output);
       if (!parsed.success) throw new AiOutputError();
       const out = parsed.data;
@@ -275,7 +310,7 @@ export function createAiEvaluationService(deps: AiEvaluationDeps) {
       answerText: 'The answer is 4.',
       wordCount: 4,
     });
-    const r = await deps.grader.grade({ model: cfg.model, system: prompt.system, user: prompt.user });
+    const r = await deps.grader.grade({ model: cfg.model, system: prompt.system, user: prompt.user, reasoningEffort: cfg.reasoningEffort });
     return { model: r.model };
   }
 

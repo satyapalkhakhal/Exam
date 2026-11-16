@@ -5,11 +5,13 @@
 // API + zodTextFormat). It sets no temperature, so it is safe for reasoning
 // models that reject the parameter. The SDK's own retries are off: BullMQ owns
 // retries so a 429 retry-after can set the job delay. Marks coming back are
-// clamped by `normaliseMarks`, never trusted.
+// clamped by `normaliseMarks`, never trusted. Reasoning models get the configured
+// effort (others reject the parameter); `cacheKey` (the question id) keeps every
+// answer to one question on the same OpenAI prompt cache.
 
 import OpenAI from 'openai';
 import { zodTextFormat } from 'openai/helpers/zod';
-import { AiGradeOutputSchema, type AiGradeOutput } from '@exam/shared';
+import { AiGradeOutputSchema, isReasoningModel, type AiGradeOutput, type AiReasoningEffort } from '@exam/shared';
 import { AiOutputError, AiProviderError } from './aiEvaluation.errors.js';
 import type { AiConfig } from './aiEvaluation.config.js';
 
@@ -17,7 +19,14 @@ export interface GradeRequest {
   model: string;
   system: string;
   user: string;
+  /** Sent only to reasoning models. */
+  reasoningEffort?: AiReasoningEffort;
+  /** Routes requests that share a prompt prefix to the same cache (the question id). */
+  cacheKey?: string;
 }
+
+/** Room for the JSON reply; reasoning models also spend output tokens thinking. */
+const MAX_OUTPUT_TOKENS = { plain: 1_500, reasoning: 8_000 } as const;
 
 export interface GradeResult {
   output: AiGradeOutput;
@@ -74,6 +83,7 @@ export function createOpenAiGrader(getConfig: () => Promise<AiConfig>): AiGrader
     async grade(req) {
       const cfg = await getConfig();
       if (!cfg.apiKey) throw new AiProviderError('OpenAI API key is not set');
+      const reasoning = isReasoningModel(req.model);
       let response;
       try {
         response = await clientFor(cfg.apiKey).responses.parse({
@@ -82,12 +92,17 @@ export function createOpenAiGrader(getConfig: () => Promise<AiConfig>): AiGrader
           input: req.user,
           store: false,
           text: { format: zodTextFormat(AiGradeOutputSchema, 'grade') },
+          max_output_tokens: reasoning ? MAX_OUTPUT_TOKENS.reasoning : MAX_OUTPUT_TOKENS.plain,
+          ...(reasoning && req.reasoningEffort ? { reasoning: { effort: req.reasoningEffort } } : {}),
+          ...(req.cacheKey ? { prompt_cache_key: req.cacheKey } : {}),
         });
       } catch (err) {
         // The SDK throws its own parse error when the JSON does not match the schema.
         if (err instanceof OpenAI.APIError || err instanceof OpenAI.APIConnectionError) throw toProviderError(err);
         throw new AiOutputError();
       }
+      // Cut off at max_output_tokens: retry rather than store a partial reply.
+      if (response.status === 'incomplete') throw new AiOutputError('The model reply was cut off');
       const parsed = AiGradeOutputSchema.safeParse(response.output_parsed);
       if (!parsed.success) throw new AiOutputError();
       return {

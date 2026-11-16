@@ -161,12 +161,13 @@ export function createEvaluationService(deps: EvaluationDeps) {
   /**
    * The completion step shared by Submit and bulk accept: needs every written
    * question marked (`questions` holds the written ones only), writes totals
-   * (written + the MCQ subtotal, floored at 0), moves the candidate to
-   * EVALUATED (history) and audits.
+   * (written + the MCQ subtotal, floored at 0) and audits. The candidate's status is
+   * NOT changed (it keeps saying how the exam ended; "Evaluated" is read from the
+   * submitted evaluation and shown under Result): a history row records the event.
    */
   async function complete(
     tx: EvaluationTx,
-    attempt: { candidateId: string; mcqMarks: Parameters<typeof num>[0]; mcqMaxMarks: Parameters<typeof num>[0] },
+    attempt: { candidateId: string; status: string; mcqMarks: Parameters<typeof num>[0]; mcqMaxMarks: Parameters<typeof num>[0] },
     attemptId: string,
     questions: { id: string; order?: number; maxMarksSnapshot: Parameters<typeof num>[0] }[],
     actor: Actor,
@@ -191,7 +192,8 @@ export function createEvaluationService(deps: EvaluationDeps) {
       num(attempt.mcqMaxMarks) ?? 0,
     );
     await tx.complete(attemptId, actor.id, at, totals);
-    if (!(await tx.transitionCandidate(attempt.candidateId, attemptId, 'EVALUATED', actor.id, null))) {
+    const examStatus = attempt.status === 'AUTO_SUBMITTED' ? 'AUTO_SUBMITTED' : 'SUBMITTED';
+    if (!(await tx.transitionCandidate(attempt.candidateId, attemptId, examStatus, actor.id, 'Marks confirmed (evaluated)'))) {
       throw conflict('This attempt was reset while it was being marked.');
     }
     await tx.audit({ adminId: actor.id, action: 'EVALUATION_SUBMITTED', entity: ENTITY, entityId: attemptId, metadata: { ...totals, ...auditExtra }, ip: actor.ip });

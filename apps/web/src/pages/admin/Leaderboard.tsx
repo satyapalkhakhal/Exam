@@ -134,11 +134,11 @@ export default function Leaderboard() {
                 </TableCell>
                 <TableCell title={flagTitle(r.flagCounts)}>{totalFlags(r.flagCounts) > 0 ? <Badge variant="default">{totalFlags(r.flagCounts)}</Badge> : '-'}</TableCell>
                 <TableCell>{r.nearbyCount ?? '-'}</TableCell>
-                <TableCell><ResultBadge result={r.result} /></TableCell>
+                <TableCell><ResultBadge result={r.result} evaluated={r.evaluated} /></TableCell>
                 <TableCell>
                   <div className="flex gap-1.5">
                     {/* AI-only rows (composite/AI sort) have no submitted human evaluation yet: the server refuses a decision on them. */}
-                    {r.status === 'EVALUATED' ? (
+                    {r.evaluated ? (
                       <>
                         <Button size="sm" variant="outline" disabled={r.result === 'SHORTLISTED'} onClick={() => setTarget({ row: r, decision: 'SHORTLISTED' })}>Shortlist</Button>
                         <Button size="sm" variant="outline" disabled={r.result === 'REJECTED'} onClick={() => setTarget({ row: r, decision: 'REJECTED' })}>Reject</Button>

@@ -9,9 +9,10 @@ import type { Paged } from './users';
 import type { CandidateExamStatsDto, CandidateMatchingIdsDto, CandidateMoveResultDto } from '@exam/shared';
 import { candidateQuery, type CandidateFilters } from '@/lib/candidateQuery';
 
-/** Exam progress only; shortlist / reject live in `result`. */
-export const CANDIDATE_STATUSES = ['NOT_STARTED', 'IN_PROGRESS', 'SUBMITTED', 'AUTO_SUBMITTED', 'EVALUATED'] as const;
-export type CandidateStatus = (typeof CANDIDATE_STATUSES)[number] | 'SHORTLISTED' | 'REJECTED';
+/** Exam progress only; shortlist / reject and "evaluated" live under Result. */
+export const CANDIDATE_STATUSES = ['NOT_STARTED', 'IN_PROGRESS', 'SUBMITTED', 'AUTO_SUBMITTED'] as const;
+/** EVALUATED / SHORTLISTED / REJECTED only on old rows. */
+export type CandidateStatus = (typeof CANDIDATE_STATUSES)[number] | 'EVALUATED' | 'SHORTLISTED' | 'REJECTED';
 export type CandidateResult = 'SHORTLISTED' | 'REJECTED';
 
 export type { CandidateFilters, CandidateSort } from '@/lib/candidateQuery';
@@ -110,7 +111,7 @@ export interface HistoryRow {
 export interface CandidateDetailDto {
   candidate: CandidateDetailProfile;
   loginLogs: LoginLog[];
-  attempt: { id: string; status: string; startedAt: string | null; submittedAt: string | null } | null;
+  attempt: { id: string; status: string; startedAt: string | null; submittedAt: string | null; evaluated?: boolean } | null;
   activity: Paged<ActivityRow>;
   flags: CandidateFlags | null;
   history: HistoryRow[];

@@ -65,6 +65,26 @@ export async function siblingEntry(
   return rows[0] ? { collegeShortCode: rows[0].short_code, batch: rows[0].batch } : null;
 }
 
+/** Marks confirmed: the live (submitted) attempt has a submitted evaluation. */
+const EVALUATED_ATTEMPT: Prisma.ExamAttemptWhereInput = { status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] }, evaluation: { is: { status: 'SUBMITTED' } } };
+
+/** The Result filter: a decision, or (no decision) evaluated / not evaluated yet. */
+function resultWhere(result: CandidateListQuery['result']): Prisma.CandidateWhereInput {
+  switch (result) {
+    case undefined:
+      return {};
+    case 'SHORTLISTED':
+    case 'REJECTED':
+      return { result };
+    case 'NONE':
+      return { result: null };
+    case 'EVALUATED':
+      return { result: null, attempts: { some: EVALUATED_ATTEMPT } };
+    case 'NOT_EVALUATED':
+      return { result: null, attempts: { none: EVALUATED_ATTEMPT } };
+  }
+}
+
 function listWhere(q: CandidateListQuery): Prisma.CandidateWhereInput {
   return {
     ...(q.jobRoleId ? { jobRoleId: q.jobRoleId } : {}),
@@ -81,7 +101,7 @@ function listWhere(q: CandidateListQuery): Prisma.CandidateWhereInput {
       : {}),
     ...(q.jobProfileType ? { jobRole: { type: q.jobProfileType } } : {}),
     ...(q.status ? { status: q.status } : {}),
-    ...(q.result ? { result: q.result === 'NONE' ? null : q.result } : {}),
+    ...resultWhere(q.result),
     // gte never matches NULL, so a set minimum also drops rows without a value.
     ...(q.xMin !== undefined ? { xPercentage: { gte: q.xMin } } : {}),
     ...(q.xiiMin !== undefined ? { xiiPercentage: { gte: q.xiiMin } } : {}),
@@ -344,7 +364,7 @@ export const candidatesRepository: CandidatesRepository = {
       prisma.candidateLoginLog.findMany({ where: { candidateId: id }, orderBy: { createdAt: 'desc' }, take: 200 }),
       prisma.examAttempt.findFirst({
         where: { candidateId: id, status: { not: 'RESET' } },
-        select: { id: true, status: true, startedAt: true, submittedAt: true },
+        select: { id: true, status: true, startedAt: true, submittedAt: true, evaluation: { select: { status: true } } },
       }),
       prisma.activityLog.findMany({ where: { candidateId: id }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], skip, take }),
       prisma.activityLog.count({ where: { candidateId: id } }),
@@ -366,7 +386,7 @@ export const candidatesRepository: CandidatesRepository = {
     return {
       candidate,
       loginLogs,
-      attempt,
+      attempt: attempt ? { id: attempt.id, status: attempt.status, startedAt: attempt.startedAt, submittedAt: attempt.submittedAt, evaluated: attempt.evaluation?.status === 'SUBMITTED' } : null,
       otherApplications: otherApplications.map(({ drive, ...o }) => ({ ...o, driveDisplayName: nameOf({ jobRole: o.jobRole, drive }) })),
       activity: { rows, total },
       history,

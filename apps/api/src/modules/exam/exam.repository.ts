@@ -275,7 +275,8 @@ function txMethods(tx: Tx) {
      * Auto-marks the attempt's MCQs at submit / auto-submit (same transaction as
      * finish): each MCQ's auto mark and the attempt's MCQ subtotal. An attempt with
      * no written questions is also evaluated here (no evaluator): evaluation
-     * SUBMITTED by nobody, totals (floored at 0), candidate EVALUATED with history.
+     * SUBMITTED by nobody, totals (floored at 0), a history row (status unchanged:
+     * "Evaluated" is read from the submitted evaluation).
      */
     async markMcqs(attemptId: string, candidateId: string, at: Date): Promise<{ mcqMarks: number; mcqMaxMarks: number; autoEvaluated: boolean }> {
       const qs = await tx.attemptQuestion.findMany({
@@ -310,9 +311,8 @@ function txMethods(tx: Tx) {
         update: { status: 'SUBMITTED', submittedAt: at, evaluatorId: null, lockedById: null, lockedAt: null },
       });
       const c = await tx.candidate.findUniqueOrThrow({ where: { id: candidateId }, select: { status: true, result: true } });
-      await tx.candidate.update({ where: { id: candidateId }, data: { status: 'EVALUATED' } });
       await tx.candidateStatusHistory.create({
-        data: { candidateId, fromStatus: c.status, toStatus: 'EVALUATED', fromResult: c.result, toResult: c.result, comment: 'Auto-marked (MCQ only)' },
+        data: { candidateId, fromStatus: c.status, toStatus: c.status, fromResult: c.result, toResult: c.result, comment: 'Auto-marked (MCQ only)' },
       });
       return { mcqMarks: sub.total, mcqMaxMarks: sub.max, autoEvaluated: true };
     },

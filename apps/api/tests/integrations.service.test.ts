@@ -264,8 +264,11 @@ test('ai: the key is stored sealed, and omitted/null keeps it while "" clears it
 test('ai: the input schema trims and bounds concurrency; an out-of-range value is rejected', async () => {
   const { AiConfigInputSchema } = await import('@exam/shared');
   assert.equal(AiConfigInputSchema.parse({ enabled: true, model: ' gpt-x ' }).model, 'gpt-x');
-  assert.equal(AiConfigInputSchema.parse({ enabled: true, model: 'm' }).concurrency, 3);
-  assert.equal(AiConfigInputSchema.safeParse({ enabled: true, model: 'm', concurrency: 9 }).success, false);
+  assert.equal(AiConfigInputSchema.parse({ enabled: true, model: 'm' }).concurrency, 5);
+  assert.equal(AiConfigInputSchema.parse({ enabled: true, model: 'm', concurrency: 20 }).concurrency, 20);
+  assert.equal(AiConfigInputSchema.safeParse({ enabled: true, model: 'm', concurrency: 21 }).success, false);
+  assert.equal(AiConfigInputSchema.parse({ enabled: true, model: 'm' }).reasoningEffort, 'low');
+  assert.equal(AiConfigInputSchema.safeParse({ enabled: true, model: 'm', reasoningEffort: 'turbo' }).success, false);
 });
 
 test('ai: save and test are audited without the key', async () => {

@@ -31,6 +31,8 @@ interface ConfirmDialogProps {
    * IP enforcement on) — a reflexive click should not be enough.
    */
   confirmPhrase?: string;
+  /** Keeps the confirm button disabled (e.g. the chosen option is not usable yet). */
+  confirmDisabled?: boolean;
 }
 
 export function ConfirmDialog({
@@ -43,6 +45,7 @@ export function ConfirmDialog({
   isPending,
   variant = 'destructive',
   confirmPhrase,
+  confirmDisabled = false,
 }: ConfirmDialogProps) {
   const [typedPhrase, setTypedPhrase] = useState('');
 
@@ -105,7 +108,7 @@ export function ConfirmDialog({
             variant={variant}
             onClick={onConfirm}
             loading={isPending}
-            disabled={!phraseSatisfied}
+            disabled={!phraseSatisfied || confirmDisabled}
           >
             {confirmLabel}
           </Button>

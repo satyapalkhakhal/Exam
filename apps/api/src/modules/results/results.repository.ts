@@ -146,9 +146,16 @@ export const resultsRepository = {
     return rows.map((r) => ({ driveId: r.drive_id, sum: Math.round(Number(r.sum ?? 0) * 100) / 100, count: Number(r.count) }));
   },
 
+  /** Candidates per drive, status, result and evaluated (submitted evaluation on the live attempt). */
   async statusCounts() {
-    const rows = await prisma.candidate.groupBy({ by: ['driveId', 'status', 'result'], _count: { _all: true } });
-    return rows.map((r) => ({ driveId: r.driveId, status: r.status as CandidateStatusValue, result: r.result, count: r._count._all }));
+    const rows = await prisma.$queryRaw<{ drive_id: string; status: CandidateStatusValue; result: CandidateResult | null; evaluated: boolean; count: bigint }[]>`
+      SELECT c.drive_id::text AS drive_id, c.status::text AS status, c.result::text AS result,
+             (e.status IS NOT NULL AND e.status = 'SUBMITTED') AS evaluated, count(*) AS count
+      FROM candidates c
+      LEFT JOIN exam_attempts a ON a.candidate_id = c.id AND a.status IN ('SUBMITTED', 'AUTO_SUBMITTED')
+      LEFT JOIN attempt_evaluations e ON e.attempt_id = a.id
+      GROUP BY 1, 2, 3, 4`;
+    return rows.map((r) => ({ driveId: r.drive_id, status: r.status, result: r.result, evaluated: r.evaluated, count: Number(r.count) }));
   },
 
   /**
@@ -160,7 +167,7 @@ export const resultsRepository = {
     const evaluated: Prisma.ExamAttemptWhereInput = {
       evaluation: { is: { status: 'SUBMITTED' } },
       totalMarks: { not: null },
-      candidate: { driveId, status: 'EVALUATED' },
+      candidate: { driveId },
     };
     const aiOnly: Prisma.ExamAttemptWhereInput = {
       NOT: { evaluation: { is: { status: 'SUBMITTED' } } },
@@ -199,7 +206,8 @@ export const resultsRepository = {
   },
 
   /**
-   * Sets the result on every EVALUATED candidate whose result differs, in one
+   * Sets the result on every evaluated candidate (submitted evaluation on the live
+   * attempt) whose result differs, in one
    * transaction with the rows locked in id order (as other bulk writes do). One
    * history row (status unchanged, result from/to) and one audit row each.
    */
@@ -212,9 +220,13 @@ export const resultsRepository = {
   ): Promise<{ decided: string[]; skipped: CandidateDecisionBulkResultDto['skipped'] }> {
     return prisma.$transaction(
       async (tx) => {
-        const rows = await tx.$queryRaw<{ id: string; status: CandidateStatusValue; result: CandidateResult | null; candidate_code: string; full_name: string }[]>`
-          SELECT id::text, status::text AS status, result::text AS result, candidate_code, full_name
-          FROM candidates WHERE id = ANY(${ids}::uuid[]) ORDER BY id FOR UPDATE`;
+        const rows = await tx.$queryRaw<{ id: string; status: CandidateStatusValue; result: CandidateResult | null; candidate_code: string; full_name: string; evaluated: boolean }[]>`
+          SELECT c.id::text, c.status::text AS status, c.result::text AS result, c.candidate_code, c.full_name,
+                 EXISTS (
+                   SELECT 1 FROM exam_attempts a JOIN attempt_evaluations e ON e.attempt_id = a.id AND e.status = 'SUBMITTED'
+                   WHERE a.candidate_id = c.id AND a.status IN ('SUBMITTED', 'AUTO_SUBMITTED')
+                 ) AS evaluated
+          FROM candidates c WHERE c.id = ANY(${ids}::uuid[]) ORDER BY c.id FOR UPDATE OF c`;
         const byId = new Map(rows.map((r) => [r.id, r]));
         const decided: string[] = [];
         const skipped: CandidateDecisionBulkResultDto['skipped'] = [];
@@ -225,7 +237,7 @@ export const resultsRepository = {
             skipped.push({ candidateId: id, candidateCode: null, fullName: null, reason: 'NOT_FOUND' });
             continue;
           }
-          const reason = c.status !== 'EVALUATED' ? 'NOT_EVALUATED' : c.result === decision ? 'ALREADY_DECIDED' : null;
+          const reason = !c.evaluated ? 'NOT_EVALUATED' : c.result === decision ? 'ALREADY_DECIDED' : null;
           if (reason) {
             skipped.push({ candidateId: id, candidateCode: c.candidate_code, fullName: c.full_name, reason });
             continue;

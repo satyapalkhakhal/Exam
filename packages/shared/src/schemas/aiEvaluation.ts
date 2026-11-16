@@ -10,7 +10,16 @@ const uuid = z.string().uuid();
 
 // ---- OpenAI integration (Admin → Integrations) --------------------------------
 
-export const AI_CONCURRENCY_MAX = 5;
+export const AI_CONCURRENCY_MAX = 20;
+export const AI_CONCURRENCY_DEFAULT = 5;
+
+/** OpenAI reasoning effort; only sent to reasoning models (see isReasoningModel). */
+export const AI_REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high'] as const;
+export type AiReasoningEffort = (typeof AI_REASONING_EFFORTS)[number];
+export const AI_REASONING_EFFORT_DEFAULT: AiReasoningEffort = 'low';
+
+/** o-series and gpt-5 family models take a reasoning effort; others reject the parameter. */
+export const isReasoningModel = (model: string): boolean => /^(o\d|gpt-5)/i.test(model.trim());
 
 /** apiKey: omitted/null keeps the stored key, '' clears it (same rule as other secrets). */
 export const AiConfigInputSchema = z.object({
@@ -18,7 +27,9 @@ export const AiConfigInputSchema = z.object({
   apiKey: z.string().trim().max(500).nullable().optional(),
   /** OpenAI model id chosen by the admin, e.g. the org's preferred GPT model. */
   model: z.string().trim().max(100),
-  concurrency: z.number().int().min(1).max(AI_CONCURRENCY_MAX).default(3),
+  concurrency: z.number().int().min(1).max(AI_CONCURRENCY_MAX).default(AI_CONCURRENCY_DEFAULT),
+  /** Reasoning models only; lower is faster and cheaper. */
+  reasoningEffort: z.enum(AI_REASONING_EFFORTS).default(AI_REASONING_EFFORT_DEFAULT),
   /** Optional extra grading instructions appended to the system prompt. */
   gradingInstructions: z.string().max(4_000).default(''),
 });
@@ -29,6 +40,7 @@ export interface MaskedAiConfig {
   apiKey: { set: boolean; last4: string | null };
   model: string;
   concurrency: number;
+  reasoningEffort: AiReasoningEffort;
   gradingInstructions: string;
 }
 

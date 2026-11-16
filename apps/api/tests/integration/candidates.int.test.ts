@@ -611,6 +611,21 @@ test('result filter: SHORTLISTED, REJECTED, NONE', async () => {
   assert.equal((await sa.get('/api/admin/candidates?result=MAYBE')).status, 400);
 });
 
+test('result filter: EVALUATED = marks confirmed and no decision; NOT_EVALUATED = marks not confirmed; status=EVALUATED is retired', async () => {
+  const { ids } = await fixture();
+  const asc = 'sort=fullName&dir=asc';
+  // B is evaluated and rejected; with its decision cleared it is "evaluated, awaiting decision".
+  await prisma.candidate.update({ where: { id: ids.B! }, data: { result: null } });
+  try {
+    assert.deepEqual(await listCodes('result=EVALUATED'), ['B']);
+    assert.deepEqual(await listCodes(`result=NOT_EVALUATED&${asc}`), ['C', 'D', 'E', 'F'], 'C has an unsubmitted evaluation; E only a reset attempt');
+  } finally {
+    await prisma.candidate.update({ where: { id: ids.B! }, data: { result: 'REJECTED' } });
+  }
+  assert.deepEqual(await listCodes('result=EVALUATED'), [], 'a decided candidate shows its decision instead');
+  assert.equal((await sa.get('/api/admin/candidates?status=EVALUATED')).status, 400);
+});
+
 test('min filters combine; cpiMin=0 excludes null CPI', async () => {
   const asc = 'sort=fullName&dir=asc';
   assert.deepEqual(await listCodes(`xMin=80&${asc}`), ['A', 'D', 'E']);
@@ -659,9 +674,10 @@ test('list item exam stats: answered/question counts, marks null until evaluatio
     totalMarks: 16,
     maxMarks: 20,
     percentage: 80,
+    evaluated: true,
   });
   assert.equal(by.get('A')!.result, 'SHORTLISTED');
-  assert.deepEqual({ ...by.get('C')!.exam, startedAt: undefined, submittedAt: undefined }, { startedAt: undefined, submittedAt: undefined, answeredCount: 2, questionCount: 2, totalMarks: null, maxMarks: 20, percentage: null });
+  assert.deepEqual({ ...by.get('C')!.exam, startedAt: undefined, submittedAt: undefined }, { startedAt: undefined, submittedAt: undefined, answeredCount: 2, questionCount: 2, totalMarks: null, maxMarks: 20, percentage: null, evaluated: false });
   assert.equal(by.get('D')!.exam, null);
   assert.equal(by.get('E')!.exam, null, 'a reset attempt is not the current one');
   assert.equal(by.get('F')!.exam!.submittedAt, null);

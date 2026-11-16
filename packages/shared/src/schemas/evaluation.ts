@@ -192,6 +192,8 @@ export interface LeaderboardRowDto extends CandidatePiiDto {
   candidateCode: string;
   status: string;
   result: CandidateResult | null;
+  /** Marks confirmed (submitted evaluation); only then can HR shortlist or reject. */
+  evaluated: boolean;
   submittedAt: string | null;
   totalMarks: number;
   maxMarks: number;

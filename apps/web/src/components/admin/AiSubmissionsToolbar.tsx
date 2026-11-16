@@ -1,7 +1,7 @@
 // src/components/admin/AiSubmissionsToolbar.tsx
 // Why: Super Admin controls for AI evaluation on the Submissions page (docs/ai-evaluation.md
-// §2, §9): start a run for the filtered drive (spec 2026-11-10: AI grading is per
-// drive), watch its progress, and bulk-accept AI marks.
+// §2, §9): start a run for the ticked submissions (one drive) or the whole filtered drive
+// (spec 2026-11-10), watch its progress, and bulk-accept AI marks.
 // The server enforces everything (exam over, AI configured, locks); this only explains it.
 
 import { useEffect, useRef, useState } from 'react';
@@ -40,7 +40,8 @@ interface Props {
 
 export function AiSubmissionsToolbar({ driveId, total, selectedIds, selectedDriveNames, onClearSelection }: Props) {
   const qc = useQueryClient();
-  const runs = useAiRuns(driveId, Boolean(driveId));
+  // Without a drive filter this lists recent runs of every drive, so a run on ticked rows still shows progress.
+  const runs = useAiRuns(driveId, true);
   const start = useStartAiRun();
   const cancel = useCancelAiRun();
   const accept = useBulkAcceptAi();
@@ -48,6 +49,7 @@ export function AiSubmissionsToolbar({ driveId, total, selectedIds, selectedDriv
   const [force, setForce] = useState(false);
   const [accepting, setAccepting] = useState(false);
   const [scope, setScope] = useState<'selected' | 'role'>('role');
+  const [evalScope, setEvalScope] = useState<'selected' | 'role'>('role');
   const [onlyClean, setOnlyClean] = useState(true);
 
   const running = hasRunningRun(runs.data);
@@ -65,17 +67,27 @@ export function AiSubmissionsToolbar({ driveId, total, selectedIds, selectedDriv
   const closeAccept = () => { setAccepting(false); accept.reset(); };
   const useSelected = scope === 'selected' && selectedIds.length > 0;
   const mixed = selectionSpansDrives(selectedDriveNames);
+  const evalSelected = evalScope === 'selected' && selectedIds.length > 0;
+  // Ticked rows (all from one drive) or a drive in the filter. A whole-drive run waits for the
+  // drive's running one; ticked rows already queued are skipped by the server.
+  const canEvaluate = (selectedIds.length > 0 && !mixed) || Boolean(driveId);
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <Button disabled={!driveId || running} onClick={() => setEvaluating(true)} title={driveId ? undefined : 'Filter by one drive first'}>
+        <Button
+          disabled={!canEvaluate || (Boolean(driveId) && selectedIds.length === 0 && running)}
+          onClick={() => { setEvalScope(selectedIds.length > 0 && !mixed ? 'selected' : 'role'); setEvaluating(true); }}
+          title={canEvaluate ? undefined : 'Tick submissions from one drive, or filter by one drive'}
+        >
           Evaluate with AI
         </Button>
         <Button variant="outline" onClick={() => { setScope(selectedIds.length > 0 ? 'selected' : 'role'); setAccepting(true); }} disabled={!driveId && selectedIds.length === 0}>
           Bulk accept AI marks
         </Button>
-        {!driveId && <span className="text-xs text-muted-foreground">Pick a drive in the Job profile column filter to evaluate it.</span>}
+        {!driveId && selectedIds.length === 0 && (
+          <span className="text-xs text-muted-foreground">Tick submissions, or pick a drive in the Job profile column filter to evaluate a whole drive.</span>
+        )}
         {mixed && <span className="text-xs text-destructive" role="status">Select submissions from one drive.</span>}
       </div>
 
@@ -105,17 +117,44 @@ export function AiSubmissionsToolbar({ driveId, total, selectedIds, selectedDriv
         variant="default"
         confirmLabel="Start evaluation"
         isPending={start.isPending}
-        onConfirm={() => start.mutate({ driveId, force }, { onSuccess: closeEvaluate })}
+        confirmDisabled={(evalSelected && mixed) || (!evalSelected && (!driveId || running))}
+        onConfirm={() =>
+          start.mutate(evalSelected ? { attemptIds: selectedIds, force } : { driveId, force }, {
+            // Nothing queued: stay open and say why instead of closing silently.
+            onSuccess: (r) => { if (r.run) closeEvaluate(); },
+          })
+        }
         description={
           <>
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium text-foreground">Which submissions</legend>
+              <div className="flex items-center gap-2">
+                <input type="radio" id="ai-sel" name="ai-scope" className="accent-primary" checked={evalScope === 'selected'} disabled={selectedIds.length === 0 || mixed} onChange={() => setEvalScope('selected')} />
+                <Label htmlFor="ai-sel">Selected rows ({selectedIds.length})</Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <input type="radio" id="ai-role" name="ai-scope" className="accent-primary" checked={evalScope === 'role'} disabled={!driveId} onChange={() => setEvalScope('role')} />
+                <Label htmlFor="ai-role">
+                  {driveId ? `The whole drive (about ${total} submission${total === 1 ? '' : 's'})` : 'The whole drive (pick a drive in the filter first)'}
+                </Label>
+              </div>
+            </fieldset>
+            {!evalSelected && driveId && running && <p className="text-sm text-muted-foreground">An AI run for this drive is already in progress.</p>}
             <p>
-              About {total} submission{total === 1 ? '' : 's'} match the current filters. The AI will grade the submitted answers of this drive,
-              which sends their text (without names or academics) to OpenAI. It only suggests marks; a person confirms them.
+              The AI grades the submitted written answers, which sends their text (without names or academics) to OpenAI. It only suggests marks;
+              a person confirms them. A whole drive can only be graded once its exam is over.
             </p>
             <div className="flex items-center gap-2">
               <Checkbox id="ai-force" checked={force} onChange={(e) => setForce(e.target.checked)} />
               <Label htmlFor="ai-force">Re-grade answers that already have an AI score</Label>
             </div>
+            {start.data && !start.data.run && (
+              <p role="status" className="text-sm text-foreground">
+                {start.data.alreadyScored > 0
+                  ? `Nothing new to grade: ${start.data.alreadyScored} answer${start.data.alreadyScored === 1 ? '' : 's'} already have an AI score. Tick "Re-grade" to score them again.`
+                  : 'Nothing to grade: these submissions have no written answers (MCQs are marked automatically).'}
+              </p>
+            )}
             {start.isError && <ErrorText error={start.error} />}
           </>
         }

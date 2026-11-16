@@ -8,13 +8,14 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { AlertTriangle } from 'lucide-react';
-import { AI_CONCURRENCY_MAX, type AiConfigInput, type MaskedAiConfig } from '@exam/shared';
+import { AI_CONCURRENCY_MAX, AI_REASONING_EFFORTS, isReasoningModel, type AiConfigInput, type MaskedAiConfig } from '@exam/shared';
 import { MAX_EMAIL_CC, invalidEmailInList, parseEmailList } from '@exam/shared';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import {
@@ -225,6 +226,7 @@ const aiSchema = z.object({
   apiKey: z.string(),
   model: z.string().trim().min(1, 'Enter the model id').max(100, 'At most 100 characters'),
   concurrency: z.number({ invalid_type_error: 'Enter 1 to ' + AI_CONCURRENCY_MAX }).int('Whole number').min(1, 'At least 1').max(AI_CONCURRENCY_MAX, `At most ${AI_CONCURRENCY_MAX}`),
+  reasoningEffort: z.enum(AI_REASONING_EFFORTS),
   gradingInstructions: z.string().max(4000, 'At most 4,000 characters'),
 });
 
@@ -234,13 +236,13 @@ function AiCard({ saved }: { saved: MaskedAiConfig }) {
   const [clearKey, setClearKey] = useState(false);
   const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm<z.infer<typeof aiSchema>>({
     resolver: zodResolver(aiSchema),
-    defaultValues: { enabled: saved.enabled, apiKey: '', model: saved.model, concurrency: saved.concurrency, gradingInstructions: saved.gradingInstructions },
+    defaultValues: { enabled: saved.enabled, apiKey: '', model: saved.model, concurrency: saved.concurrency, reasoningEffort: saved.reasoningEffort, gradingInstructions: saved.gradingInstructions },
   });
   const typedKey = watch('apiKey').trim();
   const onSubmit = handleSubmit((v) => {
     // Blank keeps the stored key; '' is the explicit clear.
     const apiKey = clearKey ? '' : typedKey !== '' ? typedKey : undefined;
-    const body: AiConfigInput = { enabled: v.enabled, model: v.model, concurrency: v.concurrency, gradingInstructions: v.gradingInstructions, ...(apiKey !== undefined ? { apiKey } : {}) };
+    const body: AiConfigInput = { enabled: v.enabled, model: v.model, concurrency: v.concurrency, reasoningEffort: v.reasoningEffort, gradingInstructions: v.gradingInstructions, ...(apiKey !== undefined ? { apiKey } : {}) };
     save.mutate(body, { onSuccess: () => setClearKey(false) });
   });
   return (
@@ -284,7 +286,20 @@ function AiCard({ saved }: { saved: MaskedAiConfig }) {
           <div className="space-y-1.5">
             <Label htmlFor="ai-concurrency">Concurrency (1 to {AI_CONCURRENCY_MAX})</Label>
             <Input id="ai-concurrency" type="number" min={1} max={AI_CONCURRENCY_MAX} className="w-28" error={errors.concurrency?.message} {...register('concurrency', { valueAsNumber: true })} />
-            <p className="text-xs text-muted-foreground">How many answers are graded at the same time. Lower it if OpenAI rate-limits you.</p>
+            <p className="text-xs text-muted-foreground">
+              How many answers are graded at the same time; higher finishes a drive faster. Lower it if OpenAI rate-limits you. Applies within 30 seconds of saving.
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ai-effort">Reasoning effort</Label>
+            <Select id="ai-effort" className="w-40" {...register('reasoningEffort')}>
+              {AI_REASONING_EFFORTS.map((e) => <option key={e} value={e}>{e[0]!.toUpperCase() + e.slice(1)}</option>)}
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {isReasoningModel(watch('model'))
+                ? 'Lower is faster and cheaper; Low is usually enough for grading. "Minimal" works on gpt-5 models only.'
+                : 'Only used by reasoning models (o-series, gpt-5); ignored for this model.'}
+            </p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="ai-instructions">Grading instructions</Label>

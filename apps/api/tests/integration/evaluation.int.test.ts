@@ -280,7 +280,7 @@ test('submit with a missing question is 400', async () => {
   assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } })).status, 'SUBMITTED');
 });
 
-test('submit complete: totals computed, candidate EVALUATED with history, audited, lock released', async () => {
+test('submit complete: totals computed, status kept (evaluated is under Result) with history, audited, lock released', async () => {
   const res = await save('a', [
     { attemptQuestionId: aqIds[0]!, marks: 7.5, comment: 'Good' },
     { attemptQuestionId: aqIds[1]!, marks: 2 },
@@ -289,10 +289,12 @@ test('submit complete: totals computed, candidate EVALUATED with history, audite
   assert.deepEqual(res.body.data, { evaluationStatus: 'SUBMITTED', totalMarks: 9.5, maxMarks: 15, percentage: 63.33 });
 
   const c = await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } });
-  assert.equal(c.status, 'EVALUATED');
-  const h = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId, toStatus: 'EVALUATED' } });
-  assert.equal(h.fromStatus, 'SUBMITTED');
+  assert.equal(c.status, 'SUBMITTED', 'the status keeps saying how the exam ended');
+  const h = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId, comment: 'Marks confirmed (evaluated)' } });
+  assert.deepEqual([h.fromStatus, h.toStatus], ['SUBMITTED', 'SUBMITTED']);
   assert.equal(h.byAdminId, adminIds.a);
+  const list = await agents.sa.get(`/api/admin/candidates?search=${encodeURIComponent(c.candidateCode)}`);
+  assert.equal(list.body.data.items[0].exam.evaluated, true, 'the list reports it as evaluated');
   const a = await prisma.examAttempt.findUniqueOrThrow({ where: { id: attemptId } });
   assert.equal(a.totalMarks?.toNumber(), 9.5);
   assert.equal(a.percentage?.toNumber(), 63.33);
@@ -315,17 +317,17 @@ test('an Evaluator calling decision, reopen, leaderboard or exports is 403', asy
   assert.equal((await agents.a.get(`/api/admin/leaderboard?driveId=${drv[roleId]!.driveId}`)).status, 403);
   assert.equal((await agents.a.get('/api/admin/exports/results.xlsx')).status, 403);
   assert.equal((await agents.a.get('/api/admin/exports/activity.xlsx')).status, 403);
-  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } })).status, 'EVALUATED');
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } })).status, 'SUBMITTED');
 });
 
-test('SA decision: shortlist from EVALUATED sets result, keeps status, with history; refused from a non-evaluated status', async () => {
+test('SA decision: shortlist once evaluated sets result, keeps status, with history; refused when not evaluated', async () => {
   const d = await agents.sa.post(`/api/admin/candidates/${candidateId}/decision`).send({ decision: 'SHORTLISTED', comment: 'Strong' });
   assert.equal(d.status, 200, JSON.stringify(d.body));
   const row = await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } });
-  assert.deepEqual({ status: row.status, result: row.result, by: row.resultById }, { status: 'EVALUATED', result: 'SHORTLISTED', by: adminIds.sa });
+  assert.deepEqual({ status: row.status, result: row.result, by: row.resultById }, { status: 'SUBMITTED', result: 'SHORTLISTED', by: adminIds.sa });
   assert.ok(row.resultAt);
   const h = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId, toResult: 'SHORTLISTED' } });
-  assert.deepEqual({ fromStatus: h.fromStatus, toStatus: h.toStatus, fromResult: h.fromResult }, { fromStatus: 'EVALUATED', toStatus: 'EVALUATED', fromResult: null });
+  assert.deepEqual({ fromStatus: h.fromStatus, toStatus: h.toStatus, fromResult: h.fromResult }, { fromStatus: 'SUBMITTED', toStatus: 'SUBMITTED', fromResult: null });
   assert.equal(h.comment, 'Strong');
   assert.equal((await agents.sa.post(`/api/admin/candidates/${candidateId}/decision`).send({ decision: 'SHORTLISTED' })).status, 409);
   assert.equal(await prisma.adminAuditLog.count({ where: { action: 'CANDIDATE_DECISION', entityId: candidateId } }), 1);
@@ -344,7 +346,8 @@ test('leaderboard: evaluated only, by total desc then submittedAt asc, with rank
   assert.deepEqual(items.map((i) => i.rank), [1, 2, 3]);
   assert.equal(items[0]!.totalMarks, 9);
   assert.ok(items[0]!.fullName);
-  assert.deepEqual(items[0]!.questionMarks, [{ order: 1, marks: 9, maxMarks: 10 }]);
+  assert.deepEqual(items[0]!.questionMarks, [{ order: 1, marks: 9, aiMarks: null, maxMarks: 10 }]);
+  assert.ok((items as unknown as { evaluated: boolean }[]).every((i) => i.evaluated));
 });
 
 test('SA reopen: evaluation back to DRAFT, candidate back to the submitted status, logged', async () => {
@@ -352,9 +355,8 @@ test('SA reopen: evaluation back to DRAFT, candidate back to the submitted statu
   assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.equal((await prisma.attemptEvaluation.findUniqueOrThrow({ where: { attemptId } })).status, 'DRAFT');
   assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } })).status, 'SUBMITTED');
-  const h = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId, toStatus: 'SUBMITTED' } });
-  assert.equal(h.fromStatus, 'EVALUATED');
-  assert.equal(h.comment, 'Recheck Q2');
+  const h = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId, comment: 'Recheck Q2' } });
+  assert.deepEqual([h.fromStatus, h.toStatus], ['SUBMITTED', 'SUBMITTED']);
   // reopen clears the result (it was SHORTLISTED by the decision test)
   const after = await prisma.candidate.findUniqueOrThrow({ where: { id: candidateId } });
   assert.deepEqual({ result: after.result, at: after.resultAt, by: after.resultById }, { result: null, at: null, by: null });
@@ -802,7 +804,7 @@ test('evaluator submits written marks; total includes MCQ marks', async () => {
   assert.deepEqual(res.body.data, { evaluationStatus: 'SUBMITTED', totalMarks: 5.5, maxMarks: 8, percentage: 68.75 });
   const a = await prisma.examAttempt.findUniqueOrThrow({ where: { id: s.attemptId } });
   assert.deepEqual([a.totalMarks?.toNumber(), a.maxMarks.toNumber(), a.mcqMarks?.toNumber()], [5.5, 8, 1.5]);
-  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: s.candidateId } })).status, 'EVALUATED');
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: s.candidateId } })).status, 'SUBMITTED');
   // Reopen keeps the MCQ subtotal (it is not the evaluator's mark).
   assert.equal((await agents.sa.post(`/api/admin/submissions/${s.attemptId}/reopen`).send({ reason: 'Recheck' })).status, 200);
   assert.equal((await prisma.examAttempt.findUniqueOrThrow({ where: { id: s.attemptId } })).mcqMarks?.toNumber(), 1.5);

@@ -288,7 +288,7 @@ export default function CandidateDetail() {
           <h1 className="text-xl font-semibold text-foreground">{c.fullName}</h1>
           <p className="text-sm text-muted-foreground">
             <span className="font-mono">{c.candidateCode}</span> · {c.driveDisplayName}{c.jobProfileType === 'INTERNSHIP' && <> <Badge variant="secondary">Internship</Badge></>} · <Badge variant="outline">{statusText(c.status)}</Badge>
-            {c.result && <> <ResultBadge result={c.result} /></>}
+            {(c.result || attempt?.evaluated) && <> <ResultBadge result={c.result} evaluated={attempt?.evaluated} /></>}
             {attempt && <> · attempt {statusText(attempt.status)}</>}
           </p>
         </div>

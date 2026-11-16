@@ -181,6 +181,7 @@ export function createResultsService(deps: ResultsDeps) {
         ...toCandidatePii(r.candidate),
         status: r.candidate.status,
         result: r.candidate.result,
+        evaluated: r.evaluation?.status === 'SUBMITTED',
         submittedAt: r.submittedAt?.toISOString() ?? null,
         totalMarks: num(r.totalMarks) ?? 0,
         maxMarks: num(r.maxMarks) ?? 0,
@@ -245,8 +246,11 @@ export function createResultsService(deps: ResultsDeps) {
       const dto = rowFor.get(c.driveId);
       if (!dto) continue;
       dto.imported += c.count;
-      // A decided candidate counts under its result, not under "evaluated" (awaiting a decision).
+      // A decided candidate counts under its result; an evaluated one (marks confirmed, no
+      // decision) under "evaluated"; the rest under their exam status. Old rows may still
+      // carry the retired EVALUATED status until the data migration has run.
       if (c.result) (dto[STATUS_KEYS[c.result]] as number) += c.count;
+      else if (c.evaluated || c.status === 'EVALUATED') dto.evaluated += c.count;
       else (dto[STATUS_KEYS[c.status]] as number) += c.count;
     }
     for (const dto of rows.values()) dto.pendingEvaluation = dto.submitted + dto.autoSubmitted;

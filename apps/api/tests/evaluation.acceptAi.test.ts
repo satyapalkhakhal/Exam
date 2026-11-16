@@ -1,5 +1,5 @@
 // Bulk accept of AI marks (Super Admin): every skip reason, the success path
-// through the shared completion step (totals, EVALUATED move, history audit),
+// through the shared completion step (totals, status kept + history, audit),
 // per-script isolation and the single summary audit row. In-memory repository.
 
 import { test } from 'node:test';
@@ -116,7 +116,7 @@ function setup(attempts: Att[], flags: Record<string, Record<string, number>> = 
 
 const reasonOf = (r: { skipped: { attemptId: string; reason: AiAcceptSkipReason }[] }, id: string) => r.skipped.find((s) => s.attemptId === id)?.reason;
 
-test('accepts a clean script: AI marks written as the actor with provenance, totals, EVALUATED, audit', async () => {
+test('accepts a clean script: AI marks written as the actor with provenance, totals, status kept (evaluated is under Result), audit', async () => {
   const a = attempt('a1');
   const { service, audits, transitions } = setup([a]);
   const r = await service.acceptAi({ attemptIds: ['a1'], onlyClean: true }, ACTOR);
@@ -124,8 +124,8 @@ test('accepts a clean script: AI marks written as the actor with provenance, tot
   assert.deepEqual(a.marks.get('a1-1'), { marks: 8, aiScoreId: 'ai-a1-1', evaluatorId: 'admin-1' });
   assert.deepEqual(a.marks.get('a1-2'), { marks: 6.5, aiScoreId: 'ai-a1-2', evaluatorId: 'admin-1' });
   assert.equal(a.evaluation.status, 'SUBMITTED');
-  assert.equal(a.candidateStatus, 'EVALUATED');
-  assert.deepEqual(transitions, [{ candidateId: 'cand-a1', to: 'EVALUATED', by: 'admin-1' }]);
+  assert.equal(a.candidateStatus, 'SUBMITTED', 'the status keeps saying how the exam ended');
+  assert.deepEqual(transitions, [{ candidateId: 'cand-a1', to: 'SUBMITTED', by: 'admin-1' }]);
   const submitted = audits.find((x) => x.action === 'EVALUATION_SUBMITTED')!;
   assert.deepEqual(submitted.metadata, { totalMarks: 14.5, maxMarks: 20, percentage: 72.5, viaAi: true });
   const summary = audits.filter((x) => x.action === 'EVALUATIONS_BULK_ACCEPTED_AI');
@@ -226,4 +226,13 @@ test('bulk accept on chosen attempts from two drives -> 400 MIXED_DRIVES, nothin
     (e: unknown) => (e as { code?: string; statusCode?: number }).code === 'MIXED_DRIVES' && (e as { statusCode?: number }).statusCode === 400,
   );
   assert.equal(audits.length, 0);
+});
+
+test('accept on an auto-submitted script keeps AUTO_SUBMITTED', async () => {
+  const a = attempt('a9', { status: 'AUTO_SUBMITTED', candidateStatus: 'AUTO_SUBMITTED' });
+  const { service, transitions } = setup([a]);
+  await service.acceptAi({ attemptIds: ['a9'], onlyClean: true }, ACTOR);
+  assert.equal(a.evaluation.status, 'SUBMITTED');
+  assert.equal(a.candidateStatus, 'AUTO_SUBMITTED');
+  assert.deepEqual(transitions, [{ candidateId: 'cand-a9', to: 'AUTO_SUBMITTED', by: 'admin-1' }]);
 });

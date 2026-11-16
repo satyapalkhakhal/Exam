@@ -29,7 +29,7 @@ test('candidateQuery: result NONE and sorts pass through, page params only when 
 
 test('marksText formats and dashes', () => {
   assert.equal(marksText(null), '-');
-  const exam = { startedAt: 'x', submittedAt: 'y', answeredCount: 2, questionCount: 2, maxMarks: 50 };
+  const exam = { startedAt: 'x', submittedAt: 'y', answeredCount: 2, questionCount: 2, maxMarks: 50, evaluated: true };
   assert.equal(marksText({ ...exam, totalMarks: null, percentage: null }), '-');
   assert.equal(marksText({ ...exam, totalMarks: 38, percentage: 76 }), '38 / 50 (76%)');
   assert.equal(marksText({ ...exam, totalMarks: 37.5, percentage: 75 }), '37.5 / 50 (75%)');

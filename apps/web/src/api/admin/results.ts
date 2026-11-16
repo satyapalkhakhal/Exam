@@ -13,6 +13,8 @@ export interface LeaderboardRow extends SaPii {
   rank: number;
   candidateCode: string;
   status: string;
+  /** Marks confirmed (submitted evaluation); only then can HR shortlist or reject. */
+  evaluated: boolean;
   result: 'SHORTLISTED' | 'REJECTED' | null;
   submittedAt: string | null;
   totalMarks: number;

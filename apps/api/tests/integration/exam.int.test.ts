@@ -841,8 +841,8 @@ test('auto-submit auto-marks and auto-evaluates an MCQ-only attempt', async () =
   assert.equal(a.evaluation?.evaluatorId, null);
   assert.deepEqual([Number(a.totalMarks), Number(a.maxMarks), Number(a.percentage)], [0, 3, 0], 'total floored at 0');
   const c = await prisma.candidate.findUniqueOrThrow({ where: { id: who.id } });
-  assert.equal(c.status, 'EVALUATED');
-  const history = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId: who.id, toStatus: 'EVALUATED' } });
-  assert.equal(history.comment, 'Auto-marked (MCQ only)');
+  assert.equal(c.status, 'AUTO_SUBMITTED', 'the status keeps saying how the exam ended; evaluated is under Result');
+  const history = await prisma.candidateStatusHistory.findFirstOrThrow({ where: { candidateId: who.id, comment: 'Auto-marked (MCQ only)' } });
+  assert.deepEqual([history.fromStatus, history.toStatus], ['AUTO_SUBMITTED', 'AUTO_SUBMITTED']);
   assert.equal(await prisma.activityLog.count({ where: { attemptId, eventType: 'EXAM_AUTO_MARKED' } }), 1);
 });

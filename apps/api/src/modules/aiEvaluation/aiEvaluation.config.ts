@@ -3,6 +3,7 @@
 // readiness check. The API key is a sealed secret (systemConfig SECRET_FIELDS);
 // it is read here and handed to the OpenAI client, never logged or returned.
 
+import { AI_CONCURRENCY_DEFAULT, AI_CONCURRENCY_MAX, AI_REASONING_EFFORTS, AI_REASONING_EFFORT_DEFAULT, type AiReasoningEffort } from '@exam/shared';
 import { getConfig } from '../systemConfig/index.js';
 
 export interface AiConfig {
@@ -10,6 +11,7 @@ export interface AiConfig {
   apiKey: string;
   model: string;
   concurrency: number;
+  reasoningEffort: AiReasoningEffort;
   gradingInstructions: string;
 }
 
@@ -19,13 +21,16 @@ export const AI_DEFAULTS: AiConfig = {
   enabled: false,
   apiKey: '',
   model: '',
-  concurrency: 3,
+  concurrency: AI_CONCURRENCY_DEFAULT,
+  reasoningEffort: AI_REASONING_EFFORT_DEFAULT,
   gradingInstructions: '',
 };
 
 export const mergeAi = (raw: Partial<AiConfig>): AiConfig => {
   const out = { ...AI_DEFAULTS, ...raw };
   if (!Number.isInteger(out.concurrency) || out.concurrency < 1) out.concurrency = AI_DEFAULTS.concurrency;
+  if (out.concurrency > AI_CONCURRENCY_MAX) out.concurrency = AI_CONCURRENCY_MAX;
+  if (!(AI_REASONING_EFFORTS as readonly string[]).includes(out.reasoningEffort)) out.reasoningEffort = AI_DEFAULTS.reasoningEffort;
   return out;
 };
 

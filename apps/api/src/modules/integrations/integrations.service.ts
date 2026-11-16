@@ -72,6 +72,7 @@ export function createIntegrationsService(deps: IntegrationsDeps) {
     apiKey: mask(c.apiKey),
     model: c.model,
     concurrency: c.concurrency,
+    reasoningEffort: c.reasoningEffort,
     gradingInstructions: c.gradingInstructions,
   });
 
@@ -154,6 +155,7 @@ export function createIntegrationsService(deps: IntegrationsDeps) {
       apiKey: input.apiKey === '' ? '' : keep(input.apiKey, current.apiKey),
       model: input.model,
       concurrency: input.concurrency ?? current.concurrency,
+      reasoningEffort: input.reasoningEffort ?? current.reasoningEffort,
       gradingInstructions: input.gradingInstructions ?? '',
     };
     await deps.config.setConfig(AI_KEY, { ...next }, adminId);
@@ -166,6 +168,7 @@ export function createIntegrationsService(deps: IntegrationsDeps) {
         enabled: next.enabled,
         model: next.model,
         concurrency: next.concurrency,
+        reasoningEffort: next.reasoningEffort,
         apiKeyChanged: input.apiKey !== undefined && input.apiKey !== null,
         instructionsLength: next.gradingInstructions.length,
       },

@@ -153,7 +153,7 @@ test('bulk accept: the clean script is accepted, the LOW-confidence one is skipp
   const accepted = await prisma.examAttempt.findUniqueOrThrow({ where: { id: cands.good!.attemptId }, include: { questions: { include: { evaluation: true } } } });
   assert.equal(Number(accepted.totalMarks), 9);
   assert.ok(accepted.questions[0]!.evaluation?.aiScoreId);
-  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: cands.good!.candidateId } })).status, 'EVALUATED');
+  assert.equal((await prisma.candidate.findUniqueOrThrow({ where: { id: cands.good!.candidateId } })).status, 'SUBMITTED', 'status kept; evaluated is under Result');
 
   const board = await sa.get(`/api/admin/leaderboard?driveId=${drive.driveId}&sort=composite`);
   assert.equal(board.status, 200, JSON.stringify(board.body));
@@ -247,4 +247,39 @@ test('AI run skips MCQ questions', async () => {
   const done = await prisma.examAttempt.findUniqueOrThrow({ where: { id: mixed.id } });
   assert.deepEqual([done.totalMarks?.toNumber(), done.maxMarks.toNumber()], [11, 12]);
   assert.equal(await prisma.questionEvaluation.count({ where: { attemptQuestionId: mixed.questions[0]!.id } }), 0, 'no evaluator mark on the MCQ');
+});
+
+test('AI run: a blank written answer is scored 0 (TOO_SHORT) without a model call; the other is queued', async () => {
+  const role = await prisma.jobRole.create({ data: { name: `AI Blank Role ${RUN}` } });
+  const d = await createDrive(role.id, { isOpen: false, college: 'AIC4', batch: 'Nov 2026' });
+  const q = await prisma.question.create({ data: { roundId: d.roundId, text: 'Explain queues.', normalizedTextHash: `aib-${RUN}`, maxMarks: 10 } });
+  const attempt = async (key: string, text: string) => {
+    const c = await createCandidate({ candidateCode: `AI-${RUN}-${key}`, fullName: `Cand ${key} ${RUN}`, email: `${key}-${RUN}@ai.int.test`, jobRoleId: role.id, driveId: d.driveId, status: 'SUBMITTED' });
+    const at = new Date(Date.now() - 60_000);
+    return prisma.examAttempt.create({
+      data: {
+        candidateId: c.id, status: 'SUBMITTED', startedAt: new Date(at.getTime() - 30 * 60_000), endsAt: at, submittedAt: at, submitType: 'MANUAL',
+        activeSessionId: crypto.randomUUID(), startIp: '198.51.100.30', userAgent: 'int-test', maxMarks: 10,
+        questions: { create: [{ questionId: q.id, order: 1, textSnapshot: q.text, maxMarksSnapshot: 10, answer: { create: { text, wordCount: text.trim() ? 1 : 0 } } }] },
+      },
+      include: { questions: true },
+    });
+  };
+  const blank = await attempt('aiblank', '   \n ');
+  const written = await attempt('aiwritten', 'answer-good');
+
+  const before = enqueued.length;
+  const r = await start({ driveId: d.driveId });
+  assert.equal(r.queued, 2);
+  const queuedNow = enqueued.slice(before).flat();
+  assert.equal(queuedNow.length, 1, 'only the written answer becomes a model call');
+  const blankScore = await prisma.aiQuestionScore.findFirstOrThrow({ where: { attemptQuestionId: blank.questions[0]!.id } });
+  assert.equal(blankScore.status, 'DONE');
+  assert.equal(blankScore.marks?.toNumber(), 0);
+  assert.deepEqual(blankScore.concerns, ['TOO_SHORT']);
+  assert.equal(blankScore.inputTokens, 0);
+  const writtenScore = await prisma.aiQuestionScore.findFirstOrThrow({ where: { attemptQuestionId: written.questions[0]!.id } });
+  assert.deepEqual(queuedNow, [writtenScore.id], 'score ids line up with their questions');
+  const run = await prisma.aiEvaluationRun.findUniqueOrThrow({ where: { id: r.run!.id } });
+  assert.deepEqual([run.total, run.done, run.status], [2, 1, 'RUNNING']);
 });
