@@ -7,6 +7,7 @@ import { ok } from '../../shared/http.js';
 import { badRequest, unauthorized } from '../../shared/errors.js';
 import type { CandidatesService } from './candidates.service.js';
 import { TEMPLATE_COLUMNS } from './candidateImport.parser.js';
+import { exportFileName, writeWorkbook } from '../results/exports.js';
 
 type Handler = (req: Request, res: Response) => Promise<unknown> | unknown;
 const wrap = (fn: Handler) => (req: Request, res: Response, next: NextFunction) => {
@@ -26,6 +27,21 @@ export function createCandidatesController(service: CandidatesService) {
   return {
     list: wrap(async (req, res) => ok(res, await service.list(req.query as never))),
     matchingIds: wrap(async (req, res) => ok(res, await service.matchingIds(req.query as never))),
+    // Rows load before the stream starts, so a refusal still gets the JSON error envelope.
+    exportList: wrap(async (req, res) => {
+      const rows = await service.exportList(req.query as never, actorId(req), ipOf(req));
+      res.status(200);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${exportFileName('candidates', null, new Date())}"`);
+      res.setHeader('Cache-Control', 'no-store');
+      await writeWorkbook(res, [
+        {
+          name: 'Candidates',
+          columns: [{ header: 'Name', width: 30 }, { header: 'Email', width: 36 }, { header: 'Roll no', width: 18 }],
+          rows: rows.map((r) => [r.fullName, r.email, r.rollNumber]),
+        },
+      ]);
+    }),
     contact: wrap(async (req, res) => ok(res, await service.revealContact((req.params as { id: string }).id, actorId(req), ipOf(req)))),
     detail: wrap(async (req, res) => ok(res, await service.detail(idOf(req), req.query as never))),
     create: wrap(async (req, res) => ok(res, await service.create(req.body, actorId(req), ipOf(req)), 201)),

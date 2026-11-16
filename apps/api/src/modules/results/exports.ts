@@ -34,7 +34,7 @@ export function sheetNames(names: string[]): string[] {
 }
 
 /** `results-<role>-<YYYY-MM-DD>.xlsx`, the date in India time. */
-export function exportFileName(kind: 'results' | 'activity', roleName: string | null, at: Date): string {
+export function exportFileName(kind: 'results' | 'activity' | 'candidates', roleName: string | null, at: Date): string {
   const slug = roleName ? roleName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'role' : 'all';
   const ist = new Date(at.getTime() + 330 * 60_000).toISOString().slice(0, 10);
   return `${kind}-${slug}-${ist}.xlsx`;

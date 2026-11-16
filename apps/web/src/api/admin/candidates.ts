@@ -134,6 +134,9 @@ export interface CandidateEdit {
 
 export const CANDIDATE_TEMPLATE_URL = '/api/admin/candidates/template.csv';
 
+/** XLSX of name, email and roll number for every candidate matching the filters (list sort order). */
+export const candidateExportUrl = (f: CandidateFilters) => `/api/admin/candidates/export.xlsx?${candidateQuery(f).toString()}`;
+
 export function useCandidates(f: CandidateFilters, page: number, pageSize: number) {
   const q = candidateQuery(f, page, pageSize);
   return useQuery({

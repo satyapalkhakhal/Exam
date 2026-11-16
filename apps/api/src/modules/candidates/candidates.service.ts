@@ -204,6 +204,8 @@ export const PREVIEW_TTL_SECONDS = 30 * 60;
 export const ACTIVITY_PAGE_SIZE = 50;
 export const previewKey = (id: string): string => `exam:import:${id}`;
 const ENTITY = 'candidate';
+/** Rows in one candidate export; above this the filters must be narrowed. */
+const CANDIDATE_EXPORT_MAX = 10_000;
 
 const num = (n: Num): number | null => (n === null ? null : typeof n === 'number' ? n : n.toNumber());
 
@@ -300,6 +302,19 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
     const { total, rows } = await repo.matchingIds(query, await flaggedRestriction(query));
     if (total > CANDIDATE_BULK_MAX) throw badRequest(`More than ${CANDIDATE_BULK_MAX} candidates match. Narrow the filters.`);
     return { ids: rows.map((r) => r.id), total, driveIdById: Object.fromEntries(rows.map((r) => [r.id, r.driveId])) };
+  }
+
+  /**
+   * Name, email and roll number of every candidate matching the list filters, in the
+   * list's sort order (the Export button). Emails leave unmasked, so the export is
+   * audited with the filters and row count (never the emails themselves).
+   */
+  async function exportList(query: CandidateListQuery, actorId: string, ip: string | null): Promise<{ fullName: string; email: string; rollNumber: string | null }[]> {
+    const { page: _page, pageSize: _size, ...filters } = query;
+    const { rows, total } = await repo.list({ ...query, page: 1, pageSize: CANDIDATE_EXPORT_MAX }, await flaggedRestriction(query));
+    if (total > CANDIDATE_EXPORT_MAX) throw badRequest(`More than ${CANDIDATE_EXPORT_MAX} candidates match. Narrow the filters.`);
+    await deps.audit({ adminId: actorId, action: 'CANDIDATES_EXPORTED', entity: ENTITY, metadata: { filters, count: rows.length }, ip });
+    return rows.map((r) => ({ fullName: r.fullName, email: r.email, rollNumber: r.rollNumber }));
   }
 
   async function detail(id: string, query: CandidateDetailQuery): Promise<CandidateDetailDto> {
@@ -559,7 +574,7 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
     return { imported, skipped: cached.total - imported - updated, ...(updates.length > 0 ? { updated } : {}) };
   }
 
-  return { list, matchingIds, revealContact, detail, create, update, moveToDrive, setEligibility, setLocationExempt, resetAttempt, previewImport, confirmImport };
+  return { list, matchingIds, exportList, revealContact, detail, create, update, moveToDrive, setEligibility, setLocationExempt, resetAttempt, previewImport, confirmImport };
 }
 
 export type CandidatesService = ReturnType<typeof createCandidatesService>;

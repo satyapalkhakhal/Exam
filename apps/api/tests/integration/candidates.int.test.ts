@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import bcrypt from 'bcrypt';
 import request from 'supertest';
+import ExcelJS from 'exceljs';
 import type { Express } from 'express';
 import { env } from '../../src/infrastructure/config/env.js';
 import { prisma } from '../../src/infrastructure/db/prisma.js';
@@ -698,6 +699,35 @@ test('GET /ids returns all matching ids (with driveIdById) across pages; >1000 â
   const big = await sa.get(`/api/admin/candidates/ids?driveId=${bulkRole.driveId}`);
   assert.equal(big.status, 400);
   assert.match(big.body.error.message, /More than 1000 candidates match/);
+});
+
+test('GET /export.xlsx: filtered rows in list order with full email + roll no, audited; evaluator â†’ 403', async () => {
+  const role = await createRoleWithDrive('Export Role');
+  await createCandidate({ candidateCode: 'EXP-1', fullName: 'Exp Beta', email: 'exp.beta@iitg.ac.in', rollNumber: 'R-2', driveId: role.driveId });
+  await createCandidate({ candidateCode: 'EXP-2', fullName: 'Exp Alpha', email: 'exp.alpha@iitg.ac.in', rollNumber: 'R-1', driveId: role.driveId });
+  await createCandidate({ candidateCode: 'EXP-3', fullName: 'Exp Other', email: 'exp.other@iitg.ac.in', driveId: driveB });
+  const res = await sa
+    .get(`/api/admin/candidates/export.xlsx?driveId=${role.driveId}&sort=fullName&dir=asc`)
+    .buffer(true)
+    .parse((r, cb) => {
+      const chunks: Buffer[] = [];
+      r.on('data', (c: Buffer) => chunks.push(c));
+      r.on('end', () => cb(null, Buffer.concat(chunks)));
+    });
+  assert.equal(res.status, 200);
+  assert.match(String(res.headers['content-disposition']), /candidates-all-\d{4}-\d{2}-\d{2}\.xlsx/);
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(res.body as Buffer);
+  const values = wb.worksheets[0]!.getSheetValues().slice(1).map((r) => (r as unknown[]).slice(1));
+  assert.deepEqual(values, [
+    ['Name', 'Email', 'Roll no'],
+    ['Exp Alpha', 'exp.alpha@iitg.ac.in', 'R-1'],
+    ['Exp Beta', 'exp.beta@iitg.ac.in', 'R-2'],
+  ]);
+  const audit = await prisma.adminAuditLog.findFirst({ where: { action: 'CANDIDATES_EXPORTED' }, orderBy: { createdAt: 'desc' } });
+  assert.deepEqual((audit?.metadata as { count: number }).count, 2);
+  assert.ok(!JSON.stringify(audit?.metadata).includes('@iitg.ac.in'));
+  assert.equal((await ev.get(`/api/admin/candidates/export.xlsx?driveId=${role.driveId}`)).status, 403);
 });
 
 // ---- masked email / mobile (2026-11-05) ---------------------------------------

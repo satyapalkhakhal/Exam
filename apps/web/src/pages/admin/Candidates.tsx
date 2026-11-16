@@ -3,7 +3,8 @@
 // flagged, and Min boxes on X % / XII % / CPI / Marks) sit in the column headers; the
 // academic, time-taken and marks columns sort. Selected candidates can be shortlisted or
 // rejected (which also sends the email), emailed, or moved to another job profile; "select
-// all matching" selects every page. A row opens the detail page. The import wizard lives
+// all matching" selects every page. Export downloads name, email and roll number of
+// every candidate the filters match. A row opens the detail page. The import wizard lives
 // in a dialog so the list stays the page's focus.
 
 import { useState } from 'react';
@@ -32,6 +33,7 @@ import { JOB_PROFILE_TYPE_LABELS } from '@exam/shared';
 import {
   CANDIDATE_STATUSES,
   CANDIDATE_TEMPLATE_URL,
+  candidateExportUrl,
   confirmCandidateImport,
   fetchMatchingCandidateIds,
   previewCandidateImport,
@@ -185,6 +187,14 @@ export default function Candidates() {
               <Button variant="outline" onClick={() => setMoving(true)}>Move to drive</Button>
               <Button variant="outline" onClick={() => setEmailing(true)}>Send email</Button>
             </>
+          )}
+          {/* Exports what the filters match (all pages), not just the ticked rows. */}
+          {data && data.total > 0 ? (
+            <Button asChild variant="outline" title="Name, email and roll number of every candidate matching the filters">
+              <a href={candidateExportUrl(f)}>Export ({data.total})</a>
+            </Button>
+          ) : (
+            <Button variant="outline" disabled>Export</Button>
           )}
           <Button variant="outline" onClick={() => setAdding(true)}>Add candidate</Button>
           <Button onClick={() => setImporting(true)}>Import candidates</Button>
