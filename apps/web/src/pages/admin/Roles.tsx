@@ -4,12 +4,15 @@
 // bank is shared by every college) -> drives (one college + batch: window, open
 // switch, instructions). A deactivated job profile or drive keeps its
 // candidates and results; it only drops out of the active lists.
+// Each job profile is a collapsed one-line summary (rounds, drives, open now,
+// candidates) until opened, so the page reads as a list; which ones are open is
+// remembered per viewer in localStorage (a convenience only).
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Lock } from 'lucide-react';
+import { ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Lock } from 'lucide-react';
 import { examAvailability, JOB_PROFILE_TYPES, JOB_PROFILE_TYPE_LABELS, type DriveDto, type ExamAvailability, type JobProfileType, type RoundDto } from '@exam/shared';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -293,6 +296,30 @@ function RoundSection({ role, round, actions }: { role: JobRole; round: RoundDto
 
 // ---- page ---------------------------------------------------------------------------------
 
+const EXPANDED_KEY = 'exam.jobProfiles.expanded';
+
+function loadExpanded(): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(EXPANDED_KEY);
+    const ids: unknown = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/** One-line facts for a collapsed job profile. */
+function roleSummary(role: JobRole, now: Date) {
+  const drives = role.rounds.flatMap((r) => r.drives ?? []);
+  return {
+    rounds: role.rounds.length,
+    drives: drives.length,
+    openNow: drives.filter((d) => d.active && examAvailability(d, now) === 'OPEN').length,
+  };
+}
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
 type DriveDialogState = { roundId: string; label: string; drive: DriveDto | null } | null;
 
 export default function Roles() {
@@ -305,6 +332,22 @@ export default function Roles() {
   const [copyTarget, setCopyTarget] = useState<{ roundId: string; label: string } | null>(null);
   const [driveDialog, setDriveDialog] = useState<DriveDialogState>(null);
   const [typeFilter, setTypeFilter] = useState<JobProfileType | ''>('');
+  // Collapsed by default; ids of the job profiles the viewer opened.
+  const [expanded, setExpanded] = useState<Set<string>>(loadExpanded);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(EXPANDED_KEY, JSON.stringify([...expanded]));
+    } catch {
+      /* storage unavailable: still works, just not remembered */
+    }
+  }, [expanded]);
+  const setOpen = (id: string, open: boolean) =>
+    setExpanded((cur) => {
+      const next = new Set(cur);
+      if (open) next.add(id);
+      else next.delete(id);
+      return next;
+    });
 
   const actions: RoundActions = {
     editRound: (r, label) => setRound({ round: r, label }),
@@ -317,6 +360,8 @@ export default function Roles() {
     setToggling(null);
   };
   const roles = (data ?? []).filter((r) => !typeFilter || r.type === typeFilter);
+  const allOpen = roles.length > 0 && roles.every((r) => expanded.has(r.id));
+  const now = new Date();
 
   return (
     <div className="space-y-4">
@@ -333,6 +378,16 @@ export default function Roles() {
               {JOB_PROFILE_TYPES.map((t) => <option key={t} value={t}>{JOB_PROFILE_TYPE_LABELS[t]}</option>)}
             </Select>
           </div>
+          {roles.length > 0 && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setExpanded(allOpen ? new Set() : new Set(roles.map((r) => r.id)))}
+            >
+              {allOpen ? <ChevronsDownUp className="mr-1 h-4 w-4" aria-hidden /> : <ChevronsUpDown className="mr-1 h-4 w-4" aria-hidden />}
+              {allOpen ? 'Collapse all' : 'Expand all'}
+            </Button>
+          )}
           <Button size="sm" onClick={() => setNaming('new')}>Add job profile</Button>
         </div>
       </div>
@@ -340,32 +395,60 @@ export default function Roles() {
       {isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
       {data && roles.length === 0 && <p className="text-sm text-muted-foreground">No job profiles yet.</p>}
 
-      {roles.map((r) => (
-        <article key={r.id} className="space-y-3 rounded-lg border border-border bg-card p-4" aria-label={jobProfileLabel(r)}>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-base font-semibold">{r.name}</h2>
-              <Badge variant={r.type === 'INTERNSHIP' ? 'secondary' : 'outline'}>{JOB_PROFILE_TYPE_LABELS[r.type]}</Badge>
-              {!r.active && <Badge variant="outline">Inactive</Badge>}
-              <span className="text-sm text-muted-foreground">{r.counts.candidates} candidates</span>
+      {roles.map((r) => {
+        const open = expanded.has(r.id);
+        const sum = roleSummary(r, now);
+        const bodyId = `jp-body-${r.id}`;
+        return (
+          <article key={r.id} className={`rounded-lg border border-border bg-card ${r.active ? '' : 'opacity-75'}`} aria-label={jobProfileLabel(r)}>
+            <div className="flex flex-wrap items-center justify-between gap-2 p-3">
+              {/* The whole summary is the toggle; the action buttons sit outside it. */}
+              <button
+                type="button"
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                aria-expanded={open}
+                aria-controls={bodyId}
+                onClick={() => setOpen(r.id, !open)}
+              >
+                {open ? <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden /> : <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />}
+                <h2 className="truncate text-base font-semibold">{r.name}</h2>
+                <Badge variant={r.type === 'INTERNSHIP' ? 'secondary' : 'outline'}>{JOB_PROFILE_TYPE_LABELS[r.type]}</Badge>
+                {!r.active && <Badge variant="outline">Inactive</Badge>}
+                {sum.openNow > 0 && (
+                  <Badge className="border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">{sum.openNow} open now</Badge>
+                )}
+                <span className="hidden text-sm text-muted-foreground sm:inline">
+                  {plural(sum.rounds, 'round')} · {plural(sum.drives, 'drive')} · {plural(r.counts.candidates, 'candidate')}
+                </span>
+              </button>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" onClick={() => setNaming(r)}>Edit</Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={addRound.isPending}
+                  onClick={() => addRound.mutate({ jobRoleId: r.id }, { onSuccess: () => setOpen(r.id, true) })}
+                >
+                  Add round {r.rounds.length + 1}
+                </Button>
+                {r.active ? (
+                  <Button size="sm" variant="outline" onClick={() => setToggling(r)}>Deactivate</Button>
+                ) : (
+                  <Button size="sm" variant="outline" disabled={toggle.isPending} onClick={() => toggle.mutate({ id: r.id, active: true })}>Activate</Button>
+                )}
+              </div>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" onClick={() => setNaming(r)}>Edit</Button>
-              <Button size="sm" variant="outline" disabled={addRound.isPending} onClick={() => addRound.mutate({ jobRoleId: r.id })}>
-                Add round {r.rounds.length + 1}
-              </Button>
-              {r.active ? (
-                <Button size="sm" variant="outline" onClick={() => setToggling(r)}>Deactivate</Button>
-              ) : (
-                <Button size="sm" variant="outline" disabled={toggle.isPending} onClick={() => toggle.mutate({ id: r.id, active: true })}>Activate</Button>
-              )}
-            </div>
-          </div>
-          {[...r.rounds].sort((a, b) => a.roundNumber - b.roundNumber).map((round) => (
-            <RoundSection key={round.id} role={r} round={round} actions={actions} />
-          ))}
-        </article>
-      ))}
+            {open && (
+              <div id={bodyId} className="space-y-3 border-t border-border p-3">
+                {r.rounds.length === 0 && <p className="text-sm text-muted-foreground">No rounds yet. Use "Add round 1" to set the exam duration and questions.</p>}
+                {[...r.rounds].sort((a, b) => a.roundNumber - b.roundNumber).map((round) => (
+                  <RoundSection key={round.id} role={r} round={round} actions={actions} />
+                ))}
+              </div>
+            )}
+          </article>
+        );
+      })}
       {(addRound.isError || (toggle.isError && toggling === null)) && (
         <p className="text-sm text-destructive" role="alert">{(addRound.error ?? toggle.error)?.message}</p>
       )}
