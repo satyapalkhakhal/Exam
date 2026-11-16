@@ -12,7 +12,7 @@ import { Link, useLocation } from 'react-router';
 import { LinkedFiltersChip } from '@/components/admin/LinkedFiltersChip';
 import { LINK_FILTER_VALIDATORS, filtersFromSearch, linkedFilterLabel } from '@/lib/urlFilters';
 import { useQueryClient } from '@tanstack/react-query';
-import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react';
+import { ArrowDown, ArrowUp, ArrowUpDown, Info } from 'lucide-react';
 import { ImportWizard } from '@/components/import/ImportWizard';
 import { AddCandidateDialog } from '@/components/admin/AddCandidateDialog';
 import { SendEmailDialog } from '@/components/admin/SendEmailDialog';
@@ -24,6 +24,7 @@ import { Button } from '@/components/ui/button';
 import { ClearFiltersButton } from '@/components/ui/clear-filters-button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Pagination } from '@/components/ui/pagination';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { TableHeaderFilter, TableHeaderFilterOptions, TableHeaderFilterText } from '@/components/ui/table-header-filter';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useRoles } from '@/api/admin/roles';
@@ -86,9 +87,40 @@ function SortHead({
   );
 }
 
-/** "Also applied: Backend Engineer (Rejected), Data Analyst (Submitted)". */
-const otherAppsText = (c: CandidateListItem) =>
-  c.otherApplications.map((o) => `${o.driveDisplayName} (${o.result ? RESULT_TEXT[o.result] : statusText(o.status)})`).join(', ');
+/**
+ * The person's other applications, behind an info icon next to the name (shown on hover
+ * or keyboard focus). Listing them inline stretched the Name column and pushed the rest
+ * of the table off screen.
+ */
+function OtherApplications({ c }: { c: CandidateListItem }) {
+  const n = c.otherApplications.length;
+  if (n === 0) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          className="ml-1.5 inline-flex items-center gap-0.5 rounded-full border border-border px-1.5 py-px align-middle text-[11px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+          aria-label={`Also applied to ${n} other ${n === 1 ? 'drive' : 'drives'}`}
+        >
+          <Info className="h-3 w-3" />
+          {n}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent align="start" className="w-80 max-w-sm p-3">
+        <p className="mb-2 font-medium text-foreground">Also applied to</p>
+        <ul className="space-y-1.5">
+          {c.otherApplications.map((o, i) => (
+            <li key={i} className="flex items-start justify-between gap-3">
+              <span className="text-foreground">{o.driveDisplayName}</span>
+              <span className="shrink-0">{o.result ? RESULT_TEXT[o.result] : statusText(o.status)}</span>
+            </li>
+          ))}
+        </ul>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
 
 export default function Candidates() {
   const location = useLocation();
@@ -333,10 +365,10 @@ export default function Candidates() {
                   <input type="checkbox" className="h-4 w-4 accent-primary" aria-label={`Select ${c.fullName}`} checked={selected.has(c.id)} onChange={() => toggle(c)} />
                 </TableCell>
                 <TableCell className="font-mono text-xs">{c.candidateCode}</TableCell>
-                <TableCell>
+                <TableCell className="whitespace-nowrap">
                   <Link to={`/admin/candidates/${c.id}`} className="font-medium text-primary hover:underline">{c.fullName}</Link>
+                  <OtherApplications c={c} />
                   <div className="text-xs text-muted-foreground">{c.email}</div>
-                  {c.otherApplications.length > 0 && <div className="text-xs text-muted-foreground">Also in: {otherAppsText(c)}</div>}
                 </TableCell>
                 <TableCell>
                   {c.jobRoleName}
