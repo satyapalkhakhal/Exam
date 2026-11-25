@@ -433,7 +433,7 @@ export type DispatchOutcome = 'SENT' | 'SKIPPED';
 
 const SUPERSEDED = 'Not sent: the result changed before the email went out';
 /** Copied to the CC list from Integrations. */
-const OUTCOME_TEMPLATES = new Set<EmailTemplateKey>(['SHORTLISTED', 'REJECTED']);
+const OUTCOME_TEMPLATES = new Set<EmailTemplateKey>(['SHORTLISTED', 'REJECTED', 'ASSIGNMENT']);
 /** The result a candidate must still have when the email goes out. */
 const REQUIRED_RESULT: Partial<Record<EmailTemplateKey, 'SHORTLISTED' | 'REJECTED'>> = {
   SHORTLISTED: 'SHORTLISTED',

@@ -208,7 +208,7 @@ function EmailCard({ saved }: { saved: MaskedEmailConfig }) {
             {...register('ccAddresses')}
           />
           <p id="email-cc-help" className="text-xs text-muted-foreground">
-            Comma-separated, up to {MAX_EMAIL_CC}. Every Shortlisted and Rejected email is copied to these addresses, and candidates can see them.
+            Comma-separated, up to {MAX_EMAIL_CC}. Every Shortlisted, Rejected and Round 2 assignment email is copied to these addresses, and candidates can see them.
             {ccCount > 0 && ` ${ccCount} address${ccCount === 1 ? '' : 'es'}.`}
           </p>
           {errors.ccAddresses && <p className="text-xs text-destructive">{errors.ccAddresses.message}</p>}

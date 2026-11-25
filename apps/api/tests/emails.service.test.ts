@@ -496,7 +496,7 @@ test('worker attaches the stored file and drops an ASSIGNMENT whose candidate is
   const ok = processorSetup({ template: 'ASSIGNMENT', candidateResult: 'SHORTLISTED', attachment: file }, undefined, async () => ['hr@x.test']);
   assert.equal(await ok.process('d1', { finalAttempt: false }), 'SENT');
   assert.deepEqual(ok.files, [[file]]);
-  assert.deepEqual(ok.ccs, [undefined]);
+  assert.deepEqual(ok.ccs, [['hr@x.test']]);
 
   const gone = processorSetup({ template: 'ASSIGNMENT', candidateResult: 'REJECTED', attachment: file });
   assert.equal(await gone.process('d1', { finalAttempt: false }), 'SKIPPED');
