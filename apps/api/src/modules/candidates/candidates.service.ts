@@ -62,6 +62,18 @@ export const UPDATE_FIELDS = [
 
 type Num = { toNumber(): number } | number | null;
 
+/** One row of the Candidates list export. */
+export interface CandidateExportRow {
+  fullName: string;
+  email: string;
+  rollNumber: string | null;
+  jobRole: string;
+  roundNumber: number;
+  collegeName: string;
+  collegeShortCode: string;
+  batch: string;
+}
+
 export interface CandidateRow {
   id: string;
   accountId: string;
@@ -78,7 +90,7 @@ export interface CandidateRow {
   jobRoleId: string;
   driveId: string;
   jobRole: { name: string; type: CandidateRowDto['jobProfileType'] };
-  drive: { batch: string; roundId: string; round: { roundNumber: number }; college: { shortCode: string } };
+  drive: { batch: string; roundId: string; round: { roundNumber: number }; college: { shortCode: string; name: string } };
   status: CandidateRowDto['status'];
   result: CandidateRowDto['result'];
   eligible: boolean;
@@ -306,16 +318,26 @@ export function createCandidatesService(repo: CandidatesRepository, deps: Candid
   }
 
   /**
-   * Name, email and roll number of every candidate matching the list filters, in the
-   * list's sort order (the Export button). Emails leave unmasked, so the export is
-   * audited with the filters and row count (never the emails themselves).
+   * Name, email, roll number and drive (job role, round, college, batch) of every
+   * candidate matching the list filters, in the list's sort order (the Export
+   * button). Emails leave unmasked, so the export is audited with the filters and
+   * row count (never the emails themselves).
    */
-  async function exportList(query: CandidateListQuery, actorId: string, ip: string | null): Promise<{ fullName: string; email: string; rollNumber: string | null }[]> {
+  async function exportList(query: CandidateListQuery, actorId: string, ip: string | null): Promise<CandidateExportRow[]> {
     const { page: _page, pageSize: _size, ...filters } = query;
     const { rows, total } = await repo.list({ ...query, page: 1, pageSize: CANDIDATE_EXPORT_MAX }, await flaggedRestriction(query));
     if (total > CANDIDATE_EXPORT_MAX) throw badRequest(`More than ${CANDIDATE_EXPORT_MAX} candidates match. Narrow the filters.`);
     await deps.audit({ adminId: actorId, action: 'CANDIDATES_EXPORTED', entity: ENTITY, metadata: { filters, count: rows.length }, ip });
-    return rows.map((r) => ({ fullName: r.fullName, email: r.email, rollNumber: r.rollNumber }));
+    return rows.map((r) => ({
+      fullName: r.fullName,
+      email: r.email,
+      rollNumber: r.rollNumber,
+      jobRole: r.jobRole.name,
+      roundNumber: r.drive.round.roundNumber,
+      collegeName: r.drive.college.name,
+      collegeShortCode: r.drive.college.shortCode,
+      batch: r.drive.batch,
+    }));
   }
 
   async function detail(id: string, query: CandidateDetailQuery): Promise<CandidateDetailDto> {

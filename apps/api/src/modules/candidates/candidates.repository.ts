@@ -26,7 +26,7 @@ import type { ExistingAccount } from './candidateImport.parser.js';
 
 const include = {
   jobRole: { select: { name: true, type: true } },
-  drive: { select: { batch: true, roundId: true, round: { select: { roundNumber: true } }, college: { select: { shortCode: true } } } },
+  drive: { select: { batch: true, roundId: true, round: { select: { roundNumber: true } }, college: { select: { shortCode: true, name: true } } } },
 } as const;
 /** The same select for a sibling/other entry, to build its drive display name. */
 const driveNameSelect = {

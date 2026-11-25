@@ -717,8 +717,8 @@ test('GET /ids returns all matching ids (with driveIdById) across pages; >1000 �
   assert.match(big.body.error.message, /More than 1000 candidates match/);
 });
 
-test('GET /export.xlsx: filtered rows in list order with full email + roll no, audited; evaluator → 403', async () => {
-  const role = await createRoleWithDrive('Export Role');
+test('GET /export.xlsx: filtered rows in list order with full email + roll no + drive, audited; evaluator → 403', async () => {
+  const role = await createRoleWithDrive('Export Role', { roundNumber: 2, college: 'EXPC', batch: 'Exp 2026' });
   await createCandidate({ candidateCode: 'EXP-1', fullName: 'Exp Beta', email: 'exp.beta@iitg.ac.in', rollNumber: 'R-2', driveId: role.driveId });
   await createCandidate({ candidateCode: 'EXP-2', fullName: 'Exp Alpha', email: 'exp.alpha@iitg.ac.in', rollNumber: 'R-1', driveId: role.driveId });
   await createCandidate({ candidateCode: 'EXP-3', fullName: 'Exp Other', email: 'exp.other@iitg.ac.in', driveId: driveB });
@@ -736,9 +736,9 @@ test('GET /export.xlsx: filtered rows in list order with full email + roll no, a
   await wb.xlsx.load(res.body as Buffer);
   const values = wb.worksheets[0]!.getSheetValues().slice(1).map((r) => (r as unknown[]).slice(1));
   assert.deepEqual(values, [
-    ['Name', 'Email', 'Roll no'],
-    ['Exp Alpha', 'exp.alpha@iitg.ac.in', 'R-1'],
-    ['Exp Beta', 'exp.beta@iitg.ac.in', 'R-2'],
+    ['Name', 'Email', 'Roll no', 'Job role', 'Round', 'College', 'College code', 'Batch'],
+    ['Exp Alpha', 'exp.alpha@iitg.ac.in', 'R-1', 'Export Role', 2, 'College EXPC', 'EXPC', 'Exp 2026'],
+    ['Exp Beta', 'exp.beta@iitg.ac.in', 'R-2', 'Export Role', 2, 'College EXPC', 'EXPC', 'Exp 2026'],
   ]);
   const audit = await prisma.adminAuditLog.findFirst({ where: { action: 'CANDIDATES_EXPORTED' }, orderBy: { createdAt: 'desc' } });
   assert.deepEqual((audit?.metadata as { count: number }).count, 2);

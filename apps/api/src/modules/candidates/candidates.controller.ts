@@ -37,8 +37,17 @@ export function createCandidatesController(service: CandidatesService) {
       await writeWorkbook(res, [
         {
           name: 'Candidates',
-          columns: [{ header: 'Name', width: 30 }, { header: 'Email', width: 36 }, { header: 'Roll no', width: 18 }],
-          rows: rows.map((r) => [r.fullName, r.email, r.rollNumber]),
+          columns: [
+            { header: 'Name', width: 30 },
+            { header: 'Email', width: 36 },
+            { header: 'Roll no', width: 18 },
+            { header: 'Job role', width: 24 },
+            { header: 'Round', width: 8 },
+            { header: 'College', width: 36 },
+            { header: 'College code', width: 14 },
+            { header: 'Batch', width: 16 },
+          ],
+          rows: rows.map((r) => [r.fullName, r.email, r.rollNumber, r.jobRole, r.roundNumber, r.collegeName, r.collegeShortCode, r.batch]),
         },
       ]);
     }),
