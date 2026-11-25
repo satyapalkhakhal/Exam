@@ -1,5 +1,5 @@
 // modules/emails/emails.repository.ts
-// email_dispatches plus the reads the email service needs (candidates with their
+// email_dispatches and email_attachments, plus the reads the email service needs (candidates with their
 // current attempt, template save info, the admin's own address). The dispatch
 // inserts commit with their audit row. A dispatch is only ever moved on from
 // QUEUED, so a stale job cannot overwrite a finished one.
@@ -124,6 +124,7 @@ export const emailsRepository: EmailsRepository & DispatchRepository = {
           error: true,
           createdAt: true,
           sentAt: true,
+          attachment: { select: { fileName: true } },
           candidate: { select: { candidateCode: true, fullName: true } },
           sentBy: { select: { name: true } },
         },
@@ -141,6 +142,7 @@ export const emailsRepository: EmailsRepository & DispatchRepository = {
         fullName: r.candidate.fullName,
         toEmail: r.toEmail,
         subject: r.subject,
+        attachmentName: r.attachment?.fileName ?? null,
         status: r.status,
         error: r.error,
         sentByName: r.sentBy.name,
@@ -150,14 +152,39 @@ export const emailsRepository: EmailsRepository & DispatchRepository = {
     };
   },
 
+  async createAttachment(a) {
+    return prisma.emailAttachment.create({
+      data: { fileName: a.fileName, mimeType: a.mimeType, size: a.size, content: new Uint8Array(a.content), uploadedById: a.uploadedById },
+      select: { id: true, fileName: true, mimeType: true, size: true },
+    });
+  },
+
+  async findAttachment(id) {
+    return prisma.emailAttachment.findUnique({ where: { id }, select: { id: true, fileName: true, mimeType: true, size: true } });
+  },
+
   async findForSend(id) {
     const d = await prisma.emailDispatch.findUnique({
       where: { id },
-      select: { id: true, status: true, template: true, toEmail: true, subject: true, html: true, text: true, candidate: { select: { result: true } } },
+      select: {
+        id: true,
+        status: true,
+        template: true,
+        toEmail: true,
+        subject: true,
+        html: true,
+        text: true,
+        candidate: { select: { result: true } },
+        attachment: { select: { fileName: true, mimeType: true, content: true } },
+      },
     });
     if (!d) return null;
-    const { candidate, ...rest } = d;
-    return { ...rest, candidateResult: candidate.result };
+    const { candidate, attachment, ...rest } = d;
+    return {
+      ...rest,
+      candidateResult: candidate.result,
+      attachment: attachment ? { name: attachment.fileName, mimeType: attachment.mimeType, content: Buffer.from(attachment.content) } : null,
+    };
   },
 
   async markSent(id) {

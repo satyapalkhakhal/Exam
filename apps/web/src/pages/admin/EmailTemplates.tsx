@@ -1,5 +1,5 @@
 // src/pages/admin/EmailTemplates.tsx
-// Why: Super Admins edit the subject/body of the two candidate emails here, preview them
+// Why: Super Admins edit the subject/body of the candidate emails here, preview them
 // (sandboxed iframe, debounced) and send a test to themselves. The API adds the branded
 // layout; unknown {placeholders} are flagged inline because the API rejects them on save.
 

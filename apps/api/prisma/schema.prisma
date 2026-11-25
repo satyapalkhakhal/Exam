@@ -40,6 +40,7 @@ enum EmailTemplateKey {
   SUBMISSION_RECEIVED
   SHORTLISTED
   REJECTED
+  ASSIGNMENT
 }
 
 // HR's outcome for an application, kept apart from its exam progress (status).
@@ -152,6 +153,7 @@ model AdminUser {
   systemConfigsUpdated SystemConfig[]
   auditLogs            AdminAuditLog[]
   emailDispatches      EmailDispatch[]
+  emailAttachments     EmailAttachment[]
   candidateResults     Candidate[]              @relation("CandidateResultBy")
   aiRuns               AiEvaluationRun[]
 
@@ -598,18 +600,41 @@ model EmailDispatch {
   error       String?
   attempts    Int                 @default(0)
   sentById    String              @map("sent_by_id") @db.Uuid
+  /// The file sent with the email (Assignment emails only).
+  attachmentId String?            @map("attachment_id") @db.Uuid
   createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
   sentAt      DateTime?           @map("sent_at") @db.Timestamptz(6)
 
-  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Restrict)
-  sentBy    AdminUser @relation(fields: [sentById], references: [id], onDelete: Restrict)
+  candidate  Candidate        @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+  sentBy     AdminUser        @relation(fields: [sentById], references: [id], onDelete: Restrict)
+  attachment EmailAttachment? @relation(fields: [attachmentId], references: [id], onDelete: Restrict)
 
   @@index([candidateId, template])
   @@index([batchId])
   @@index([status])
   @@index([sentById])
   @@index([createdAt])
+  @@index([attachmentId])
   @@map("email_dispatches")
+}
+
+/// A file uploaded in the admin panel to go out with candidate emails (e.g. a
+/// Round 2 assignment). Kept in Postgres so every API/worker instance can read it;
+/// the type and size are checked on upload (docs/email-templates.md).
+model EmailAttachment {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fileName     String   @map("file_name")
+  mimeType     String   @map("mime_type")
+  size         Int
+  content      Bytes
+  uploadedById String   @map("uploaded_by_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  uploadedBy AdminUser       @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+  dispatches EmailDispatch[]
+
+  @@index([uploadedById])
+  @@map("email_attachments")
 }
 
 model AdminAuditLog {

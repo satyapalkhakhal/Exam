@@ -28,6 +28,7 @@ export function createEmailsController(service: EmailsService) {
     preview: wrap(async (req, res) => ok(res, await service.renderPreview(keyOf(req), req.body))),
     test: wrap(async (req, res) => ok(res, await service.sendTest(keyOf(req), req.body, adminId(req)))),
     send: wrap(async (req, res) => ok(res, await service.send(req.body, adminId(req)))),
+    uploadAttachment: wrap(async (req, res) => ok(res, await service.uploadAttachment(req.file, adminId(req)), 201)),
     list: wrap(async (req, res) => ok(res, await service.listDispatches(req.query as unknown as EmailDispatchListQuery))),
   };
 }

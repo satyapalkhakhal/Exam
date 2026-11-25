@@ -4,7 +4,7 @@
 
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
-  EmailDispatchDto, EmailDispatchListQuery, EmailPreviewInput, EmailRenderedDto, EmailSendInput, EmailSendResultDto,
+  EmailAttachmentDto, EmailDispatchDto, EmailDispatchListQuery, EmailPreviewInput, EmailRenderedDto, EmailSendInput, EmailSendResultDto,
   EmailTemplateDto, EmailTemplateKey, EmailTemplateUpdateInput, Paginated,
 } from '@exam/shared';
 import { ApiError, apiFetch } from '@/lib/api';
@@ -56,6 +56,17 @@ export function useSendEmails() {
   return useMutation({
     mutationFn: (input: EmailSendInput) => apiFetch<EmailSendResultDto>('admin', '/emails/send', { method: 'POST', json: input }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'emails'] }),
+  });
+}
+
+/** Uploads the file an Assignment email carries; the returned id goes into the send. */
+export function useUploadEmailAttachment() {
+  return useMutation({
+    mutationFn: (file: File) => {
+      const body = new FormData();
+      body.append('file', file);
+      return apiFetch<EmailAttachmentDto>('admin', '/emails/attachments', { method: 'POST', body });
+    },
   });
 }
 

@@ -5,7 +5,24 @@
 // NextRound payload mapping, and plain-words skip reasons.
 
 import type { CandidateResult, DecisionSkipReason, EmailSkipReason, EmailTemplateKey, NextRoundInput } from '@exam/shared';
+import { EMAIL_ATTACHMENT_MAX_BYTES, EMAIL_ATTACHMENT_TYPES } from '@exam/shared';
 import { istInputToIso } from './istTime.js';
+
+/** "1.2 MB" / "340 KB". */
+export function formatFileSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/** Client-side check mirroring the API's upload rules. Returns an error message or null. */
+export function attachmentFileError(file: { name: string; size: number }): string | null {
+  const dot = file.name.lastIndexOf('.');
+  const ext = dot >= 0 ? file.name.slice(dot).toLowerCase() : '';
+  if (!(ext in EMAIL_ATTACHMENT_TYPES)) return 'Attach a PDF, Word, Excel, PowerPoint or ZIP file';
+  if (file.size === 0) return 'The file is empty';
+  if (file.size > EMAIL_ATTACHMENT_MAX_BYTES) return 'The file is larger than 5 MB';
+  return null;
+}
 
 /** "firstName" or "{firstName}" -> "{firstName}". */
 export function placeholderText(token: string): string {

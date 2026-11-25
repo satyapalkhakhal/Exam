@@ -7,7 +7,7 @@
 
 import { z } from 'zod';
 
-export const EMAIL_TEMPLATE_KEYS = ['SUBMISSION_RECEIVED', 'SHORTLISTED', 'REJECTED'] as const;
+export const EMAIL_TEMPLATE_KEYS = ['SUBMISSION_RECEIVED', 'SHORTLISTED', 'REJECTED', 'ASSIGNMENT'] as const;
 export const EmailTemplateKeySchema = z.enum(EMAIL_TEMPLATE_KEYS);
 export type EmailTemplateKey = z.infer<typeof EmailTemplateKeySchema>;
 
@@ -18,7 +18,29 @@ export const EMAIL_TEMPLATE_PLACEHOLDERS: Record<EmailTemplateKey, readonly stri
   SUBMISSION_RECEIVED: [...COMMON_EMAIL_PLACEHOLDERS, 'submittedAt', 'answeredCount', 'questionCount'],
   SHORTLISTED: [...COMMON_EMAIL_PLACEHOLDERS, 'roundName', 'scheduledAt', 'confirmBy'],
   REJECTED: [...COMMON_EMAIL_PLACEHOLDERS],
+  ASSIGNMENT: [...COMMON_EMAIL_PLACEHOLDERS],
 };
+
+/** Templates that carry a file uploaded when sending (the assignment). */
+export const ATTACHMENT_TEMPLATES: readonly EmailTemplateKey[] = ['ASSIGNMENT'];
+
+/** Files an admin may attach: extension -> MIME type stored and sent. */
+export const EMAIL_ATTACHMENT_TYPES: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.zip': 'application/zip',
+};
+export const EMAIL_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+
+export interface EmailAttachmentDto {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+}
 
 export const EMAIL_SUBJECT_MAX = 200;
 export const EMAIL_BODY_MAX = 5_000;
@@ -52,6 +74,8 @@ export const EmailPreviewSchema = z.object({
   subject: z.string().max(EMAIL_SUBJECT_MAX).optional(),
   body: z.string().max(EMAIL_BODY_MAX).optional(),
   nextRound: NextRoundSchema.optional(),
+  /** File name shown in the Assignment preview (the file itself is chosen when sending). */
+  attachmentName: z.string().trim().max(200).optional(),
 });
 export type EmailPreviewInput = z.infer<typeof EmailPreviewSchema>;
 
@@ -62,6 +86,8 @@ export const EmailSendSchema = z.object({
   nextRound: NextRoundSchema.optional(),
   /** Send even to candidates who already have a QUEUED or SENT email of this template. */
   resend: z.boolean().optional(),
+  /** Required by ASSIGNMENT (an id from POST /admin/emails/attachments); not allowed for the others. */
+  attachmentId: z.string().uuid().optional(),
 });
 export type EmailSendInput = z.infer<typeof EmailSendSchema>;
 
@@ -115,6 +141,8 @@ export interface EmailDispatchDto {
   fullName: string;
   toEmail: string;
   subject: string;
+  /** The attached file's name (Assignment emails). */
+  attachmentName: string | null;
   status: EmailDispatchStatus;
   error: string | null;
   sentByName: string | null;

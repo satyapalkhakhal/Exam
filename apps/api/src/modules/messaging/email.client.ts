@@ -22,6 +22,8 @@ export interface SendEmailParams {
   text: string;
   /** Copied addresses (the outcome emails' CC list). */
   cc?: string[];
+  /** Files sent with the email (the Round 2 assignment). */
+  attachments?: { name: string; mimeType: string; content: Buffer }[];
 }
 
 /** Accepts the token with or without the scheme prefix. */
@@ -46,7 +48,7 @@ function extractProviderError(body: string): { code: string; message: string } |
   }
 }
 
-export async function sendEmail({ to, subject, html, text, cc }: SendEmailParams, cfg?: EmailConfig): Promise<void> {
+export async function sendEmail({ to, subject, html, text, cc, attachments }: SendEmailParams, cfg?: EmailConfig): Promise<void> {
   const config = cfg ?? (await getEmailConfig());
   if (!hasRequiredFields(config)) throw new MessagingError('Email provider is not configured', 'NOT_CONFIGURED', false);
 
@@ -60,6 +62,9 @@ export async function sendEmail({ to, subject, html, text, cc }: SendEmailParams
     subject,
     htmlbody: html,
     textbody: text,
+    ...(attachments && attachments.length > 0
+      ? { attachments: attachments.map((a) => ({ name: a.name, mime_type: a.mimeType, content: a.content.toString('base64') })) }
+      : {}),
     track_opens: false,
     track_clicks: false,
   });

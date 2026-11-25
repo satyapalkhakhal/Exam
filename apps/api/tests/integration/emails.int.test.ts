@@ -101,7 +101,7 @@ test('templates: defaults, save, unknown placeholder rejected, reset', async () 
   const list = await sa.get('/api/admin/email-templates');
   assert.equal(list.status, 200, JSON.stringify(list.body));
   assert.ok(list.body.data.templates.every((t: { isDefault: boolean }) => t.isDefault));
-  assert.deepEqual(list.body.data.templates.map((t: { key: string }) => t.key), ['SUBMISSION_RECEIVED', 'SHORTLISTED', 'REJECTED']);
+  assert.deepEqual(list.body.data.templates.map((t: { key: string }) => t.key), ['SUBMISSION_RECEIVED', 'SHORTLISTED', 'REJECTED', 'ASSIGNMENT']);
 
   const bad = await sa.put('/api/admin/email-templates/SUBMISSION_RECEIVED').send({ subject: 'Hi', body: 'Hello {nope}' });
   assert.equal(bad.status, 400);

@@ -4,6 +4,7 @@
 // /admin, which would gate the evaluator routes mounted after it).
 
 import { Router } from 'express';
+import { uploadEmailAttachment } from '../../shared/middleware/upload.js';
 import { validate } from '../../shared/middleware/validate.js';
 import { createEmailsController } from './emails.controller.js';
 import type { EmailsService } from './emails.service.js';
@@ -31,6 +32,7 @@ export function createEmailsRouter(service: EmailsService): Router {
   const c = createEmailsController(service);
   const r = Router();
   r.post('/send', validate({ body: EmailSendSchema }), c.send);
+  r.post('/attachments', uploadEmailAttachment(), c.uploadAttachment);
   r.get('/', validate({ query: EmailDispatchListQuerySchema }), c.list);
   return r;
 }

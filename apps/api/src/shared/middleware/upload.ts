@@ -1,5 +1,5 @@
 // shared/middleware/upload.ts
-// Generic spreadsheet upload (questions now, candidates next): multer in
+// Spreadsheet upload (questions, candidates) and email attachments: multer in
 // memory, 5 MB cap, extension AND MIME allow-list. The buffer never touches
 // disk; readSheet parses it with row/column caps. Multer failures become the
 // standard error envelope.
@@ -7,6 +7,7 @@
 import path from 'node:path';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import multer from 'multer';
+import { EMAIL_ATTACHMENT_MAX_BYTES, EMAIL_ATTACHMENT_TYPES } from '@exam/shared';
 import { AppError, badRequest } from '../errors.js';
 
 export const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -31,6 +32,37 @@ const uploader = multer({
 
 export function uploadSpreadsheet(field = 'file'): RequestHandler {
   const single = uploader.single(field);
+  return (req: Request, res: Response, next: NextFunction) => {
+    single(req, res, (err: unknown) => {
+      if (!err) return next();
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') return next(new AppError(413, 'PAYLOAD_TOO_LARGE', 'The file is larger than 5 MB'));
+        return next(badRequest('Invalid upload'));
+      }
+      return next(err);
+    });
+  };
+}
+
+// ---- email attachments (Round 2 assignment) -------------------------------------
+// Same in-memory multer, keyed on the extension only: browsers report Office/zip
+// MIME types inconsistently, so the service checks the file's leading bytes instead.
+
+const ATTACHMENT_EXTS = Object.keys(EMAIL_ATTACHMENT_TYPES);
+const attachmentUploader = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: EMAIL_ATTACHMENT_MAX_BYTES, files: 1, fields: 5 },
+  fileFilter(_req, file, cb) {
+    if (!ATTACHMENT_EXTS.includes(path.extname(file.originalname).toLowerCase())) {
+      cb(badRequest(`Only ${ATTACHMENT_EXTS.join(', ')} files can be attached`));
+      return;
+    }
+    cb(null, true);
+  },
+});
+
+export function uploadEmailAttachment(field = 'file'): RequestHandler {
+  const single = attachmentUploader.single(field);
   return (req: Request, res: Response, next: NextFunction) => {
     single(req, res, (err: unknown) => {
       if (!err) return next();

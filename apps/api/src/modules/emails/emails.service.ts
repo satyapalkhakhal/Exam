@@ -7,7 +7,9 @@
 // worker (createDispatchProcessor) delivers it. Everything is injected so the
 // rules are testable without Postgres, Redis or a mail provider.
 
+import path from 'node:path';
 import type {
+  EmailAttachmentDto,
   EmailDispatchDto,
   EmailDispatchListQuery,
   EmailDispatchStatus,
@@ -23,13 +25,14 @@ import type {
   Paginated,
   JobProfileType,
 } from '@exam/shared';
-import { EMAIL_TEMPLATE_KEYS, EMAIL_TEMPLATE_PLACEHOLDERS } from '@exam/shared';
+import { ATTACHMENT_TEMPLATES, EMAIL_ATTACHMENT_TYPES, EMAIL_TEMPLATE_KEYS, EMAIL_TEMPLATE_PLACEHOLDERS } from '@exam/shared';
 import { AppError, badRequest, conflict, unauthorized } from '../../shared/errors.js';
 import { logger } from '../../infrastructure/logger/logger.js';
 import { maskEmail } from '../../shared/utils/piiMask.js';
 import {
   DEFAULT_EMAIL_TEMPLATES,
   DEFAULT_HR_CONTACT,
+  buildAssignmentEmail,
   buildRejectionEmail,
   buildShortlistEmail,
   buildSubmissionEmail,
@@ -47,7 +50,7 @@ import { EMAIL_TEMPLATE_META, placeholderDocs } from './emails.templates.js';
 
 export const TEMPLATE_CONFIG_KEY = (key: EmailTemplateKey): string => `email_template.${key}`;
 const NOT_CONFIGURED = 'Email is not set up. Configure it in Integrations.';
-const SAMPLE = { fullName: 'Ajith K K', candidateCode: 'ARC-0042', fallbackRole: 'Backend Engineer' } as const;
+const SAMPLE = { fullName: 'Ajith K K', candidateCode: 'ARC-0042', fallbackRole: 'Backend Engineer', attachmentName: 'Round 2 assignment.pdf' } as const;
 const MAX_ERROR_LENGTH = 500;
 
 export interface AuditEntry {
@@ -89,6 +92,15 @@ export interface NewDispatch {
   subject: string;
   html: string;
   text: string;
+  attachmentId?: string;
+}
+
+export interface NewAttachment {
+  fileName: string;
+  mimeType: string;
+  size: number;
+  content: Buffer;
+  uploadedById: string;
 }
 
 export interface DispatchRow {
@@ -100,6 +112,7 @@ export interface DispatchRow {
   fullName: string;
   toEmail: string;
   subject: string;
+  attachmentName: string | null;
   status: EmailDispatchStatus;
   error: string | null;
   sentByName: string | null;
@@ -118,6 +131,9 @@ export interface EmailsRepository {
   createDispatches(batchId: string, sentById: string, rows: NewDispatch[], audit: AuditEntry): Promise<string[]>;
   failDispatches(ids: string[], error: string): Promise<void>;
   listDispatches(q: EmailDispatchListQuery): Promise<{ items: DispatchRow[]; total: number }>;
+  createAttachment(a: NewAttachment): Promise<EmailAttachmentDto>;
+  /** Metadata only (never the content). */
+  findAttachment(id: string): Promise<EmailAttachmentDto | null>;
 }
 
 export interface EmailsDeps {
@@ -147,6 +163,32 @@ function toNextRound(input: NextRoundInput | undefined): NextRoundDetails | unde
     scheduledAt: input.scheduledAt ? new Date(input.scheduledAt) : undefined,
     confirmBy: input.confirmBy ? new Date(input.confirmBy) : undefined,
   };
+}
+
+// Leading bytes per stored type: PDF, OLE2 (.doc), ZIP container (.docx/.xlsx/.pptx/.zip).
+const ZIP = [0x50, 0x4b, 0x03, 0x04];
+const MAGIC: Record<string, number[]> = {
+  'application/pdf': [0x25, 0x50, 0x44, 0x46],
+  'application/msword': [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1],
+};
+const startsWith = (buf: Buffer, sig: number[]): boolean => buf.length >= sig.length && sig.every((b, i) => buf[i] === b);
+
+/**
+ * Multer hands over the name as latin1; restore UTF-8, drop any path and control
+ * characters, and cap the length (keeping the extension).
+ */
+export function cleanFileName(raw: string): string {
+  const latin1Only = !/[^\u0000-\u00ff]/.test(raw);
+  const utf8 = latin1Only ? Buffer.from(raw, 'latin1').toString('utf8') : raw;
+  const name = (utf8.includes('\uFFFD') ? raw : utf8)
+    .split(/[\\/]/)
+    .pop()!
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f"<>|:*?]/g, '')
+    .trim();
+  const ext = path.extname(name);
+  const stem = name.slice(0, name.length - ext.length).slice(0, 150).trim();
+  return `${stem || 'attachment'}${ext.toLowerCase()}`;
 }
 
 function assertKnownPlaceholders(key: EmailTemplateKey, t: Partial<EmailTemplate>): void {
@@ -213,6 +255,7 @@ export function createEmailsService(deps: EmailsDeps) {
     };
     if (key === 'SUBMISSION_RECEIVED') return buildSubmissionEmail({ ...base, submittedAt: new Date(), submitType: 'MANUAL', answeredCount: 2, questionCount: 3 }, template);
     if (key === 'REJECTED') return buildRejectionEmail(base, template);
+    if (key === 'ASSIGNMENT') return buildAssignmentEmail({ ...base, attachmentName: input.attachmentName || SAMPLE.attachmentName }, template);
     const now = Date.now();
     const sample: AssessmentSummary = {
       startedAt: new Date(now - 52.5 * 60_000),
@@ -238,7 +281,14 @@ export function createEmailsService(deps: EmailsDeps) {
     return { sentTo: to };
   }
 
-  function render(key: EmailTemplateKey, c: EmailCandidate, template: EmailTemplate, contactEmail: string, nextRound: NextRoundDetails | undefined): EmailContent {
+  function render(
+    key: EmailTemplateKey,
+    c: EmailCandidate,
+    template: EmailTemplate,
+    contactEmail: string,
+    nextRound: NextRoundDetails | undefined,
+    attachmentName: string,
+  ): EmailContent {
     const base = { fullName: c.fullName, candidateCode: c.candidateCode, jobRoleName: c.jobRoleName, jobProfileType: c.jobProfileType, roundNumber: c.roundNumber, contactEmail };
     if (key === 'SHORTLISTED') {
       const a = c.attempt;
@@ -248,6 +298,7 @@ export function createEmailsService(deps: EmailsDeps) {
       return buildShortlistEmail({ ...base, nextRound, assessment }, template);
     }
     if (key === 'REJECTED') return buildRejectionEmail(base, template);
+    if (key === 'ASSIGNMENT') return buildAssignmentEmail({ ...base, attachmentName }, template);
     const a = c.attempt;
     return buildSubmissionEmail(
       {
@@ -266,7 +317,7 @@ export function createEmailsService(deps: EmailsDeps) {
     // An anonymised candidate (purge-candidates) has no real address left.
     if (!c.eligible || c.email.toLowerCase().endsWith('@invalid')) return 'INELIGIBLE';
     if (key === 'SUBMISSION_RECEIVED' && !(c.attempt && (c.attempt.status === 'SUBMITTED' || c.attempt.status === 'AUTO_SUBMITTED'))) return 'NOT_SUBMITTED';
-    if (key === 'SHORTLISTED' && c.result !== 'SHORTLISTED') return 'NOT_SHORTLISTED';
+    if ((key === 'SHORTLISTED' || key === 'ASSIGNMENT') && c.result !== 'SHORTLISTED') return 'NOT_SHORTLISTED';
     if (key === 'REJECTED' && c.result !== 'REJECTED') return 'NOT_REJECTED';
     return alreadySent ? 'ALREADY_SENT' : null;
   }
@@ -274,6 +325,12 @@ export function createEmailsService(deps: EmailsDeps) {
   async function send(input: EmailSendInput, adminId: string): Promise<EmailSendResultDto> {
     const cfg = await deps.getEmailConfig();
     if (!deps.isChannelReady(cfg)) throw conflict(NOT_CONFIGURED, 'EMAIL_NOT_CONFIGURED');
+
+    const needsFile = ATTACHMENT_TEMPLATES.includes(input.template);
+    if (needsFile && !input.attachmentId) throw badRequest('Attach the assignment file before sending');
+    if (!needsFile && input.attachmentId) throw badRequest('This email does not take an attachment');
+    const attachment = input.attachmentId ? await repo.findAttachment(input.attachmentId) : null;
+    if (input.attachmentId && !attachment) throw badRequest('The attached file was not found. Upload it again.');
 
     const ids = [...new Set(input.candidateIds)];
     const [found, active, { template }] = await Promise.all([
@@ -295,7 +352,13 @@ export function createEmailsService(deps: EmailsDeps) {
         skipped.push({ candidateId: id, candidateCode: c?.candidateCode ?? null, fullName: c?.fullName ?? null, reason: reason ?? 'NOT_FOUND' });
         continue;
       }
-      rows.push({ template: input.template, candidateId: id, toEmail: c.email, ...render(input.template, c, template, contact, nextRound) });
+      rows.push({
+        template: input.template,
+        candidateId: id,
+        toEmail: c.email,
+        ...render(input.template, c, template, contact, nextRound, attachment?.fileName ?? ''),
+        ...(attachment ? { attachmentId: attachment.id } : {}),
+      });
     }
     if (rows.length === 0) return { batchId, queued: 0, skipped };
 
@@ -304,7 +367,7 @@ export function createEmailsService(deps: EmailsDeps) {
       action: 'EMAILS_QUEUED',
       entity: 'email_dispatch',
       entityId: batchId,
-      metadata: { template: input.template, count: rows.length, batchId },
+      metadata: { template: input.template, count: rows.length, batchId, ...(attachment ? { attachmentId: attachment.id } : {}) },
     });
     try {
       await deps.enqueue(dispatchIds);
@@ -325,7 +388,20 @@ export function createEmailsService(deps: EmailsDeps) {
     };
   }
 
-  return { listTemplates, saveTemplate, resetTemplate, renderPreview, sendTest, send, listDispatches };
+  /** Stores a file for an Assignment send. The extension was checked on upload; the content must match it. */
+  async function uploadAttachment(file: { buffer: Buffer; originalname: string; size: number } | undefined, adminId: string): Promise<EmailAttachmentDto> {
+    if (!file || file.size === 0) throw badRequest('Choose a file to attach');
+    const fileName = cleanFileName(file.originalname);
+    const mimeType = EMAIL_ATTACHMENT_TYPES[path.extname(fileName)];
+    if (!mimeType) throw badRequest('This file type cannot be attached');
+    const sig = MAGIC[mimeType] ?? ZIP;
+    if (!startsWith(file.buffer, sig)) throw badRequest('The file content does not match its extension');
+    const saved = await repo.createAttachment({ fileName, mimeType, size: file.size, content: file.buffer, uploadedById: adminId });
+    await deps.audit({ adminId, action: 'EMAIL_ATTACHMENT_UPLOADED', entity: 'email_attachment', entityId: saved.id, metadata: { size: saved.size, mimeType } });
+    return saved;
+  }
+
+  return { listTemplates, saveTemplate, resetTemplate, renderPreview, sendTest, send, listDispatches, uploadAttachment };
 }
 
 export type EmailsService = ReturnType<typeof createEmailsService>;
@@ -342,6 +418,7 @@ export interface QueuedDispatch {
   subject: string;
   html: string;
   text: string;
+  attachment: { name: string; mimeType: string; content: Buffer } | null;
 }
 
 export interface DispatchRepository {
@@ -355,13 +432,21 @@ export interface DispatchRepository {
 export type DispatchOutcome = 'SENT' | 'SKIPPED';
 
 const SUPERSEDED = 'Not sent: the result changed before the email went out';
+/** Copied to the CC list from Integrations. */
 const OUTCOME_TEMPLATES = new Set<EmailTemplateKey>(['SHORTLISTED', 'REJECTED']);
+/** The result a candidate must still have when the email goes out. */
+const REQUIRED_RESULT: Partial<Record<EmailTemplateKey, 'SHORTLISTED' | 'REJECTED'>> = {
+  SHORTLISTED: 'SHORTLISTED',
+  REJECTED: 'REJECTED',
+  ASSIGNMENT: 'SHORTLISTED',
+};
 
 /**
  * Delivers one dispatch. A row that is not QUEUED (already sent, or failed
  * earlier) is left alone, so a duplicate or stale job is a no-op. An outcome
- * email (Shortlisted / Not selected) whose candidate result has changed since it
- * was queued (re-decided, reopened, reset) is marked FAILED instead of sent.
+ * email (Shortlisted / Not selected / Assignment) whose candidate result no longer
+ * fits (re-decided, reopened, reset) is marked FAILED instead of sent. An
+ * Assignment dispatch carries its stored file as an attachment.
  * Outcome emails copy the CC list from Integrations, read at send time (minus
  * the candidate's own address). A failed send is rethrown so the queue retries
  * it; only the final attempt marks the row FAILED.
@@ -375,7 +460,8 @@ export function createDispatchProcessor(deps: {
   return async function process(dispatchId: string, opts: { finalAttempt: boolean }): Promise<DispatchOutcome> {
     const d = await deps.repo.findForSend(dispatchId);
     if (!d || d.status !== 'QUEUED') return 'SKIPPED';
-    if (OUTCOME_TEMPLATES.has(d.template) && d.candidateResult !== d.template) {
+    const required = REQUIRED_RESULT[d.template];
+    if (required && d.candidateResult !== required) {
       await deps.repo.recordFailure(d.id, SUPERSEDED, true);
       logger.info('email dispatch superseded', { dispatchId: d.id, template: d.template });
       return 'SKIPPED';
@@ -383,7 +469,14 @@ export function createDispatchProcessor(deps: {
     const to = d.toEmail.toLowerCase();
     const cc = OUTCOME_TEMPLATES.has(d.template) && deps.outcomeCc ? (await deps.outcomeCc()).filter((a) => a.toLowerCase() !== to) : [];
     try {
-      await deps.sendEmail({ to: d.toEmail, subject: d.subject, html: d.html, text: d.text, ...(cc.length ? { cc } : {}) });
+      await deps.sendEmail({
+        to: d.toEmail,
+        subject: d.subject,
+        html: d.html,
+        text: d.text,
+        ...(cc.length ? { cc } : {}),
+        ...(d.attachment ? { attachments: [d.attachment] } : {}),
+      });
     } catch (err) {
       const message = (err instanceof Error ? err.message : 'Send failed').slice(0, MAX_ERROR_LENGTH);
       await deps.repo.recordFailure(d.id, message, opts.finalAttempt);

@@ -1,26 +1,29 @@
 // src/components/admin/SendEmailDialog.tsx
 // Why: one dialog for every "send email" entry point (bulk on Candidates, per row on the
 // Leaderboard, Candidate detail). The server decides who is skipped and says why; the
-// preview uses sample data for the chosen template.
+// preview uses sample data for the chosen template. The Round 2 assignment needs a file:
+// it is uploaded as soon as it is picked and its id goes with the send.
 
 import { useMemo, useState } from 'react';
-import type { EmailTemplateKey } from '@exam/shared';
+import { ATTACHMENT_TEMPLATES, EMAIL_ATTACHMENT_TYPES, type EmailAttachmentDto, type EmailTemplateKey } from '@exam/shared';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
-import { useEmailPreview, useSendEmails } from '@/api/admin/emails';
+import { useEmailPreview, useSendEmails, useUploadEmailAttachment } from '@/api/admin/emails';
 import { EmailErrorNote } from '@/components/admin/EmailErrorNote';
 import { EmailPreviewFrame } from '@/components/admin/EmailPreviewFrame';
 import { NextRoundFields } from '@/components/admin/NextRoundFields';
-import { EMPTY_NEXT_ROUND, nextRoundLinkError, nextRoundPayload, skipReasonLabel } from '@/lib/emailTemplates';
+import { EMPTY_NEXT_ROUND, attachmentFileError, formatFileSize, nextRoundLinkError, nextRoundPayload, skipReasonLabel } from '@/lib/emailTemplates';
 import { useDebounced } from '@/lib/useDebounced';
 
 const TEMPLATE_LABEL: Record<EmailTemplateKey, string> = {
   SUBMISSION_RECEIVED: 'Submission received',
   SHORTLISTED: 'Shortlisted for next round',
   REJECTED: 'Not selected',
+  ASSIGNMENT: 'Round 2 assignment',
 };
+const ACCEPT = Object.keys(EMAIL_ATTACHMENT_TYPES).join(',');
 
 export function SendEmailDialog({
   open,
@@ -40,9 +43,13 @@ export function SendEmailDialog({
   const [template, setTemplate] = useState<EmailTemplateKey>(defaultTemplate);
   const [round, setRound] = useState(EMPTY_NEXT_ROUND);
   const [resend, setResend] = useState(false);
+  const upload = useUploadEmailAttachment();
+  const [attachment, setAttachment] = useState<EmailAttachmentDto | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const needsFile = ATTACHMENT_TEMPLATES.includes(template);
   const nextRound = useMemo(() => (template === 'SHORTLISTED' ? nextRoundPayload(round) : undefined), [template, round]);
   const linkBad = template === 'SHORTLISTED' && nextRoundLinkError(round.link) !== null;
-  const debounced = useDebounced({ nextRound }, 400);
+  const debounced = useDebounced({ nextRound, attachmentName: needsFile ? attachment?.fileName : undefined }, 400);
   const preview = useEmailPreview(template, debounced, open && !linkBad);
   const result = send.data;
   const n = candidateIds.length;
@@ -52,7 +59,19 @@ export function SendEmailDialog({
     setRound(EMPTY_NEXT_ROUND);
     setResend(false);
     setTemplate(defaultTemplate);
+    setAttachment(null);
+    setFileError(null);
+    upload.reset();
     onClose();
+  };
+
+  const pickFile = (file: File | undefined) => {
+    setAttachment(null);
+    upload.reset();
+    if (!file) return setFileError(null);
+    const err = attachmentFileError(file);
+    setFileError(err);
+    if (!err) upload.mutate(file, { onSuccess: setAttachment });
   };
 
   return (
@@ -88,6 +107,27 @@ export function SendEmailDialog({
                 </Select>
               </div>
               {template === 'SHORTLISTED' && <NextRoundFields idPrefix="se" value={round} onChange={setRound} />}
+              {needsFile && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="se-file">Assignment file</Label>
+                  <input
+                    id="se-file"
+                    type="file"
+                    accept={ACCEPT}
+                    disabled={upload.isPending}
+                    className="block w-full text-sm file:mr-3 file:rounded-md file:border file:border-border file:bg-background file:px-3 file:py-1.5 file:text-sm"
+                    onChange={(e) => pickFile(e.target.files?.[0])}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    PDF, Word, Excel, PowerPoint or ZIP, up to 5 MB. Every selected candidate receives this file, so send one role at a time.
+                  </p>
+                  <div aria-live="polite" className="text-sm">
+                    {upload.isPending && <p className="text-muted-foreground">Uploading…</p>}
+                    {attachment && <p className="text-muted-foreground">Attached: <strong className="text-foreground">{attachment.fileName}</strong> ({formatFileSize(attachment.size)})</p>}
+                    {(fileError ?? upload.error?.message) && <p role="alert" className="text-destructive">{fileError ?? upload.error?.message}</p>}
+                  </div>
+                </div>
+              )}
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" className="h-4 w-4 accent-primary" checked={resend} onChange={(e) => setResend(e.target.checked)} />
                 Send again to candidates who already received it
@@ -107,8 +147,13 @@ export function SendEmailDialog({
                 <Button type="button" variant="outline" onClick={close}>Cancel</Button>
                 <Button
                   type="button"
-                  disabled={n === 0 || linkBad || send.isPending}
-                  onClick={() => send.mutate({ template, candidateIds, nextRound, resend: resend || undefined }, { onSuccess: () => onDone?.() })}
+                  disabled={n === 0 || linkBad || send.isPending || (needsFile && !attachment)}
+                  onClick={() =>
+                    send.mutate(
+                      { template, candidateIds, nextRound, resend: resend || undefined, attachmentId: needsFile ? attachment?.id : undefined },
+                      { onSuccess: () => onDone?.() },
+                    )
+                  }
                 >
                   {send.isPending ? 'Queuing…' : `Send to ${n}`}
                 </Button>

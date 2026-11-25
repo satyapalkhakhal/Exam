@@ -12,6 +12,7 @@ import {
   type NewDispatch,
   type QueuedDispatch,
 } from '../src/modules/emails/emails.service.js';
+import { cleanFileName } from '../src/modules/emails/emails.service.js';
 import { DEFAULT_EMAIL_TEMPLATES } from '../src/modules/messaging/candidateEmails.js';
 import { MessagingError } from '../src/modules/messaging/messaging.errors.js';
 import { isChannelReady, type EmailConfig } from '../src/modules/messaging/messaging.config.js';
@@ -44,7 +45,18 @@ const cand = (n: number, over: Partial<EmailCandidate> = {}): EmailCandidate => 
   ...over,
 });
 
-function setup(opts: { candidates?: EmailCandidate[]; active?: string[]; email?: EmailConfig; enqueueFails?: boolean } = {}) {
+const ATTACHMENT_ID = '00000000-0000-4000-8000-0000000000f1';
+const ASSIGNMENT_FILE = { id: ATTACHMENT_ID, fileName: 'Data Analyst task.pdf', mimeType: 'application/pdf', size: 1234 };
+
+function setup(
+  opts: {
+    candidates?: EmailCandidate[];
+    active?: string[];
+    email?: EmailConfig;
+    enqueueFails?: boolean;
+    attachments?: { id: string; fileName: string; mimeType: string; size: number }[];
+  } = {},
+) {
   const rows = new Map<string, unknown>();
   const cfgRepo: SystemConfigRepository = {
     async findByKey(key) {
@@ -59,6 +71,9 @@ function setup(opts: { candidates?: EmailCandidate[]; active?: string[]; email?:
   const enqueued: string[][] = [];
   const failed: { ids: string[]; error: string }[] = [];
   const sent: { to: string; subject: string }[] = [];
+  const attachments = new Map<string, { id: string; fileName: string; mimeType: string; size: number }>(
+    (opts.attachments ?? []).map((a) => [a.id, a]),
+  );
   const repo: EmailsRepository = {
     async templateMeta(keys) {
       return new Map(keys.filter((k) => rows.has(k)).map((k) => [k, { updatedAt: new Date('2026-11-03T00:00:00Z'), updatedByName: 'Sam' }]));
@@ -86,6 +101,14 @@ function setup(opts: { candidates?: EmailCandidate[]; active?: string[]; email?:
     async listDispatches() {
       return { items: [], total: 0 };
     },
+    async createAttachment(a) {
+      const saved = { id: ATTACHMENT_ID, fileName: a.fileName, mimeType: a.mimeType, size: a.size };
+      attachments.set(saved.id, saved);
+      return saved;
+    },
+    async findAttachment(aid) {
+      return attachments.get(aid) ?? null;
+    },
   };
   const service = createEmailsService({
     repo,
@@ -104,7 +127,7 @@ function setup(opts: { candidates?: EmailCandidate[]; active?: string[]; email?:
     },
     newBatchId: () => 'batch-1',
   });
-  return { service, rows, audits, created, enqueued, failed, sent };
+  return { service, rows, audits, created, enqueued, failed, sent, attachments };
 }
 
 const send = (over: Partial<EmailSendInput> & Pick<EmailSendInput, 'candidateIds'>): EmailSendInput => ({ template: 'SUBMISSION_RECEIVED', ...over });
@@ -114,7 +137,7 @@ const send = (over: Partial<EmailSendInput> & Pick<EmailSendInput, 'candidateIds
 test('templates list as defaults until saved, then as custom with who saved them', async () => {
   const { service } = setup();
   const before = (await service.listTemplates()).templates;
-  assert.deepEqual(before.map((t) => t.key), ['SUBMISSION_RECEIVED', 'SHORTLISTED', 'REJECTED']);
+  assert.deepEqual(before.map((t) => t.key), ['SUBMISSION_RECEIVED', 'SHORTLISTED', 'REJECTED', 'ASSIGNMENT']);
   assert.ok(before.every((t) => t.isDefault && t.updatedAt === null));
   assert.equal(before[0]!.subject, DEFAULT_EMAIL_TEMPLATES.SUBMISSION_RECEIVED.subject);
   assert.ok(before[0]!.placeholders.some((p) => p.token === '{submittedAt}'));
@@ -296,10 +319,11 @@ function processorSetup(row: Partial<QueuedDispatch> | null, sendError?: Error, 
   const state = { status: row?.status ?? 'QUEUED', attempts: 0, error: null as string | null };
   const sent: string[] = [];
   const ccs: (string[] | undefined)[] = [];
+  const files: (unknown[] | undefined)[] = [];
   const repo: DispatchRepository = {
     async findForSend() {
       return row
-        ? { id: 'd1', status: state.status as QueuedDispatch['status'], template: 'SUBMISSION_RECEIVED', candidateResult: null, toEmail: 'c@x.test', subject: 's', html: '<p>h</p>', text: 't', ...row }
+        ? { id: 'd1', status: state.status as QueuedDispatch['status'], template: 'SUBMISSION_RECEIVED', candidateResult: null, toEmail: 'c@x.test', subject: 's', html: '<p>h</p>', text: 't', attachment: null, ...row }
         : null;
     },
     async markSent() {
@@ -320,10 +344,11 @@ function processorSetup(row: Partial<QueuedDispatch> | null, sendError?: Error, 
       if (sendError) throw sendError;
       sent.push(p.to);
       ccs.push(p.cc);
+      files.push(p.attachments);
     },
     outcomeCc,
   });
-  return { process, state, sent, ccs };
+  return { process, state, sent, ccs, files };
 }
 
 test('worker copies the CC list on outcome emails, minus the candidate, and never on the submission email', async () => {
@@ -408,4 +433,72 @@ test("emails carry the candidate's job profile type and round (round only when t
   assert.match(created[0]!.html, /Backend Engineer \(Internship\)/);
   assert.match(created[0]!.html, /Round 2/);
   assert.doesNotMatch(created[1]!.html, /\(Internship\)|>Round</);
+});
+
+// ---- Round 2 assignment ------------------------------------------------------------
+
+test('ASSIGNMENT needs an uploaded file, skips non-shortlisted candidates and links the file to each dispatch', async () => {
+  const { service, created, audits } = setup({
+    candidates: [cand(1, { result: 'SHORTLISTED', fullName: 'Asha Rao' }), cand(2, { result: 'REJECTED' }), cand(3, { result: null })],
+    attachments: [ASSIGNMENT_FILE],
+  });
+  await assert.rejects(service.send({ template: 'ASSIGNMENT', candidateIds: [id(1)] }, ADMIN), (e: AppError) => e.statusCode === 400 && /Attach the assignment/.test(e.message));
+  await assert.rejects(
+    service.send({ template: 'ASSIGNMENT', candidateIds: [id(1)], attachmentId: '00000000-0000-4000-8000-0000000000f9' }, ADMIN),
+    (e: AppError) => e.statusCode === 400 && /not found/.test(e.message),
+  );
+  await assert.rejects(
+    service.send({ template: 'REJECTED', candidateIds: [id(2)], attachmentId: ATTACHMENT_ID }, ADMIN),
+    (e: AppError) => e.statusCode === 400 && /does not take an attachment/.test(e.message),
+  );
+
+  const r = await service.send({ template: 'ASSIGNMENT', candidateIds: [id(1), id(2), id(3)], attachmentId: ATTACHMENT_ID }, ADMIN);
+  assert.equal(r.queued, 1);
+  assert.deepEqual(r.skipped.map((x) => x.reason), ['NOT_SHORTLISTED', 'NOT_SHORTLISTED']);
+  assert.equal(created[0]!.attachmentId, ATTACHMENT_ID);
+  assert.equal(created[0]!.subject, 'Congratulations! You are shortlisted for Round 2 — Backend Engineer');
+  assert.match(created[0]!.html, /Dear Asha Rao,/);
+  assert.match(created[0]!.html, /Data Analyst task\.pdf \(attached\)/);
+  assert.match(created[0]!.text, /Arihant Capital Markets Ltd\./);
+  assert.equal(audits.at(-1)!.metadata!.attachmentId, ATTACHMENT_ID);
+});
+
+test('ASSIGNMENT preview uses the given file name, or a sample one', async () => {
+  const { service } = setup();
+  assert.match((await service.renderPreview('ASSIGNMENT', {})).html, /Round 2 assignment\.pdf/);
+  assert.match((await service.renderPreview('ASSIGNMENT', { attachmentName: 'Brief.docx' })).html, /Brief\.docx/);
+});
+
+test('uploadAttachment checks the content against the extension and audits without the name', async () => {
+  const { service, audits } = setup();
+  const pdf = Buffer.from('%PDF-1.7 test');
+  const saved = await service.uploadAttachment({ buffer: pdf, originalname: 'Round 2 – task.pdf', size: pdf.length }, ADMIN);
+  assert.equal(saved.mimeType, 'application/pdf');
+  assert.equal(audits.at(-1)!.action, 'EMAIL_ATTACHMENT_UPLOADED');
+  assert.doesNotMatch(JSON.stringify(audits.at(-1)!.metadata), /task/);
+
+  const zip = Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2]);
+  assert.equal((await service.uploadAttachment({ buffer: zip, originalname: 'brief.DOCX', size: zip.length }, ADMIN)).fileName, 'brief.docx');
+
+  await assert.rejects(service.uploadAttachment({ buffer: Buffer.from('MZ evil'), originalname: 'x.pdf', size: 7 }, ADMIN), /does not match/);
+  await assert.rejects(service.uploadAttachment({ buffer: pdf, originalname: 'x.exe', size: pdf.length }, ADMIN), /cannot be attached/);
+  await assert.rejects(service.uploadAttachment(undefined, ADMIN), /Choose a file/);
+});
+
+test('cleanFileName restores UTF-8 names from multer and strips paths and odd characters', () => {
+  assert.equal(cleanFileName(Buffer.from('Tâche – 2.pdf', 'utf8').toString('latin1')), 'Tâche – 2.pdf');
+  assert.equal(cleanFileName('C:\\fakepath\\a<b>.PDF'), 'ab.pdf');
+  assert.equal(cleanFileName('.pdf'), '.pdf');
+});
+
+test('worker attaches the stored file and drops an ASSIGNMENT whose candidate is no longer shortlisted', async () => {
+  const file = { name: 'task.pdf', mimeType: 'application/pdf', content: Buffer.from('%PDF') };
+  const ok = processorSetup({ template: 'ASSIGNMENT', candidateResult: 'SHORTLISTED', attachment: file }, undefined, async () => ['hr@x.test']);
+  assert.equal(await ok.process('d1', { finalAttempt: false }), 'SENT');
+  assert.deepEqual(ok.files, [[file]]);
+  assert.deepEqual(ok.ccs, [undefined]);
+
+  const gone = processorSetup({ template: 'ASSIGNMENT', candidateResult: 'REJECTED', attachment: file });
+  assert.equal(await gone.process('d1', { finalAttempt: false }), 'SKIPPED');
+  assert.equal(gone.state.status, 'FAILED');
 });

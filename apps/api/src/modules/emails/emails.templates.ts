@@ -1,5 +1,5 @@
 // modules/emails/emails.templates.ts
-// Display metadata for the three editable templates: names, descriptions and what
+// Display metadata for the editable templates: names, descriptions and what
 // each placeholder means. The default subject/body text lives with the builders
 // in modules/messaging/candidateEmails.ts.
 
@@ -17,6 +17,11 @@ export const EMAIL_TEMPLATE_META: Record<EmailTemplateKey, { name: string; descr
   REJECTED: {
     name: 'Not selected',
     description: 'Tells a candidate they were not selected. Sent when HR rejects them, or manually.',
+  },
+  ASSIGNMENT: {
+    name: 'Round 2 assignment',
+    description:
+      'Sends a shortlisted candidate their Round 2 project assignment. Works for any role: you attach the role\'s assignment file (PDF, Word, Excel, PowerPoint or ZIP, up to 5 MB) when sending.',
   },
 };
 

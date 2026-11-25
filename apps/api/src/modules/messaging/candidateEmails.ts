@@ -4,6 +4,9 @@
 // - buildSubmissionEmail: confirms an exam was received (manual or auto submit).
 // - buildShortlistEmail: tells a shortlisted candidate they qualified for the
 //   next round.
+// - buildRejectionEmail: tells a candidate they were not selected.
+// - buildAssignmentEmail: sends a shortlisted candidate their Round 2 project
+//   assignment (the file goes as an attachment; the email names it).
 // Each returns { subject, html, text }, the shape sendEmail takes. The subject
 // and the body paragraphs come from an editable template { subject, body } with
 // {placeholder} tokens (the built-in defaults below when none is given); the
@@ -306,6 +309,28 @@ export const DEFAULT_EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = 
       'We wish you every success.',
     ].join('\n\n'),
   },
+  // Role-neutral wording from HR (2026-11-25); the assignment itself is the attached file.
+  ASSIGNMENT: {
+    subject: 'Congratulations! You are shortlisted for Round 2 — {role}',
+    body: [
+      'Dear {fullName},',
+      'Congratulations!',
+      'You have successfully cleared Round 1 of our selection process for the {role} role and have been shortlisted for Round 2.',
+      'As part of the next round, we will be evaluating your practical skills through a profile-specific project assignment.',
+      [
+        'The objective of this round is to understand:',
+        '• Practical Knowledge: How effectively you can apply your technical knowledge to real-world problems.',
+        '• Problem-Solving Ability: How you analyse challenges and approach solutions.',
+        '• Thinking & Innovation: Your ability to think independently, explore ideas and come up with innovative solutions.',
+        '• Execution Capability: How you plan, design, develop and implement the assigned project.',
+        '• Ownership: How you take responsibility for the project and drive it towards completion.',
+      ].join('\n'),
+      'Your project assignment, based on your profile, is attached to this email along with the scope, requirements and submission guidelines.',
+      'We are not just evaluating the final output; we are equally interested in understanding your thought process, approach, decision-making, technical depth and how you arrive at a solution.',
+      'Please ensure that the work submitted is your own and that you are prepared to explain your approach and implementation during the next evaluation round.',
+      'We wish you all the best for Round 2!',
+    ].join('\n\n'),
+  },
 };
 
 interface CommonParams {
@@ -552,6 +577,46 @@ export function buildRejectionEmail(p: CommonParams, template: EmailTemplate = D
     resultPortalText(),
     '',
     `Best wishes,\n${SIGN_OFF_TEAM}`,
+    '',
+    textFooter(contact, true),
+  ].join('\n');
+  return { subject, html, text };
+}
+
+// ---- 4. Round 2 assignment ---------------------------------------------------
+
+export interface AssignmentEmailParams extends CommonParams {
+  /** Name of the attached file, shown in the "Your assignment" card. */
+  attachmentName: string;
+}
+
+const SIGN_OFF_ASSIGNMENT = 'Talent Acquisition Team<br>Arihant Capital Markets Ltd.';
+
+export function buildAssignmentEmail(p: AssignmentEmailParams, template: EmailTemplate = DEFAULT_EMAIL_TEMPLATES.ASSIGNMENT): EmailContent {
+  const contact = p.contactEmail ?? DEFAULT_HR_CONTACT;
+  const values = commonValues(p, contact);
+  const subject = oneLine(fillPlaceholders(template.subject, values));
+  const paras = bodyParagraphs(fillPlaceholders(template.body, values));
+  // No Round row: it would show the round just cleared beside a "Round 2" email.
+  const rows: Row[] = [...roleRows({ ...p, roundNumber: null }), ['Candidate code', p.candidateCode], ['Assignment', `${p.attachmentName} (attached)`]];
+  const html = layout({
+    preheader: `Your Round 2 project assignment for the ${p.jobRoleName} role is attached.`,
+    heading: 'You are through to Round 2',
+    pill: 'Shortlisted',
+    contact,
+    plusStrip: true,
+    bodyHtml:
+      templateParagraphsHtml(paras) +
+      sectionLabelHtml('Your assignment') +
+      detailsTableHtml(rows) +
+      paragraphsHtml([`Regards,<br>${SIGN_OFF_ASSIGNMENT}`]),
+  });
+  const text = [
+    ...paras.flatMap((x) => [x, '']),
+    'Your assignment:',
+    detailsText(rows),
+    '',
+    `Regards,\n${SIGN_OFF_ASSIGNMENT.replace('<br>', '\n')}`,
     '',
     textFooter(contact, true),
   ].join('\n');

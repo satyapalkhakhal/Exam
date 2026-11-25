@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  insertAtCursor, unknownPlaceholders, nextRoundPayload, nextRoundLinkError, skipReasonLabel, placeholderText, EMPTY_NEXT_ROUND, decisionSkipLabel, templateForResult, decisionTitle,
+  insertAtCursor, unknownPlaceholders, nextRoundPayload, nextRoundLinkError, skipReasonLabel, placeholderText, EMPTY_NEXT_ROUND, decisionSkipLabel, templateForResult, decisionTitle, attachmentFileError, formatFileSize,
 } from '../src/lib/emailTemplates.js';
 
 test('insertAtCursor inserts and replaces a selection', () => {
@@ -57,4 +57,19 @@ test('templateForResult picks the email matching the result', () => {
 test('decisionTitle uses the count it is given (frozen at submit), singular and plural', () => {
   assert.equal(decisionTitle('SHORTLISTED', 1), 'Shortlist 1 candidate');
   assert.equal(decisionTitle('REJECTED', 12), 'Reject 12 candidates');
+});
+
+test('attachmentFileError mirrors the upload rules', () => {
+  assert.equal(attachmentFileError({ name: 'Task.PDF', size: 10 }), null);
+  assert.equal(attachmentFileError({ name: 'brief.docx', size: 5 * 1024 * 1024 }), null);
+  assert.match(attachmentFileError({ name: 'run.exe', size: 10 }) ?? '', /PDF, Word/);
+  assert.match(attachmentFileError({ name: 'noext', size: 10 }) ?? '', /PDF, Word/);
+  assert.match(attachmentFileError({ name: 'big.zip', size: 5 * 1024 * 1024 + 1 }) ?? '', /5 MB/);
+  assert.match(attachmentFileError({ name: 'a.pdf', size: 0 }) ?? '', /empty/);
+});
+
+test('formatFileSize', () => {
+  assert.equal(formatFileSize(300), '1 KB');
+  assert.equal(formatFileSize(340 * 1024), '340 KB');
+  assert.equal(formatFileSize(1.25 * 1024 * 1024), '1.3 MB');
 });

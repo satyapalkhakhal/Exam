@@ -16,6 +16,7 @@ export const TEMPLATE_NAMES: Record<EmailTemplateKey, string> = {
   SUBMISSION_RECEIVED: 'Submission received',
   SHORTLISTED: 'Shortlisted',
   REJECTED: 'Not selected',
+  ASSIGNMENT: 'Round 2 assignment',
 };
 const STATUS_TEXT: Record<EmailDispatchStatus, string> = { QUEUED: 'Queued', SENT: 'Sent', FAILED: 'Failed' };
 
@@ -77,7 +78,10 @@ export function EmailDispatchTable({ candidateId, filterable = false }: { candid
                   </TableCell>
                 )}
                 <TableCell>{TEMPLATE_NAMES[d.template]}</TableCell>
-                <TableCell>{d.subject}</TableCell>
+                <TableCell>
+                  {d.subject}
+                  {d.attachmentName && <div className="text-xs text-muted-foreground">Attached: {d.attachmentName}</div>}
+                </TableCell>
                 <TableCell>
                   <Badge variant={d.status === 'FAILED' ? 'destructive' : d.status === 'SENT' ? 'default' : 'outline'}>{STATUS_TEXT[d.status]}</Badge>
                   {d.status === 'FAILED' && d.error && <div className="mt-1 text-xs text-destructive">{d.error}</div>}
