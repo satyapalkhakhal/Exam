@@ -41,4 +41,11 @@ export const adminAuthRepository: AdminAuthRepository = {
   async markLoggedIn(id, at) {
     await prisma.adminUser.update({ where: { id }, data: { lastLoginAt: at } });
   },
+  async setPassword(id, expectedHash, passwordHash) {
+    const { count } = await prisma.adminUser.updateMany({
+      where: { id, passwordHash: expectedHash },
+      data: { passwordHash, failedLoginCount: 0, lockedUntil: null },
+    });
+    return count === 1;
+  },
 };

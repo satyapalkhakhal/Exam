@@ -18,6 +18,8 @@ import CandidateSubmitted from '@/pages/candidate/Submitted';
 
 const AdminLayout = lazy(() => import('@/components/layout/AdminLayout').then((m) => ({ default: m.AdminLayout })));
 const Login = lazy(() => import('@/pages/admin/Login'));
+const ForgotPassword = lazy(() => import('@/pages/admin/ForgotPassword'));
+const ResetPassword = lazy(() => import('@/pages/admin/ResetPassword'));
 const Dashboard = lazy(() => import('@/pages/admin/Dashboard'));
 const AdminUsers = lazy(() => import('@/pages/admin/AdminUsers'));
 const Integrations = lazy(() => import('@/pages/admin/Integrations'));
@@ -52,6 +54,8 @@ export function App() {
         </Route>
 
         <Route path="/admin/login" element={<Login />} />
+        <Route path="/admin/forgot-password" element={<ForgotPassword />} />
+        <Route path="/admin/reset-password" element={<ResetPassword />} />
         <Route element={<AdminRoute />}>
           <Route element={<AdminLayout />}>
             <Route path="/admin" element={<Dashboard />} />

@@ -2,7 +2,7 @@
 // against the exam_test database and Redis db 15, with the static OTP (no
 // messaging channel is configured in exam_test).
 
-import { test, before, after } from 'node:test';
+import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import bcrypt from 'bcrypt';
 import request from 'supertest';
@@ -11,6 +11,7 @@ import { env } from '../../src/infrastructure/config/env.js';
 import { prisma } from '../../src/infrastructure/db/prisma.js';
 import { getRedis } from '../../src/infrastructure/redis/redis.js';
 import { createApp } from '../../src/app.js';
+import { logger } from '../../src/infrastructure/logger/logger.js';
 import { ADMIN_LOGIN_LIMIT } from '../../src/shared/middleware/rateLimit.js';
 import { sha256 } from '../../src/shared/utils/hash.js';
 
@@ -289,4 +290,89 @@ test('after logout the old admin access cookie is 401 (its family is gone)', asy
   assert.equal((await agent.post('/api/admin/auth/logout')).status, 200);
   assert.equal((await request(app).get('/api/admin/auth/me').set('Cookie', oldAt)).status, 401);
   assert.equal((await request(app).get('/api/admin/users').set('Cookie', oldAt)).status, 401);
+});
+
+// ---- forgot password (2026-11-26) ------------------------------------------------
+
+const RESET = { email: 'reset@int.test', password: 'reset-pass-123' };
+
+async function resetAdmin() {
+  const keys = [...(await getRedis().keys('exam:pwreset:*')), ...(await getRedis().keys('exam:rl:*'))];
+  if (keys.length > 0) await getRedis().del(...keys);
+  // Upsert, not delete + create: earlier tests leave audit rows that reference this admin.
+  const passwordHash = await bcrypt.hash(RESET.password, 4);
+  return prisma.adminUser.upsert({
+    where: { email: RESET.email },
+    create: { email: RESET.email, name: 'Int Reset', role: 'EVALUATOR', passwordHash },
+    update: { passwordHash, active: true, failedLoginCount: 0, lockedUntil: null },
+  });
+}
+
+/** The controller does not await the request, so poll the non-production link log for it. */
+async function linkToken(info: ReturnType<typeof mock.method>): Promise<string> {
+  for (let i = 0; i < 50; i++) {
+    const call = info.mock.calls.find((c) => c.arguments[0] === 'Admin password reset link (non-production)');
+    if (call) {
+      const link = (call.arguments[1] as { link: string }).link;
+      return /#token=([\w-]+)$/.exec(link)![1]!;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.fail('no reset link was logged');
+}
+
+test('forgot-password: 200 {sent:true} for known and unknown emails alike', async () => {
+  await resetAdmin();
+  const known = await request(app).post('/api/admin/auth/forgot-password').send({ email: RESET.email });
+  const unknown = await request(app).post('/api/admin/auth/forgot-password').send({ email: 'nobody@int.test' });
+  assert.equal(known.status, 200);
+  assert.deepEqual(known.body.data, { sent: true });
+  assert.equal(unknown.status, 200);
+  assert.deepEqual(unknown.body.data, known.body.data);
+});
+
+test('reset-password with the emailed token: old password refused, new one needs the OTP, old session signed out', async () => {
+  await resetAdmin();
+  const { agent } = await signIn(RESET);
+  const info = mock.method(logger, 'info');
+  try {
+    await request(app).post('/api/admin/auth/forgot-password').send({ email: ' Reset@Int.Test ' }).expect(200);
+    const token = await linkToken(info);
+    const res = await request(app).post('/api/admin/auth/reset-password').send({ token, password: 'brand-new-pass' });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(res.body.data, { reset: true });
+  } finally {
+    info.mock.restore();
+  }
+  assert.equal((await agent.get('/api/admin/auth/me')).status, 401);
+  assert.equal((await request(app).post('/api/admin/auth/login').send(RESET)).status, 401);
+  // The sign-in above started the 60 s OTP resend cooldown; this login is a new sign-in.
+  await getRedis().del(...(await getRedis().keys('exam:otp:cd:admin_login:*')));
+  const fresh = await request(app).post('/api/admin/auth/login').send({ email: RESET.email, password: 'brand-new-pass' });
+  assert.equal(fresh.status, 200);
+  assert.equal(fresh.body.data.otpRequired, true);
+  const audit = await prisma.adminAuditLog.findMany({ where: { action: { in: ['ADMIN_PASSWORD_RESET_REQUESTED', 'ADMIN_PASSWORD_RESET'] } } });
+  assert.ok(audit.some((a) => a.action === 'ADMIN_PASSWORD_RESET'));
+});
+
+test('reset-password: a reused token → 400 RESET_LINK_INVALID', async () => {
+  await resetAdmin();
+  const info = mock.method(logger, 'info');
+  let token = '';
+  try {
+    await request(app).post('/api/admin/auth/forgot-password').send({ email: RESET.email }).expect(200);
+    token = await linkToken(info);
+  } finally {
+    info.mock.restore();
+  }
+  await request(app).post('/api/admin/auth/reset-password').send({ token, password: 'brand-new-pass' }).expect(200);
+  const again = await request(app).post('/api/admin/auth/reset-password').send({ token, password: 'other-pass-123' });
+  assert.equal(again.status, 400);
+  assert.equal(again.body.error.code, 'RESET_LINK_INVALID');
+});
+
+test('reset-password: a weak password is a validation error', async () => {
+  const res = await request(app).post('/api/admin/auth/reset-password').send({ token: 't'.repeat(43), password: 'short' });
+  assert.equal(res.status, 400);
+  assert.notEqual(res.body.error.code, 'RESET_LINK_INVALID');
 });

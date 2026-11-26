@@ -67,6 +67,22 @@ export const adminOtpVerifyLimiter = lazyLimiter({
   key: ipOf,
 });
 
+/** "Forgot password?" requests: 10 per 15 min per IP (each account also has a 60 s cooldown). */
+export const adminForgotPasswordLimiter = lazyLimiter({
+  name: 'adminForgotPassword',
+  windowMs: 15 * 60_000,
+  limit: 10,
+  key: ipOf,
+});
+
+/** Reset-link redemptions: 20 per 15 min per IP. */
+export const adminResetPasswordLimiter = lazyLimiter({
+  name: 'adminResetPassword',
+  windowMs: 15 * 60_000,
+  limit: 20,
+  key: ipOf,
+});
+
 /** Admin password step: ADMIN_LOGIN_LIMIT per 15 min per IP + email. */
 export const adminLoginLimiter = lazyLimiter({
   name: 'adminLogin',

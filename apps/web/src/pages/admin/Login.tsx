@@ -6,7 +6,7 @@ import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Navigate, useNavigate } from 'react-router';
+import { Link, Navigate, useNavigate } from 'react-router';
 import { ArihantPlusBanner } from '@/components/auth/ArihantPlusBanner';
 import { AuthPageShell, ServerErrorNotice } from '@/components/auth/AuthPageShell';
 import { OtpForm } from '@/components/auth/OtpForm';
@@ -98,6 +98,11 @@ export default function Login() {
         <div className="space-y-1.5">
           <Label htmlFor="password">Password</Label>
           <Input id="password" type="password" autoComplete="current-password" error={errors.password?.message} {...register('password')} />
+          <div className="text-right">
+            <Link to="/admin/forgot-password" className="text-sm text-primary hover:underline">
+              Forgot password?
+            </Link>
+          </div>
         </div>
         <Button type="submit" className="w-full" disabled={login.isPending}>
           {login.isPending ? 'Signing in…' : 'Continue'}

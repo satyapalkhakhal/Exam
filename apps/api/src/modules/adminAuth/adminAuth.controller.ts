@@ -29,6 +29,17 @@ export function createAdminAuthController(service: AdminAuthService) {
   return {
     login: wrap(async (req, res) => ok(res, await service.login({ ...req.body, ip: ipOf(req) }))),
     verifyOtp: wrap(async (req, res) => respondSignedIn(res, await service.verifyOtp({ ...req.body, ip: ipOf(req) }))),
+    // Answers before the lookup/email runs, so neither the reply nor its timing
+    // says whether the account exists (the service never throws).
+    forgotPassword: wrap(async (req, res) => {
+      void service.requestPasswordReset({ email: (req.body as { email: string }).email, ip: ipOf(req) });
+      return ok(res, { sent: true });
+    }),
+    resetPassword: wrap(async (req, res) => {
+      const { token, password } = req.body as { token: string; password: string };
+      await service.resetPassword({ token, password, ip: ipOf(req) });
+      return ok(res, { reset: true });
+    }),
     refresh: wrap(async (req, res) => {
       try {
         return respondSignedIn(res, await service.refresh(refreshCookie(req), ipOf(req)));

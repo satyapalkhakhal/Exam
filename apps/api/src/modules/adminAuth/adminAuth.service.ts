@@ -15,7 +15,11 @@ import bcrypt from 'bcrypt';
 import type { AdminPublic, AdminRole } from '@exam/shared';
 import { AppError, unauthorized } from '../../shared/errors.js';
 import { maskEmail } from '../../shared/utils/piiMask.js';
+import { sha256 } from '../../shared/utils/hash.js';
+import { logger } from '../../infrastructure/logger/logger.js';
 import type { AuditRecord } from '../audit/index.js';
+import { buildPasswordChangedEmail, buildPasswordResetEmail } from './passwordResetEmails.js';
+import { RESET_TTL_SECONDS, type ResetTokenStore } from './passwordResets.js';
 import {
   issueRefreshToken,
   peekRefreshFamily,
@@ -52,6 +56,12 @@ export interface AdminAuthRepository {
   lock(id: string, until: Date): Promise<void>;
   clearFailures(id: string): Promise<void>;
   markLoggedIn(id: string, at: Date): Promise<void>;
+  /**
+   * New password hash, only if the stored hash is still `expectedHash` (so a
+   * concurrent change is never overwritten); also clears failures and any lock.
+   * False when the stored hash had changed.
+   */
+  setPassword(id: string, expectedHash: string, passwordHash: string): Promise<boolean>;
 }
 
 export interface ChallengeStore {
@@ -68,6 +78,14 @@ export interface AdminAuthDeps {
     verify: (p: { purpose: 'admin_login'; subjectId: string; code: string }) => Promise<void>;
   };
   challenges: ChallengeStore;
+  /** One-time links for "Forgot password?". */
+  resets: ResetTokenStore;
+  hashPassword: (plain: string) => Promise<string>;
+  sendEmail: (msg: { to: string; subject: string; html: string; text: string }) => Promise<void>;
+  /** The web app's address (PUBLIC_WEB_URL); only its origin is used in links. */
+  webUrl: string;
+  /** Log the live link (non-production, where email may not be configured). */
+  logResetLinks?: boolean;
   now?: () => Date;
 }
 
@@ -81,6 +99,9 @@ const INVALID_MESSAGE = 'Invalid email or password.';
 const invalidCredentials = () => unauthorized(INVALID_MESSAGE);
 const accountLocked = () =>
   new AppError(423, 'ACCOUNT_LOCKED', 'Too many failed attempts. Try again in 15 minutes.');
+
+const resetLinkInvalid = () =>
+  new AppError(400, 'RESET_LINK_INVALID', 'This reset link is invalid or has expired. Request a new one.');
 
 const toPublic = (a: AdminAuthRecord): AdminPublic => ({ id: a.id, name: a.name, email: a.email, role: a.role });
 
@@ -199,7 +220,43 @@ export function createAdminAuthService(deps: AdminAuthDeps) {
     return { admin: toPublic(admin) };
   }
 
-  return { login, verifyOtp, refresh, logout, logoutAll, me };
+  /**
+   * "Forgot password?": emails an active admin a one-time link. Never throws and
+   * says nothing about whether the account exists; the route answers before it runs.
+   */
+  async function requestPasswordReset(input: { email: string; ip: string | null }): Promise<void> {
+    try {
+      const admin = await deps.repo.findByEmail(input.email);
+      if (!admin || !admin.active) return;
+      const token = await deps.resets.issue(admin.id, sha256(admin.passwordHash));
+      if (!token) return;
+      const link = `${new URL(deps.webUrl).origin}/admin/reset-password#token=${token}`;
+      if (deps.logResetLinks) logger.info('Admin password reset link (non-production)', { link });
+      await deps.sendEmail({ to: admin.email, ...buildPasswordResetEmail({ name: admin.name, link, minutes: RESET_TTL_SECONDS / 60 }) });
+      await deps.audit({ adminId: admin.id, action: 'ADMIN_PASSWORD_RESET_REQUESTED', entity: AUTH, entityId: admin.id, ip: input.ip });
+    } catch (err) {
+      logger.warn('Admin password reset request failed', { error: err instanceof Error ? err.message : 'unknown' });
+    }
+  }
+
+  /** Redeems a link: new password, lock cleared, every session signed out. */
+  async function resetPassword(input: { token: string; password: string; ip: string | null }): Promise<void> {
+    const record = await deps.resets.take(input.token);
+    if (!record) throw resetLinkInvalid();
+    const admin = await deps.repo.findById(record.adminId);
+    if (!admin || !admin.active || sha256(admin.passwordHash) !== record.pw) throw resetLinkInvalid();
+    const changed = await deps.repo.setPassword(admin.id, admin.passwordHash, await deps.hashPassword(input.password));
+    if (!changed) throw resetLinkInvalid();
+    await revokeAllSessions('admin', admin.id);
+    await deps.audit({ adminId: admin.id, action: 'ADMIN_PASSWORD_RESET', entity: AUTH, entityId: admin.id, ip: input.ip });
+    try {
+      await deps.sendEmail({ to: admin.email, ...buildPasswordChangedEmail({ name: admin.name, at: now() }) });
+    } catch (err) {
+      logger.warn('Password changed notice failed', { adminId: admin.id, error: err instanceof Error ? err.message : 'unknown' });
+    }
+  }
+
+  return { login, verifyOtp, refresh, logout, logoutAll, me, requestPasswordReset, resetPassword };
 }
 
 export type AdminAuthService = ReturnType<typeof createAdminAuthService>;

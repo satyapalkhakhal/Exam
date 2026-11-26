@@ -35,6 +35,17 @@ export const AdminVerifyOtpSchema = z.object({
 });
 export type AdminVerifyOtpInput = z.infer<typeof AdminVerifyOtpSchema>;
 
+// Self-service password reset: the request names the account, the reset carries
+// the one-time token from the emailed link and the new password.
+export const AdminForgotPasswordSchema = z.object({ email });
+export type AdminForgotPasswordInput = z.infer<typeof AdminForgotPasswordSchema>;
+
+export const AdminResetPasswordSchema = z.object({
+  token: z.string().min(20).max(200),
+  password: newPassword,
+});
+export type AdminResetPasswordInput = z.infer<typeof AdminResetPasswordSchema>;
+
 export const AdminUserCreateSchema = z.object({
   name: z.string().trim().min(1).max(120),
   email,

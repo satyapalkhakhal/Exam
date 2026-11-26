@@ -7,6 +7,7 @@ import { getRedis, setRedisClient } from '../src/infrastructure/redis/redis.js';
 import { sha256 } from '../src/shared/utils/hash.js';
 import { issueRefreshToken } from '../src/modules/adminAuth/tokens.js';
 import { AppError } from '../src/shared/errors.js';
+import { redisResetTokenStore } from '../src/modules/adminAuth/passwordResets.js';
 import {
   createAdminAuthService,
   type AdminAuthDeps,
@@ -52,12 +53,25 @@ function fakeRepo(seed: Partial<AdminAuthRecord> = {}) {
       row.lockedUntil = null;
     },
     async markLoggedIn() {},
+    async setPassword(_id, expectedHash, passwordHash) {
+      if (row.passwordHash !== expectedHash) return false;
+      row.passwordHash = passwordHash;
+      row.failedLoginCount = 0;
+      row.lockedUntil = null;
+      return true;
+    },
   };
   return { row, repo };
 }
 
+type SentEmail = { to: string; subject: string; html: string; text: string };
+
 function setup(seed: Partial<AdminAuthRecord> = {}) {
   const { row, repo } = fakeRepo(seed);
+  const sent: SentEmail[] = [];
+  const mail = { fail: false };
+  /** Runs while the new password is being hashed: between the link check and the write. */
+  const hooks: { duringHash?: () => void } = {};
   const audits: AuditRecord[] = [];
   const issued: string[] = [];
   const recipients: Array<{ email: string; mobile: string | null }> = [];
@@ -78,9 +92,19 @@ function setup(seed: Partial<AdminAuthRecord> = {}) {
       peek: async () => null,
       drop: async () => {},
     },
+    resets: redisResetTokenStore,
+    hashPassword: async (plain) => {
+      hooks.duringHash?.();
+      return bcrypt.hash(plain, 4);
+    },
+    sendEmail: async (m) => {
+      if (mail.fail) throw new Error('provider down');
+      sent.push(m);
+    },
+    webUrl: 'https://exam.test/some/path',
     now: () => NOW,
   };
-  return { row, audits, issued, recipients, service: createAdminAuthService(deps) };
+  return { row, audits, issued, recipients, sent, mail, hooks, service: createAdminAuthService(deps) };
 }
 
 const login = (s: ReturnType<typeof setup>, password: string, email = 'admin@arihant.test') =>
@@ -183,4 +207,132 @@ test('refresh-token reuse is audited as ADMIN_REFRESH_REUSE with the admin and i
   assert.equal(reuse.length, 1);
   assert.equal(reuse[0]!.adminId, 'a1');
   assert.equal(reuse[0]!.ip, '10.0.0.9');
+});
+
+// ---- forgot password (2026-11-26) ------------------------------------------------
+
+const LINK = /https:\/\/exam\.test\/admin\/reset-password#token=([\w-]{43})/;
+const tokenFrom = (m: SentEmail | undefined): string => {
+  const hit = m && LINK.exec(m.text);
+  assert.ok(hit, 'reset link in the email text');
+  return hit[1]!;
+};
+const fresh = async (seed: Partial<AdminAuthRecord> = {}) => {
+  setRedisClient(new RedisMock() as unknown as Redis);
+  await getRedis().flushall();
+  return setup(seed);
+};
+const request = (s: ReturnType<typeof setup>, email = 'admin@arihant.test') =>
+  s.service.requestPasswordReset({ email, ip: '10.0.0.1' });
+
+test('reset request: an active admin gets one email with an origin-based fragment link, audited without the token', async () => {
+  const s = await fresh();
+  await request(s);
+  assert.equal(s.sent.length, 1);
+  assert.equal(s.sent[0]!.to, 'admin@arihant.test');
+  assert.equal(s.sent[0]!.subject, 'Reset your Arihant Plus admin password');
+  assert.ok(s.sent[0]!.html.includes(`#token=${tokenFrom(s.sent[0])}`));
+  const a = s.audits.find((x) => x.action === 'ADMIN_PASSWORD_RESET_REQUESTED');
+  assert.ok(a);
+  assert.equal(a.adminId, 'a1');
+  assert.ok(!JSON.stringify(a).includes('#token='));
+});
+
+test('reset request: unknown email and inactive admin send nothing and do not throw', async () => {
+  const s = await fresh();
+  await request(s, 'nobody@arihant.test');
+  const inactive = await fresh({ active: false });
+  await request(inactive);
+  assert.equal(s.sent.length + inactive.sent.length, 0);
+});
+
+test('reset request: a locked admin still gets a link', async () => {
+  const s = await fresh({ lockedUntil: new Date(NOW.getTime() + 60_000) });
+  await request(s);
+  assert.equal(s.sent.length, 1);
+});
+
+test('reset request: a second request inside the cooldown sends nothing', async () => {
+  const s = await fresh();
+  await request(s);
+  await request(s);
+  assert.equal(s.sent.length, 1);
+});
+
+test('reset request: a failing email provider does not throw', async () => {
+  const s = await fresh();
+  s.mail.fail = true;
+  await request(s);
+  assert.equal(s.sent.length, 0);
+});
+
+test('reset: sets the new hash, clears lock and failures, revokes sessions, audits, sends a notice', async () => {
+  const s = await fresh({ lockedUntil: new Date(NOW.getTime() + 60_000), failedLoginCount: 3 });
+  const session = await issueRefreshToken('admin', 'a1');
+  await request(s);
+  await s.service.resetPassword({ token: tokenFrom(s.sent[0]), password: 'brand-new-pass', ip: '10.0.0.2' });
+  assert.ok(await bcrypt.compare('brand-new-pass', s.row.passwordHash));
+  assert.equal(s.row.lockedUntil, null);
+  assert.equal(s.row.failedLoginCount, 0);
+  assert.equal((await errOf(s.service.refresh(session, null))).code, 'UNAUTHORIZED');
+  const a = s.audits.find((x) => x.action === 'ADMIN_PASSWORD_RESET');
+  assert.ok(a);
+  assert.equal(a.adminId, 'a1');
+  assert.ok(!JSON.stringify(a).includes('brand-new-pass'));
+  assert.equal(s.sent.at(-1)!.subject, 'Your Arihant Plus admin password was changed');
+});
+
+test('reset: the same link twice → RESET_LINK_INVALID (400)', async () => {
+  const s = await fresh();
+  await request(s);
+  const token = tokenFrom(s.sent[0]);
+  await s.service.resetPassword({ token, password: 'brand-new-pass', ip: null });
+  const e = await errOf(s.service.resetPassword({ token, password: 'another-pass-1', ip: null }));
+  assert.equal(e.code, 'RESET_LINK_INVALID');
+  assert.equal(e.statusCode, 400);
+  assert.equal(e.message, 'This reset link is invalid or has expired. Request a new one.');
+});
+
+test('reset: a password changed after the link was sent kills the link', async () => {
+  const s = await fresh();
+  await request(s);
+  s.row.passwordHash = bcrypt.hashSync('set-by-super-admin', 4);
+  const e = await errOf(s.service.resetPassword({ token: tokenFrom(s.sent[0]), password: 'brand-new-pass', ip: null }));
+  assert.equal(e.code, 'RESET_LINK_INVALID');
+});
+
+test('reset: an admin deactivated after the link was sent cannot use it', async () => {
+  const s = await fresh();
+  await request(s);
+  s.row.active = false;
+  const e = await errOf(s.service.resetPassword({ token: tokenFrom(s.sent[0]), password: 'brand-new-pass', ip: null }));
+  assert.equal(e.code, 'RESET_LINK_INVALID');
+});
+
+test('reset: a failing notice email does not undo the reset', async () => {
+  const s = await fresh();
+  await request(s);
+  s.mail.fail = true;
+  await s.service.resetPassword({ token: tokenFrom(s.sent[0]), password: 'brand-new-pass', ip: null });
+  assert.ok(await bcrypt.compare('brand-new-pass', s.row.passwordHash));
+});
+
+test('after a reset, the new password still needs the OTP', async () => {
+  const s = await fresh();
+  await request(s);
+  await s.service.resetPassword({ token: tokenFrom(s.sent[0]), password: 'brand-new-pass', ip: null });
+  assert.deepEqual(await login(s, 'brand-new-pass'), { otpRequired: true, challengeId: 'challenge-1' });
+});
+
+test('reset: a Super Admin password change landing mid-reset is not overwritten', async () => {
+  const s = await fresh();
+  await request(s);
+  const bySuperAdmin = bcrypt.hashSync('set-by-super-admin', 4);
+  s.hooks.duringHash = () => {
+    s.row.passwordHash = bySuperAdmin;
+  };
+  const e = await errOf(s.service.resetPassword({ token: tokenFrom(s.sent[0]), password: 'brand-new-pass', ip: null }));
+  assert.equal(e.code, 'RESET_LINK_INVALID');
+  assert.equal(s.row.passwordHash, bySuperAdmin);
+  assert.ok(!s.audits.some((a) => a.action === 'ADMIN_PASSWORD_RESET'));
 });

@@ -24,3 +24,18 @@ export function useAdminVerifyOtp() {
       apiFetch<{ admin: AdminSelf }>('admin', '/auth/verify-otp', { method: 'POST', json: body, noRedirect: true }),
   });
 }
+
+// Self-service password reset. The request always answers { sent: true }.
+export function useAdminForgotPassword() {
+  return useMutation({
+    mutationFn: (body: { email: string }) =>
+      apiFetch<{ sent: true }>('admin', '/auth/forgot-password', { method: 'POST', json: body, noRedirect: true }),
+  });
+}
+
+export function useAdminResetPassword() {
+  return useMutation({
+    mutationFn: (body: { token: string; password: string }) =>
+      apiFetch<{ reset: true }>('admin', '/auth/reset-password', { method: 'POST', json: body, noRedirect: true }),
+  });
+}
